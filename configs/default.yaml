@@ -1,0 +1,17 @@
+width: 10.0
+height: 10.0
+source: [8.0, 5.0]
+wind_direction_deg: 180.0
+
+max_steps: 500
+goal_radius: 0.35
+hit_threshold: 0.08
+
+dt: 1.0
+forward_speed: 0.15
+turn_rate_deg: 20.0
+
+whisker_length: 0.3
+whisker_max_angle_deg: 60.0
+fixed_whisker_action: wide_scan
+sensor_alpha: 0.95
