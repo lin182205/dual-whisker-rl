@@ -2,6 +2,8 @@
 
 Minimal Python project for dual-whisker active olfaction reinforcement learning.
 
+For project goals, method route, current progress, and recommended next steps, see [PROJECT_RECORD.md](PROJECT_RECORD.md).
+
 The first milestone is a lightweight Gymnasium simulation with:
 
 - a 2D odor plume;
