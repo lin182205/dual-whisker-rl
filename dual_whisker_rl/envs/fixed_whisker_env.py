@@ -8,7 +8,6 @@ from gymnasium import spaces
 
 from dual_whisker_rl.envs.plume_env import PlumeEnv
 from dual_whisker_rl.envs.robot_model import DifferentialDriveRobot
-from dual_whisker_rl.envs.whisker_model import DualWhiskerSampler
 
 
 class FixedWhiskerPlumeEnv(PlumeEnv):
@@ -16,19 +15,14 @@ class FixedWhiskerPlumeEnv(PlumeEnv):
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         super().__init__(config)
-        cfg = config or {}
-        action_name = str(cfg.get("fixed_whisker_action", "wide_scan"))
-        if action_name not in DualWhiskerSampler.ACTIONS:
-            valid = ", ".join(DualWhiskerSampler.ACTIONS)
-            raise ValueError(f"fixed_whisker_action must be one of: {valid}")
-
-        self.fixed_whisker_action = DualWhiskerSampler.ACTIONS.index(action_name)
         self.action_space = spaces.Discrete(len(DifferentialDriveRobot.ACTIONS))
 
     def step(self, action: int):
         move_action = int(action)
+        sector = self.step_count % self.whiskers.sector_count
         return self._step_with_actions(
             move_action=move_action,
-            sense_action=self.fixed_whisker_action,
-            logged_action=move_action,
+            left_sector=sector,
+            right_sector=sector,
+            logged_action=move_action / max(1, self.action_space.n - 1),
         )

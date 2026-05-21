@@ -39,7 +39,7 @@ def evaluate_policy(
 
         while not (terminated or truncated):
             action, _ = model.predict(obs, deterministic=deterministic)
-            obs, reward, terminated, truncated, info = env.step(int(action))
+            obs, reward, terminated, truncated, info = env.step(_format_action(action))
             episode_return += float(reward)
             state = info["robot_state"]
             path_length += float(np.hypot(state.x - last_x, state.y - last_y))
@@ -102,3 +102,10 @@ def _odor_hit_stats(
             lost_steps += 1
 
     return hit_count, reacquisition_times
+
+
+def _format_action(action: Any) -> Any:
+    arr = np.asarray(action)
+    if arr.size == 1:
+        return int(arr.reshape(-1)[0])
+    return arr.astype(np.int64)

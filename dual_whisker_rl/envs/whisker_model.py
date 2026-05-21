@@ -5,8 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 
-import numpy as np
-
 from dual_whisker_rl.envs.robot_model import RobotState
 
 
@@ -19,60 +17,32 @@ class WhiskerState:
 
 
 class DualWhiskerSampler:
-    """Maps a discrete sensing action to left/right sampling points."""
-
-    ACTIONS = (
-        "center_hold",
-        "narrow_scan",
-        "wide_scan",
-        "left_focus",
-        "right_focus",
-    )
+    """Maps independent left/right sector actions to sampling points."""
 
     def __init__(
         self,
         length: float = 0.3,
-        max_angle_deg: float = 60.0,
-        scan_rate: float = 0.45,
+        sector_count: int = 10,
     ) -> None:
         self.length = float(length)
-        self.max_angle = math.radians(float(max_angle_deg))
-        self.scan_rate = float(scan_rate)
-        self.phase = 0.0
-        self.left_angle = 0.0
-        self.right_angle = 0.0
+        self.sector_count = int(sector_count)
+        if self.sector_count <= 0:
+            raise ValueError("sector_count must be positive")
+        self.left_angle = self._sector_angle(0, side="left")
+        self.right_angle = self._sector_angle(0, side="right")
 
     def reset(self) -> None:
-        self.phase = 0.0
-        self.left_angle = 0.0
-        self.right_angle = 0.0
+        self.left_angle = self._sector_angle(0, side="left")
+        self.right_angle = self._sector_angle(0, side="right")
 
-    def step(self, action_id: int, robot_state: RobotState) -> WhiskerState:
-        action = self.ACTIONS[int(action_id)]
-        self.phase += self.scan_rate
-
-        if action == "center_hold":
-            left_angle = 0.0
-            right_angle = 0.0
-        elif action == "narrow_scan":
-            amplitude = 0.35 * self.max_angle
-            left_angle = amplitude * math.sin(self.phase)
-            right_angle = -amplitude * math.sin(self.phase)
-        elif action == "wide_scan":
-            amplitude = 0.95 * self.max_angle
-            left_angle = amplitude * math.sin(self.phase)
-            right_angle = -amplitude * math.sin(self.phase)
-        elif action == "left_focus":
-            left_angle = 0.75 * self.max_angle
-            right_angle = 0.35 * self.max_angle
-        elif action == "right_focus":
-            left_angle = -0.35 * self.max_angle
-            right_angle = -0.75 * self.max_angle
-        else:
-            raise ValueError(f"Unknown whisker action: {action}")
-
-        self.left_angle = float(np.clip(left_angle, -self.max_angle, self.max_angle))
-        self.right_angle = float(np.clip(right_angle, -self.max_angle, self.max_angle))
+    def step(
+        self,
+        left_sector: int,
+        right_sector: int,
+        robot_state: RobotState,
+    ) -> WhiskerState:
+        self.left_angle = self._sector_angle(left_sector, side="left")
+        self.right_angle = self._sector_angle(right_sector, side="right")
         return self.state(robot_state)
 
     def state(self, robot_state: RobotState) -> WhiskerState:
@@ -86,3 +56,18 @@ class DualWhiskerSampler:
             robot_state.x + self.length * math.cos(angle),
             robot_state.y + self.length * math.sin(angle),
         )
+
+    def _sector_angle(self, sector: int, *, side: str) -> float:
+        sector = int(sector)
+        if not 0 <= sector < self.sector_count:
+            raise ValueError(
+                f"{side}_sector must be in [0, {self.sector_count - 1}], got {sector}"
+            )
+
+        center_fraction = (sector + 0.5) / self.sector_count
+        angle = center_fraction * math.pi
+        if side == "left":
+            return float(angle)
+        if side == "right":
+            return float(-angle)
+        raise ValueError(f"Unknown whisker side: {side}")

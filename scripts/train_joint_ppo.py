@@ -1,4 +1,4 @@
-"""Deprecated: DQN is not compatible with the current MultiDiscrete joint action space."""
+"""Train PPO on the joint movement-and-whisker control environment."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import argparse
 from pathlib import Path
 import sys
 
-from stable_baselines3 import DQN
+from stable_baselines3 import PPO
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.utils import set_random_seed
 import yaml
@@ -23,8 +23,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=ROOT / "configs" / "default.yaml")
     parser.add_argument("--timesteps", type=int, default=50_000)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--model-path", type=Path, default=ROOT / "results" / "models" / "joint_dqn.zip")
-    parser.add_argument("--log-dir", type=Path, default=ROOT / "results" / "logs" / "joint_dqn")
+    parser.add_argument("--model-path", type=Path, default=ROOT / "results" / "models" / "joint_ppo.zip")
+    parser.add_argument("--log-dir", type=Path, default=ROOT / "results" / "logs" / "joint_ppo")
     return parser.parse_args()
 
 
@@ -43,25 +43,22 @@ def make_env(config: dict, seed: int, monitor_dir: Path | None = None) -> Monito
     return Monitor(env, filename=monitor_file)
 
 
-def train(args: argparse.Namespace) -> DQN:
+def train(args: argparse.Namespace) -> PPO:
     config = load_config(args.config)
     set_random_seed(args.seed)
     env = make_env(config, args.seed, args.log_dir)
 
-    model = DQN(
+    model = PPO(
         policy="MlpPolicy",
         env=env,
-        learning_rate=1e-4,
-        buffer_size=80_000,
-        learning_starts=2_000,
+        learning_rate=3e-4,
+        n_steps=512,
         batch_size=64,
+        n_epochs=10,
         gamma=0.99,
-        train_freq=4,
-        gradient_steps=1,
-        target_update_interval=1_000,
-        exploration_fraction=0.45,
-        exploration_initial_eps=1.0,
-        exploration_final_eps=0.05,
+        gae_lambda=0.95,
+        clip_range=0.2,
+        ent_coef=0.01,
         policy_kwargs={"net_arch": [160, 160]},
         tensorboard_log=str(args.log_dir),
         seed=args.seed,
@@ -75,12 +72,11 @@ def train(args: argparse.Namespace) -> DQN:
 
 
 def main() -> None:
-    raise SystemExit(
-        "train_joint_dqn.py is deprecated because PlumeEnv now uses "
-        "MultiDiscrete([move, left_sector, right_sector]). Use "
-        "scripts\\train_joint_ppo.py instead."
-    )
+    args = parse_args()
+    train(args)
+    print(f"saved_model={args.model_path}")
 
 
 if __name__ == "__main__":
     main()
+

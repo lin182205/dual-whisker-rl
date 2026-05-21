@@ -26,7 +26,7 @@ Dual fixed electronic nose
 Single fixed electronic nose
 ```
 
-当前代码主要完成了前两个方法的最小闭环：联合控制 DQN 与固定触须 DQN。
+当前代码主要完成了前两个方法的最小闭环：联合控制 PPO 与固定触须 DQN。
 
 ## 2. 当前技术路线
 
@@ -45,7 +45,7 @@ Single fixed electronic nose
 - Stable-Baselines3 DQN 训练流程；
 - 训练、评估、指标统计和可视化输出。
 
-当前强化学习算法使用 Stable-Baselines3 的 DQN，底层神经网络由 PyTorch 实现。
+当前强化学习算法使用 Stable-Baselines3。固定触须 baseline 使用 DQN；联合控制方法使用 PPO，以支持 `MultiDiscrete([robot, left_whisker, right_whisker])` 动作空间。底层神经网络由 PyTorch 实现。
 
 ## 3. 代码结构
 
@@ -97,12 +97,12 @@ rl/
 动作空间为：
 
 ```text
-6 个机器人移动动作 x 5 个触须采样动作 = 30 个离散动作
+MultiDiscrete([6, 10, 10])
 ```
 
 机器人移动动作包括前进、左转、右转、原地左旋、原地右旋和停止。
 
-触须动作包括中心保持、窄幅扫描、宽幅扫描、左侧重点采样和右侧重点采样。
+左右触须动作相互独立，每根触须负责机器人对应侧 180 度半平面，并离散为 10 个扇区。左触须扇区中心角为 `+9, +27, ..., +171` 度；右触须扇区中心角为 `-9, -27, ..., -171` 度。
 
 观测状态当前为 14 维，包含左右传感器读数、浓度差、浓度变化、左右 hit rate、触须角度、相对风向、机器人朝向和上一动作信息。
 
@@ -110,7 +110,7 @@ rl/
 
 `FixedWhiskerPlumeEnv` 是固定触须摆动 baseline。
 
-该环境中智能体只控制机器人移动，触须按照固定策略周期性摆动。动作空间降为：
+该环境中智能体只控制机器人移动，触须按照 10 个扇区周期性扫描。动作空间降为：
 
 ```text
 6 个机器人移动动作
@@ -155,25 +155,25 @@ sensor_alpha: 0.95
 
 ### 4.5 训练流程
 
-已实现两套 DQN 训练脚本：
+已实现固定触须 DQN 与联合控制 PPO 两套训练脚本：
 
 ```powershell
 python scripts\train_fixed_whisker_dqn.py --timesteps 50000
-python scripts\train_joint_dqn.py --timesteps 50000
+python scripts\train_joint_ppo.py --timesteps 50000
 ```
 
 默认模型输出：
 
 ```text
 results/models/fixed_whisker_dqn.zip
-results/models/joint_dqn.zip
+results/models/joint_ppo.zip
 ```
 
 默认日志输出：
 
 ```text
 results/logs/fixed_whisker_dqn/
-results/logs/joint_dqn/
+results/logs/joint_ppo/
 ```
 
 已经做过 smoke training，证明训练流程可以运行。但 smoke training 只代表代码连通性测试，不能作为论文实验结论。
@@ -190,7 +190,7 @@ dual_whisker_rl/evaluation.py
 
 ```powershell
 python scripts\evaluate_fixed_whisker_dqn.py --episodes 50
-python scripts\evaluate_joint_dqn.py --episodes 50
+python scripts\evaluate_joint_ppo.py --episodes 50
 ```
 
 当前评估指标包括：
@@ -262,7 +262,7 @@ baseline
 
 优先级从高到低：
 
-1. 跑正式 fixed-whisker DQN 与 joint DQN 对比实验。
+1. 跑正式 fixed-whisker DQN 与 joint PPO 对比实验。
 2. 增加 `scripts/compare_results.py`，汇总评估 JSON，输出对比表。
 3. 增加多随机种子训练与评估，避免单次结果偶然。
 4. 增加规则控制 baseline，例如沿风向/横风搜索策略。
@@ -276,8 +276,8 @@ baseline
 python scripts\train_fixed_whisker_dqn.py --timesteps 50000
 python scripts\evaluate_fixed_whisker_dqn.py --episodes 50
 
-python scripts\train_joint_dqn.py --timesteps 50000
-python scripts\evaluate_joint_dqn.py --episodes 50
+python scripts\train_joint_ppo.py --timesteps 50000
+python scripts\evaluate_joint_ppo.py --episodes 50
 ```
 
 之后再做结果汇总和对照实验扩展。
@@ -289,4 +289,3 @@ python scripts\evaluate_joint_dqn.py --episodes 50
 - 修改气味羽流模型后，应重新生成气味场图和传感器响应图，检查是否仍符合任务直觉。
 - 不要把 `results/` 中的训练结果、模型和图像提交到 Git。
 - README 用于快速启动，本文档用于保存项目路线和阶段性判断。
-

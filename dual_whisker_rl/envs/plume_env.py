@@ -41,14 +41,18 @@ class PlumeEnv(gym.Env):
         )
         self.whiskers = DualWhiskerSampler(
             length=float(cfg.get("whisker_length", 0.3)),
-            max_angle_deg=float(cfg.get("whisker_max_angle_deg", 60.0)),
+            sector_count=int(cfg.get("whisker_sector_count", 10)),
         )
         sensor_alpha = float(cfg.get("sensor_alpha", 0.95))
         self.left_sensor = FirstOrderGasSensor(sensor_alpha)
         self.right_sensor = FirstOrderGasSensor(sensor_alpha)
 
-        self.action_space = spaces.Discrete(
-            len(DifferentialDriveRobot.ACTIONS) * len(DualWhiskerSampler.ACTIONS)
+        self.action_space = spaces.MultiDiscrete(
+            [
+                len(DifferentialDriveRobot.ACTIONS),
+                self.whiskers.sector_count,
+                self.whiskers.sector_count,
+            ]
         )
         self.observation_space = spaces.Box(
             low=-np.inf,
@@ -62,7 +66,7 @@ class PlumeEnv(gym.Env):
         self.prev_distance = 0.0
         self.prev_left = 0.0
         self.prev_right = 0.0
-        self.prev_action = 0
+        self.prev_action = 0.0
         self.left_hits: list[float] = []
         self.right_hits: list[float] = []
         self.trajectory: list[dict[str, Any]] = []
@@ -79,7 +83,7 @@ class PlumeEnv(gym.Env):
             self.plume.reset(seed)
 
         self.step_count = 0
-        self.prev_action = 0
+        self.prev_action = 0.0
         self.prev_left = 0.0
         self.prev_right = 0.0
         self.left_hits.clear()
@@ -99,17 +103,23 @@ class PlumeEnv(gym.Env):
         return obs, info
 
     def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
-        move_action, sense_action = self._decode_action(action)
-        return self._step_with_actions(move_action, sense_action, int(action))
+        move_action, left_sector, right_sector = self._decode_action(action)
+        return self._step_with_actions(
+            move_action,
+            left_sector,
+            right_sector,
+            self._logged_action(action),
+        )
 
     def _step_with_actions(
         self,
         move_action: int,
-        sense_action: int,
-        logged_action: int,
+        left_sector: int,
+        right_sector: int,
+        logged_action: float,
     ) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
         state = self.robot.step(move_action)
-        whisker_state = self.whiskers.step(sense_action, state)
+        whisker_state = self.whiskers.step(left_sector, right_sector, state)
 
         raw_left = self.plume.concentration(*whisker_state.left_point, t=self.step_count)
         raw_right = self.plume.concentration(*whisker_state.right_point, t=self.step_count)
@@ -136,7 +146,7 @@ class PlumeEnv(gym.Env):
         self.prev_distance = distance
         self.prev_left = left
         self.prev_right = right
-        self.prev_action = int(logged_action)
+        self.prev_action = float(logged_action)
 
         self.trajectory.append(
             {
@@ -159,7 +169,8 @@ class PlumeEnv(gym.Env):
                 "distance_to_source": distance,
                 "out_of_bounds": out_of_bounds,
                 "move_action": DifferentialDriveRobot.ACTIONS[move_action],
-                "sense_action": DualWhiskerSampler.ACTIONS[sense_action],
+                "left_sector": int(left_sector),
+                "right_sector": int(right_sector),
             }
         )
         return obs, reward, terminated, truncated, info
@@ -183,13 +194,13 @@ class PlumeEnv(gym.Env):
                 right - self.prev_right,
                 float(np.mean(self.left_hits)) if self.left_hits else 0.0,
                 float(np.mean(self.right_hits)) if self.right_hits else 0.0,
-                whisker_state.left_angle / self.whiskers.max_angle,
-                whisker_state.right_angle / self.whiskers.max_angle,
+                whisker_state.left_angle / np.pi,
+                whisker_state.right_angle / np.pi,
                 math.cos(wind_rel),
                 math.sin(wind_rel),
                 math.cos(state.heading),
                 math.sin(state.heading),
-                self.prev_action / max(1, self.action_space.n - 1),
+                self.prev_action,
             ],
             dtype=np.float32,
         )
@@ -217,10 +228,26 @@ class PlumeEnv(gym.Env):
             reward -= 50.0
         return float(reward)
 
-    def _decode_action(self, action: int) -> tuple[int, int]:
-        action = int(action)
-        sense_count = len(DualWhiskerSampler.ACTIONS)
-        return action // sense_count, action % sense_count
+    def _decode_action(self, action: Any) -> tuple[int, int, int]:
+        arr = np.asarray(action, dtype=np.int64).reshape(-1)
+        if arr.size != 3:
+            raise ValueError(
+                "PlumeEnv action must contain [move_action, left_sector, right_sector]"
+            )
+        return int(arr[0]), int(arr[1]), int(arr[2])
+
+    def _logged_action(self, action: Any) -> float:
+        move_action, left_sector, right_sector = self._decode_action(action)
+        move_scale = max(1, len(DifferentialDriveRobot.ACTIONS) - 1)
+        sector_scale = max(1, self.whiskers.sector_count - 1)
+        return float(
+            (
+                move_action / move_scale
+                + left_sector / sector_scale
+                + right_sector / sector_scale
+            )
+            / 3.0
+        )
 
     def _distance_to_source(self, x: float, y: float) -> float:
         sx, sy = self.plume.params.source

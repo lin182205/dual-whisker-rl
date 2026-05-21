@@ -10,7 +10,7 @@ The first milestone is a lightweight Gymnasium simulation with:
 - a mobile robot;
 - dual virtual whisker sampling points;
 - first-order slow-response gas sensors;
-- a discrete joint action space for movement and sensing;
+- a MultiDiscrete joint action space for movement and independent left/right whisker sectors;
 - a fixed-whisker baseline environment where the policy controls movement only;
 - a random rollout script that saves validation figures.
 
@@ -24,8 +24,8 @@ python scripts\random_rollout.py
 python scripts\fixed_whisker_baseline_rollout.py
 python scripts\train_fixed_whisker_dqn.py --timesteps 50000
 python scripts\evaluate_fixed_whisker_dqn.py --episodes 50
-python scripts\train_joint_dqn.py --timesteps 50000
-python scripts\evaluate_joint_dqn.py --episodes 50
+python scripts\train_joint_ppo.py --timesteps 50000
+python scripts\evaluate_joint_ppo.py --episodes 50
 ```
 
 VS Code workspace settings point Python to `.venv` and enable automatic virtual environment activation for new integrated terminals.

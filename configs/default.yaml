@@ -12,6 +12,5 @@ forward_speed: 0.15
 turn_rate_deg: 20.0
 
 whisker_length: 0.3
-whisker_max_angle_deg: 60.0
-fixed_whisker_action: wide_scan
+whisker_sector_count: 10
 sensor_alpha: 0.95
