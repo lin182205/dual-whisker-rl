@@ -28,6 +28,23 @@ class PlumeEnv(gym.Env):
         self.max_steps = int(cfg.get("max_steps", 500))
         self.goal_radius = float(cfg.get("goal_radius", 0.35))
         self.hit_threshold = float(cfg.get("hit_threshold", 0.08))
+        self.progress_reward_scale = float(cfg.get("progress_reward_scale", 5.0))
+        self.odor_hit_reward = float(cfg.get("odor_hit_reward", 0.02))
+        self.gradient_reward_scale = float(cfg.get("gradient_reward_scale", 0.03))
+        self.time_penalty = float(cfg.get("time_penalty", 0.03))
+        self.stop_penalty = float(cfg.get("stop_penalty", 0.05))
+        self.spin_penalty = float(cfg.get("spin_penalty", 0.02))
+        self.near_source_rewards = tuple(
+            (float(radius), float(reward))
+            for radius, reward in cfg.get(
+                "near_source_rewards",
+                (
+                    (2.0, 0.05),
+                    (1.0, 0.15),
+                    (0.5, 0.35),
+                ),
+            )
+        )
 
         source = tuple(cfg.get("source", (8.0, 5.0)))
         wind_direction = math.radians(float(cfg.get("wind_direction_deg", 180.0)))
@@ -138,7 +155,14 @@ class PlumeEnv(gym.Env):
         out_of_bounds = not (0.0 <= state.x <= self.width and 0.0 <= state.y <= self.height)
         truncated = self.step_count + 1 >= self.max_steps
 
-        reward = self._reward(distance, terminated, out_of_bounds, left, right)
+        reward = self._reward(
+            distance,
+            terminated,
+            out_of_bounds,
+            move_action,
+            left,
+            right,
+        )
         if out_of_bounds:
             terminated = True
 
@@ -215,13 +239,25 @@ class PlumeEnv(gym.Env):
         distance: float,
         reached_goal: bool,
         out_of_bounds: bool,
+        move_action: int,
         left: float,
         right: float,
     ) -> float:
-        reward = 2.0 * (self.prev_distance - distance)
-        reward += 0.2 if max(left, right) >= self.hit_threshold else 0.0
-        reward += 0.05 * abs(left - right)
-        reward -= 0.01
+        reward = self.progress_reward_scale * (self.prev_distance - distance)
+        reward += self.odor_hit_reward if max(left, right) >= self.hit_threshold else 0.0
+        reward += self.gradient_reward_scale * abs(left - right)
+        reward -= self.time_penalty
+
+        move_name = DifferentialDriveRobot.ACTIONS[int(move_action)]
+        if move_name == "stop":
+            reward -= self.stop_penalty
+        elif move_name in {"spin_left", "spin_right"}:
+            reward -= self.spin_penalty
+
+        for radius, bonus in self.near_source_rewards:
+            if distance <= radius:
+                reward += bonus
+
         if reached_goal:
             reward += 100.0
         if out_of_bounds:
