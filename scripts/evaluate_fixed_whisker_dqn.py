@@ -8,7 +8,6 @@ from pathlib import Path
 import sys
 
 import matplotlib.pyplot as plt
-import numpy as np
 from stable_baselines3 import DQN
 import yaml
 
@@ -19,6 +18,7 @@ if str(ROOT) not in sys.path:
 from dual_whisker_rl.envs import FixedWhiskerPlumeEnv
 from dual_whisker_rl.evaluation import evaluate_policy
 from dual_whisker_rl.plotting import draw_odor_field
+from dual_whisker_rl.plotting import save_sensor_response
 from dual_whisker_rl.visualization import save_trajectory_animation
 
 
@@ -67,27 +67,6 @@ def save_eval_trajectory(
     fig.tight_layout()
     fig.savefig(path, dpi=180)
     plt.close(fig)
-
-
-def save_sensor_response(trajectory: list[dict], path: Path) -> None:
-    left = np.array([row["left"] for row in trajectory])
-    right = np.array([row["right"] for row in trajectory])
-    raw_left = np.array([row["raw_left"] for row in trajectory])
-    raw_right = np.array([row["raw_right"] for row in trajectory])
-    steps = np.arange(len(left))
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    plt.figure(figsize=(8, 4))
-    plt.plot(steps, raw_left, "--", color="#4c78a8", alpha=0.5, label="left raw")
-    plt.plot(steps, raw_right, "--", color="#f58518", alpha=0.5, label="right raw")
-    plt.plot(steps, left, color="#4c78a8", label="left sensor")
-    plt.plot(steps, right, color="#f58518", label="right sensor")
-    plt.xlabel("step")
-    plt.ylabel("concentration")
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(path, dpi=180)
-    plt.close()
 
 
 def main() -> None:
