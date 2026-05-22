@@ -9,6 +9,8 @@ from typing import Any
 from matplotlib import animation
 import matplotlib.pyplot as plt
 
+from dual_whisker_rl.plotting import draw_odor_field
+
 
 def save_trajectory_animation(
     env: Any,
@@ -31,7 +33,7 @@ def save_trajectory_animation(
 
     xx, yy, zz = env.concentration_grid(resolution=120)
     fig, ax = plt.subplots(figsize=(6, 5))
-    ax.contourf(xx, yy, zz, levels=40, cmap="viridis", alpha=0.85)
+    draw_odor_field(ax, xx, yy, zz, alpha=0.9)
     sx, sy = env.plume.params.source
     ax.scatter([sx], [sy], marker="*", s=180, c="red", label="source")
     ax.set_xlim(0, env.width)

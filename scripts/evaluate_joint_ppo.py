@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
 
 from dual_whisker_rl.envs import PlumeEnv
 from dual_whisker_rl.evaluation import evaluate_policy
+from dual_whisker_rl.plotting import draw_odor_field
 from dual_whisker_rl.visualization import save_trajectory_animation
 
 
@@ -48,22 +49,22 @@ def save_eval_trajectory(
     ys = [row["y"] for row in trajectory]
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    plt.figure(figsize=(6, 5))
-    plt.contourf(xx, yy, zz, levels=40, cmap="viridis", alpha=0.85)
-    plt.plot(xs, ys, color="white", linewidth=1.5, label="joint PPO")
+    fig, ax = plt.subplots(figsize=(6, 5))
+    draw_odor_field(ax, xx, yy, zz, alpha=0.9)
+    ax.plot(xs, ys, color="white", linewidth=1.5, label="joint PPO")
     if xs and ys:
-        plt.scatter([xs[0]], [ys[0]], c="cyan", s=50, label="start")
-        plt.scatter([xs[-1]], [ys[-1]], c="black", s=50, label="end")
+        ax.scatter([xs[0]], [ys[0]], c="cyan", s=50, label="start")
+        ax.scatter([xs[-1]], [ys[-1]], c="black", s=50, label="end")
     sx, sy = env.plume.params.source
-    plt.scatter([sx], [sy], marker="*", s=180, c="red", label="source")
-    plt.xlim(0, env.width)
-    plt.ylim(0, env.height)
-    plt.xlabel("x (m)")
-    plt.ylabel("y (m)")
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(path, dpi=180)
-    plt.close()
+    ax.scatter([sx], [sy], marker="*", s=180, c="red", label="source")
+    ax.set_xlim(0, env.width)
+    ax.set_ylim(0, env.height)
+    ax.set_xlabel("x (m)")
+    ax.set_ylabel("y (m)")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
 
 
 def main() -> None:
@@ -105,4 +106,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

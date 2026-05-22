@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from dual_whisker_rl.envs import PlumeEnv
+from dual_whisker_rl.plotting import draw_odor_field
 
 
 def load_config(path: Path) -> dict:
@@ -47,41 +48,40 @@ def main() -> None:
 
 def save_plume(env: PlumeEnv, path: Path) -> None:
     xx, yy, zz = env.concentration_grid(resolution=140)
-    plt.figure(figsize=(6, 5))
-    plt.contourf(xx, yy, zz, levels=40, cmap="viridis")
-    plt.colorbar(label="odor concentration")
+    fig, ax = plt.subplots(figsize=(6, 5))
+    draw_odor_field(ax, xx, yy, zz, alpha=1.0)
     sx, sy = env.plume.params.source
-    plt.scatter([sx], [sy], marker="*", s=180, c="red", label="source")
-    plt.xlim(0, env.width)
-    plt.ylim(0, env.height)
-    plt.xlabel("x (m)")
-    plt.ylabel("y (m)")
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(path, dpi=180)
-    plt.close()
+    ax.scatter([sx], [sy], marker="*", s=180, c="red", label="source")
+    ax.set_xlim(0, env.width)
+    ax.set_ylim(0, env.height)
+    ax.set_xlabel("x (m)")
+    ax.set_ylabel("y (m)")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
 
 
 def save_trajectory(env: PlumeEnv, path: Path) -> None:
     xs = [p["x"] for p in env.trajectory]
     ys = [p["y"] for p in env.trajectory]
     xx, yy, zz = env.concentration_grid(resolution=140)
-    plt.figure(figsize=(6, 5))
-    plt.contourf(xx, yy, zz, levels=40, cmap="viridis", alpha=0.85)
-    plt.plot(xs, ys, color="white", linewidth=1.5, label="random policy")
+    fig, ax = plt.subplots(figsize=(6, 5))
+    draw_odor_field(ax, xx, yy, zz, alpha=0.9)
+    ax.plot(xs, ys, color="white", linewidth=1.5, label="random policy")
     if xs and ys:
-        plt.scatter([xs[0]], [ys[0]], c="cyan", s=50, label="start")
-        plt.scatter([xs[-1]], [ys[-1]], c="black", s=50, label="end")
+        ax.scatter([xs[0]], [ys[0]], c="cyan", s=50, label="start")
+        ax.scatter([xs[-1]], [ys[-1]], c="black", s=50, label="end")
     sx, sy = env.plume.params.source
-    plt.scatter([sx], [sy], marker="*", s=180, c="red", label="source")
-    plt.xlim(0, env.width)
-    plt.ylim(0, env.height)
-    plt.xlabel("x (m)")
-    plt.ylabel("y (m)")
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(path, dpi=180)
-    plt.close()
+    ax.scatter([sx], [sy], marker="*", s=180, c="red", label="source")
+    ax.set_xlim(0, env.width)
+    ax.set_ylim(0, env.height)
+    ax.set_xlabel("x (m)")
+    ax.set_ylabel("y (m)")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
 
 
 def save_sensor_response(env: PlumeEnv, path: Path) -> None:
