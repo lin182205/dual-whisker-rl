@@ -18,8 +18,8 @@ def save_trajectory_animation(
     path: Path,
     *,
     label: str,
-    stride: int = 5,
-    fps: int = 12,
+    stride: int = 1,
+    fps: int = 4,
 ) -> None:
     """Save an animated GIF for a robot trajectory."""
 
@@ -89,9 +89,13 @@ def save_trajectory_animation(
             [x, x + length * math.cos(heading + right_angle)],
             [y, y + length * math.sin(heading + right_angle)],
         )
+        step = min(frame_index * max(1, stride), len(trajectory) - 1)
+        left_sector = row.get("left_sector", "-")
+        right_sector = row.get("right_sector", "-")
         step_text.set_text(
-            f"step {frame_index * max(1, stride)}\n"
-            f"L {float(row['left']):.3f}  R {float(row['right']):.3f}"
+            f"step {step}\n"
+            f"L {float(row['left']):.3f}  R {float(row['right']):.3f}\n"
+            f"sector L{left_sector} R{right_sector}"
         )
         return path_line, robot_dot, heading_line, left_whisker, right_whisker, step_text
 

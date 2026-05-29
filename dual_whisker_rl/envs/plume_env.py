@@ -183,6 +183,10 @@ class PlumeEnv(gym.Env):
                 "raw_right": raw_right,
                 "left_angle": whisker_state.left_angle,
                 "right_angle": whisker_state.right_angle,
+                "left_sector": int(left_sector),
+                "right_sector": int(right_sector),
+                "move_action": DifferentialDriveRobot.ACTIONS[move_action],
+                "distance_to_source": distance,
                 "reward": reward,
             }
         )

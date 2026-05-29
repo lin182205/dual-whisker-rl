@@ -159,8 +159,16 @@ sensor_alpha: 0.95
 
 ```powershell
 python scripts\train_fixed_whisker_dqn.py --timesteps 50000
-python scripts\train_joint_ppo.py --timesteps 50000
+python scripts\train_joint_ppo.py --timesteps 50000 --n-envs 4
 ```
+
+训练脚本默认使用随机 seed，以减少策略只适配单一初始化序列的风险。需要复现实验时显式传入：
+
+```powershell
+python scripts\train_joint_ppo.py --timesteps 50000 --n-envs 4 --seed 42
+```
+
+每次训练会在对应日志目录写入 `run_metadata.json`，记录实际 seed、环境 seed、配置和模型路径。
 
 默认模型输出：
 
@@ -175,6 +183,25 @@ results/models/joint_ppo.zip
 results/logs/fixed_whisker_dqn/
 results/logs/joint_ppo/
 ```
+
+TensorBoard 训练曲线统一输出到：
+
+```text
+results/tensorboard/
+```
+
+启动方式：
+
+```powershell
+tensorboard --logdir results\tensorboard
+```
+
+训练过程中建议重点观察：
+
+- `rollout/ep_rew_mean`：训练采样 episode 平均回报；
+- `eval/mean_reward`：定期评估平均回报；
+- PPO 的 `train/value_loss`、`train/policy_gradient_loss`、`train/entropy_loss`；
+- DQN 的 TD loss 和探索率曲线。
 
 已经做过 smoke training，证明训练流程可以运行。但 smoke training 只代表代码连通性测试，不能作为论文实验结论。
 
@@ -276,7 +303,7 @@ baseline
 python scripts\train_fixed_whisker_dqn.py --timesteps 50000
 python scripts\evaluate_fixed_whisker_dqn.py --episodes 50
 
-python scripts\train_joint_ppo.py --timesteps 50000
+python scripts\train_joint_ppo.py --timesteps 50000 --n-envs 4
 python scripts\evaluate_joint_ppo.py --episodes 50
 ```
 

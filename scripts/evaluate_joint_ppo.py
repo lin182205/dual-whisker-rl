@@ -19,6 +19,7 @@ from dual_whisker_rl.envs import PlumeEnv
 from dual_whisker_rl.evaluation import evaluate_policy
 from dual_whisker_rl.plotting import draw_odor_field
 from dual_whisker_rl.plotting import save_sensor_response
+from dual_whisker_rl.plotting import save_whisker_sector_stats
 from dual_whisker_rl.visualization import save_trajectory_animation
 
 
@@ -31,8 +32,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--metrics-path", type=Path, default=ROOT / "results" / "logs" / "joint_ppo" / "eval_metrics.json")
     parser.add_argument("--figure-path", type=Path, default=ROOT / "results" / "figures" / "joint_ppo_eval_trajectory.png")
     parser.add_argument("--sensor-response-path", type=Path, default=ROOT / "results" / "figures" / "joint_ppo_sensor_response.png")
+    parser.add_argument("--whisker-sector-path", type=Path, default=ROOT / "results" / "figures" / "joint_ppo_whisker_sectors.png")
     parser.add_argument("--animation-path", type=Path, default=ROOT / "results" / "figures" / "joint_ppo_eval_animation.gif")
-    parser.add_argument("--animation-stride", type=int, default=5)
+    parser.add_argument("--animation-stride", type=int, default=1)
+    parser.add_argument("--animation-fps", type=int, default=4)
     return parser.parse_args()
 
 
@@ -91,12 +94,18 @@ def main() -> None:
         plot_env.reset(seed=args.seed)
         save_eval_trajectory(plot_env, trajectories[0], args.figure_path)
         save_sensor_response(trajectories[0], args.sensor_response_path)
+        save_whisker_sector_stats(
+            trajectories[0],
+            args.whisker_sector_path,
+            sector_count=plot_env.whiskers.sector_count,
+        )
         save_trajectory_animation(
             plot_env,
             trajectories[0],
             args.animation_path,
             label="joint PPO",
             stride=args.animation_stride,
+            fps=args.animation_fps,
         )
         plot_env.close()
 
@@ -104,6 +113,7 @@ def main() -> None:
     print(f"saved_metrics={args.metrics_path}")
     print(f"saved_figure={args.figure_path}")
     print(f"saved_sensor_response={args.sensor_response_path}")
+    print(f"saved_whisker_sectors={args.whisker_sector_path}")
     print(f"saved_animation={args.animation_path}")
     print(json.dumps(metrics, indent=2))
 
