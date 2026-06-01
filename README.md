@@ -20,6 +20,7 @@ The first milestone is a lightweight Gymnasium simulation with:
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
 python -m pip install -r requirements-rl.txt
+python -m pip install -r requirements-hardware.txt
 python scripts\random_rollout.py
 python scripts\fixed_whisker_baseline_rollout.py
 python scripts\train_fixed_whisker_dqn.py --timesteps 50000

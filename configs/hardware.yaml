@@ -1,0 +1,44 @@
+serial:
+  port: COM3
+  baudrate: 115200
+  timeout_s: 2.0
+
+whisker:
+  sector_count: 10
+  settle_ms: 500
+
+left_servo:
+  pin: PA0
+  timer: TIM2
+  channel: CH1
+  min_deg: 9
+  max_deg: 171
+  invert: false
+  trim_deg: 0
+
+right_servo:
+  pin: PA1
+  timer: TIM2
+  channel: CH2
+  min_deg: 9
+  max_deg: 171
+  invert: true
+  trim_deg: 0
+
+mq3:
+  left_pin: PA2
+  left_channel: ADC1_IN2
+  right_pin: PA3
+  right_channel: ADC1_IN3
+  samples_per_read: 10
+
+stm32:
+  board: STM32F103C8T6
+  uart:
+    name: USART1
+    tx_pin: PA9
+    rx_pin: PA10
+  adc_max_voltage: 3.3
+
+logging:
+  output_dir: results/hardware
