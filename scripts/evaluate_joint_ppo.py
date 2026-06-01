@@ -1,4 +1,4 @@
-"""Evaluate a trained joint-control PPO model."""
+"""评估 Joint PPO，并输出轨迹图、传感器曲线、触须扇区统计和 GIF。"""
 
 from __future__ import annotations
 
@@ -49,6 +49,7 @@ def save_eval_trajectory(
     trajectory: list[dict],
     path: Path,
 ) -> None:
+    """保存单个 episode 的二维轨迹图，用于快速检查策略行为。"""
     xx, yy, zz = env.concentration_grid(resolution=140)
     xs = [row["x"] for row in trajectory]
     ys = [row["y"] for row in trajectory]
@@ -77,6 +78,7 @@ def main() -> None:
     config = load_config(args.config)
     model = PPO.load(args.model_path)
 
+    # 评估阶段默认 deterministic=True，观察训练后策略本身的稳定行为。
     metrics, trajectories = evaluate_policy(
         model,
         env_factory=lambda: PlumeEnv(config),
@@ -89,6 +91,7 @@ def main() -> None:
     with args.metrics_path.open("w", encoding="utf-8") as f:
         json.dump(metrics, f, indent=2)
 
+    # 只取第一条轨迹做图；总体表现以 metrics 中多 episode 汇总为准。
     if trajectories:
         plot_env = PlumeEnv(config)
         plot_env.reset(seed=args.seed)

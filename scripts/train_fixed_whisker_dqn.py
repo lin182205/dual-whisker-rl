@@ -1,4 +1,4 @@
-"""Train DQN on the fixed-whisker baseline environment."""
+"""训练 Fixed-whisker DQN baseline：策略只控制机器人，触须按固定周期扫描。"""
 
 from __future__ import annotations
 
@@ -42,12 +42,14 @@ def load_config(path: Path) -> dict:
 
 
 def resolve_seed(seed: int | None) -> int:
+    """未指定 seed 时随机生成，减少单一随机种子导致的偶然性。"""
     if seed is not None:
         return int(seed)
     return secrets.randbelow(2**31 - 1)
 
 
 def make_env(config: dict, seed: int, monitor_dir: Path | None = None) -> Monitor:
+    """创建固定触须 baseline 环境，并用 Monitor 记录训练曲线。"""
     env = FixedWhiskerPlumeEnv(config)
     env.reset(seed=seed)
     monitor_file = None
@@ -73,6 +75,7 @@ def train(args: argparse.Namespace) -> DQN:
         render=False,
     )
 
+    # FixedWhiskerPlumeEnv 的动作空间仍是 Discrete(6)，因此 DQN 仍然适用。
     model = DQN(
         policy="MlpPolicy",
         env=env,
@@ -108,6 +111,7 @@ def train(args: argparse.Namespace) -> DQN:
 
 
 def save_run_metadata(args: argparse.Namespace, config: dict) -> None:
+    """保存训练配置，便于后续和 Joint PPO 做公平对比。"""
     args.log_dir.mkdir(parents=True, exist_ok=True)
     metadata = {
         "seed": args.seed,

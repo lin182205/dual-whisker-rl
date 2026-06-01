@@ -1,4 +1,4 @@
-"""Train PPO on the joint movement-and-whisker control environment."""
+"""训练 Joint PPO：一个策略同时输出机器人动作和左右触须扇区。"""
 
 from __future__ import annotations
 
@@ -44,6 +44,7 @@ def load_config(path: Path) -> dict:
 
 
 def resolve_seed(seed: int | None) -> int:
+    """未指定 seed 时随机生成，避免策略只适配单一随机序列。"""
     if seed is not None:
         return int(seed)
     return secrets.randbelow(2**31 - 1)
@@ -55,6 +56,7 @@ def make_env(
     monitor_dir: Path | None = None,
     monitor_name: str = "monitor",
 ) -> Monitor:
+    """创建带 Monitor 的环境，用于记录 episode reward/length 到日志。"""
     env = PlumeEnv(config)
     env.reset(seed=seed)
     monitor_file = None
@@ -71,6 +73,7 @@ def train(args: argparse.Namespace) -> PPO:
         raise ValueError("--n-envs must be at least 1")
 
     set_random_seed(args.seed)
+    # 多环境采样：PPO 每次从多个独立环境收集 rollout，提高样本多样性。
     env = DummyVecEnv(
         [
             (
@@ -84,6 +87,7 @@ def train(args: argparse.Namespace) -> PPO:
             for rank in range(args.n_envs)
         ]
     )
+    # 评估环境使用独立 seed，避免训练采样和评估采样完全重合。
     eval_env = make_env(config, args.seed + 100_000, args.log_dir / "eval")
     eval_callback = EvalCallback(
         eval_env,
@@ -95,6 +99,7 @@ def train(args: argparse.Namespace) -> PPO:
         render=False,
     )
 
+    # PPO 支持 MultiDiscrete 动作空间，适合当前 [move, left_sector, right_sector]。
     model = PPO(
         policy="MlpPolicy",
         env=env,
@@ -127,6 +132,7 @@ def train(args: argparse.Namespace) -> PPO:
 
 
 def save_run_metadata(args: argparse.Namespace, config: dict) -> None:
+    """保存本次训练的关键参数，方便后续复现实验。"""
     args.log_dir.mkdir(parents=True, exist_ok=True)
     metadata = {
         "seed": args.seed,

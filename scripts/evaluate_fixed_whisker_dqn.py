@@ -1,4 +1,4 @@
-"""Evaluate a trained fixed-whisker DQN model."""
+"""评估 Fixed-whisker DQN baseline，并生成与 Joint PPO 对齐的结果图。"""
 
 from __future__ import annotations
 
@@ -49,6 +49,7 @@ def save_eval_trajectory(
     trajectory: list[dict],
     path: Path,
 ) -> None:
+    """保存固定触须 baseline 的轨迹图，便于和 Joint PPO 对比。"""
     xx, yy, zz = env.concentration_grid(resolution=140)
     xs = [row["x"] for row in trajectory]
     ys = [row["y"] for row in trajectory]
@@ -77,6 +78,7 @@ def main() -> None:
     config = load_config(args.config)
     model = DQN.load(args.model_path)
 
+    # 与 Joint PPO 使用同一套评估函数和指标，保证对比口径一致。
     metrics, trajectories = evaluate_policy(
         model,
         env_factory=lambda: FixedWhiskerPlumeEnv(config),
@@ -89,6 +91,7 @@ def main() -> None:
     with args.metrics_path.open("w", encoding="utf-8") as f:
         json.dump(metrics, f, indent=2)
 
+    # 第一条轨迹用于可视化；正式结论应看多 episode 汇总指标。
     if trajectories:
         plot_env = FixedWhiskerPlumeEnv(config)
         plot_env.reset(seed=args.seed)
