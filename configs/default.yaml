@@ -13,6 +13,7 @@ turn_rate_deg: 20.0
 
 whisker_length: 0.3
 whisker_sector_count: 10
+servo_60deg_time_s: 0.12
 sensor_alpha: 0.95
 
 progress_reward_scale: 5.0

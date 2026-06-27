@@ -13,6 +13,7 @@ matplotlib.use("Agg")
 
 import matplotlib.animation as animation
 from matplotlib import colors
+from matplotlib import patches
 from matplotlib import pyplot as plt
 import numpy as np
 
@@ -26,16 +27,16 @@ from dual_whisker_rl.envs.whisker_only_env import WORLD_MIN
 
 
 def build_plume_colormap() -> colors.LinearSegmentedColormap:
-    """参考 TD3 示例的气味场配色：低浓度浅色，高浓度黄色。"""
+    """参考图风格：背景浅色，气体由深蓝逐渐过渡到黄色高浓度。"""
     return colors.LinearSegmentedColormap.from_list(
         "puff_demo",
         [
-            "#f7f4ef",
-            "#d8e2f1",
-            "#8ab5ef",
-            "#4f8edf",
-            "#2f68b2",
-            "#27447d",
+            "#0c2747",
+            "#174f91",
+            "#2d79bd",
+            "#65a9dc",
+            "#b8d6dc",
+            "#eee9dc",
             "#ffe27a",
         ],
         N=256,
@@ -48,10 +49,33 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--steps", type=int, default=120)
-    parser.add_argument("--resolution", type=int, default=120)
+    parser.add_argument("--resolution", type=int, default=100)
     parser.add_argument("--png-path", type=Path, default=ROOT / "results" / "figures" / "whisker_only_env.png")
     parser.add_argument("--gif-path", type=Path, default=ROOT / "results" / "figures" / "whisker_only_env.gif")
-    parser.add_argument("--fps", type=int, default=8)
+    parser.add_argument(
+        "--fps",
+        type=float,
+        default=None,
+        help="手动指定 GIF 帧率；默认根据环境 dt 和 realtime-speed 自动计算。",
+    )
+    parser.add_argument(
+        "--realtime-speed",
+        type=float,
+        default=1.0,
+        help="播放速度倍率1.0 表示动画以 1 倍仿真时间播放。",
+    )
+    parser.add_argument(
+        "--animation-stride",
+        type=int,
+        default=1,
+        help="每隔多少个仿真步取一个关键帧；增大可减小文件，但会损失细节。",
+    )
+    parser.add_argument(
+        "--interpolation-frames",
+        type=int,
+        default=1,
+        help="相邻关键帧之间插入的过渡帧数；越大越丝滑但文件越大。",
+    )
     parser.add_argument("--title", type=str, default="Whisker-only Puff Sampling Demo")
     return parser.parse_args()
 
@@ -70,6 +94,7 @@ def capture_rollout(
 
     robot_state = map_metadata["robot_position"]
     trajectory = [robot_state]
+    robot_headings = [float(map_metadata["robot_heading"])]
     left_points = []
     right_points = []
     left_sectors = [0]
@@ -97,6 +122,7 @@ def capture_rollout(
         obs_info = env._observe()[1]
         whisker_state = obs_info["whisker_state"]
         trajectory.append((env.robot_state.x, env.robot_state.y))
+        robot_headings.append(float(env.robot_state.heading))
         left_points.append(whisker_state.left_point)
         right_points.append(whisker_state.right_point)
         left_sectors.append(int(info["left_sector"]))
@@ -112,8 +138,10 @@ def capture_rollout(
 
     return {
         "trajectory": np.asarray(trajectory, dtype=np.float32),
+        "robot_headings": np.asarray(robot_headings, dtype=np.float32),
         "left_points": np.asarray(left_points, dtype=np.float32),
         "right_points": np.asarray(right_points, dtype=np.float32),
+        "whisker_length": float(env.unwrapped.whiskers.length),
         "left_sectors": np.asarray(left_sectors, dtype=np.int32),
         "right_sectors": np.asarray(right_sectors, dtype=np.int32),
         "sensor_values": np.asarray(sensor_values, dtype=np.float32),
@@ -127,6 +155,7 @@ def capture_rollout(
         "cumulative_rewards": np.asarray(cumulative_rewards, dtype=np.float32),
         "reward": float(total_reward),
         "steps": max_steps,
+        "dt": float(env.unwrapped.plume.dt),
         "termination": "timeout",
         "map_metadata": map_metadata,
     }
@@ -179,11 +208,148 @@ def draw_whisker_artists(
     return left_line, right_line, left_tip, right_tip
 
 
+def robot_heading_endpoint(
+    robot_xy: np.ndarray,
+    heading: float,
+    length: float = 0.07,
+) -> tuple[float, float]:
+    """计算机器人朝向箭头终点。"""
+    return (
+        float(robot_xy[0] + length * math.cos(heading)),
+        float(robot_xy[1] + length * math.sin(heading)),
+    )
+
+
+def draw_robot_heading_marker(
+    ax,
+    robot_xy: np.ndarray,
+    heading: float,
+    length: float = 0.07,
+):
+    """在机器人中心绘制一个短箭头，用于表示当前车体朝向。"""
+    start = (float(robot_xy[0]), float(robot_xy[1]))
+    end = robot_heading_endpoint(robot_xy, heading, length=length)
+    shadow = patches.FancyArrowPatch(
+        start,
+        end,
+        arrowstyle="-|>",
+        mutation_scale=15,
+        linewidth=5.0,
+        color="white",
+        alpha=0.95,
+        shrinkA=2.0,
+        shrinkB=0.0,
+        zorder=8,
+    )
+    arrow = patches.FancyArrowPatch(
+        start,
+        end,
+        arrowstyle="-|>",
+        mutation_scale=13,
+        linewidth=2.4,
+        color="#111111",
+        shrinkA=2.0,
+        shrinkB=0.0,
+        zorder=9,
+    )
+    ax.add_patch(shadow)
+    ax.add_patch(arrow)
+    return shadow, arrow
+
+
+def interpolate_angle(angle0: float, angle1: float, alpha: float) -> float:
+    """沿最短角度方向插值，避免跨越 -pi/pi 时突然反向旋转。"""
+    delta = math.atan2(math.sin(angle1 - angle0), math.cos(angle1 - angle0))
+    return angle0 + alpha * delta
+
+
+def whisker_point_from_angle(
+    robot_xy: np.ndarray,
+    angle: float,
+    length: float,
+) -> np.ndarray:
+    """按固定长度从角度重新计算触须端点。"""
+    return np.asarray(
+        [
+            robot_xy[0] + length * math.cos(angle),
+            robot_xy[1] + length * math.sin(angle),
+        ],
+        dtype=np.float32,
+    )
+
+
+def interpolate_whisker_point(
+    robot_xy: np.ndarray,
+    robot0: np.ndarray,
+    point0: np.ndarray,
+    robot1: np.ndarray,
+    point1: np.ndarray,
+    alpha: float,
+    length: float,
+) -> np.ndarray:
+    """插帧触须端点：插值角度，再用固定长度重建端点。
+
+    直接对端点坐标做线性插值会让端点走直线，视觉上触须会变短。
+    这里改为角度插值，使端点沿圆弧运动，长度始终保持不变。
+    """
+    angle0 = math.atan2(point0[1] - robot0[1], point0[0] - robot0[0])
+    angle1 = math.atan2(point1[1] - robot1[1], point1[0] - robot1[0])
+    angle = interpolate_angle(angle0, angle1, alpha)
+    return whisker_point_from_angle(robot_xy, angle, length)
+
+
+def draw_obstacles(ax, obstacles: np.ndarray) -> None:
+    for xmin, xmax, ymin, ymax in obstacles:
+        ax.add_patch(
+            patches.Rectangle(
+                (float(xmin), float(ymin)),
+                float(xmax - xmin),
+                float(ymax - ymin),
+                facecolor="#333333",
+                edgecolor="#f2f2f2",
+                linewidth=1.8,
+                alpha=0.95,
+                zorder=4,
+            )
+        )
+
+
+def draw_source_marker(ax, map_metadata: dict[str, object]) -> None:
+    source_x, source_y = map_metadata["source_position"]
+    clipped_x = float(np.clip(source_x, WORLD_MIN + 0.02, WORLD_MAX - 0.02))
+    clipped_y = float(np.clip(source_y, WORLD_MIN + 0.02, WORLD_MAX - 0.02))
+    ax.scatter(
+        clipped_x,
+        clipped_y,
+        s=150,
+        color="#f0d43a",
+        marker="*",
+        edgecolor="#2b2b2b",
+        linewidth=1.1,
+        label="Upwind source",
+        zorder=7,
+    )
+    ax.annotate(
+        "",
+        xy=(clipped_x, clipped_y),
+        xytext=(float(np.clip(source_x, WORLD_MIN - 0.12, WORLD_MAX + 0.12)), float(np.clip(source_y, WORLD_MIN - 0.12, WORLD_MAX + 0.12))),
+        arrowprops=dict(arrowstyle="->", color="#2b2b2b", linewidth=1.2),
+        zorder=7,
+    )
+
+
 def render_static(episode_data: dict[str, object], output_path: Path, title: str) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     cmap = build_plume_colormap()
     map_metadata = episode_data["map_metadata"]
     trajectory = np.asarray(episode_data["trajectory"], dtype=np.float32)
+    robot_headings = np.asarray(
+        episode_data.get(
+            "robot_headings",
+            np.full(trajectory.shape[0], float(map_metadata.get("robot_heading", 0.0))),
+        ),
+        dtype=np.float32,
+    )
     xs = np.asarray(episode_data["xs"], dtype=np.float32)
     ys = np.asarray(episode_data["ys"], dtype=np.float32)
     concentration_frames = np.asarray(episode_data["concentration_frames"], dtype=np.float32)
@@ -193,17 +359,22 @@ def render_static(episode_data: dict[str, object], output_path: Path, title: str
     wind_directions = np.asarray(episode_data["wind_directions"], dtype=np.float32)
     wind_speeds = np.asarray(episode_data["wind_speeds"], dtype=np.float32)
     frame_idx = concentration_frames.shape[0] - 1
+    vmax = max(0.05, float(np.percentile(concentration_frames, 99.2)))
 
     fig, ax = plt.subplots(figsize=(10.5, 8.5))
+    ax.set_facecolor("#f7f4ef")
     heatmap = ax.imshow(
         concentration_frames[frame_idx],
         extent=[xs.min(), xs.max(), ys.min(), ys.max()],
         origin="lower",
         cmap=cmap,
-        alpha=0.95,
+        alpha=0.88,
         interpolation="bilinear",
         aspect="equal",
+        vmin=0.0,
+        vmax=vmax,
     )
+    draw_obstacles(ax, np.asarray(map_metadata["obstacles"], dtype=np.float32))
     ax.plot(
         trajectory[:, 0],
         trajectory[:, 1],
@@ -233,18 +404,13 @@ def render_static(episode_data: dict[str, object], output_path: Path, title: str
         label="Robot",
         zorder=6,
     )
-    ax.scatter(
-        map_metadata["source_position"][0],
-        map_metadata["source_position"][1],
-        s=150,
-        color="#f0d43a",
-        marker="*",
-        edgecolor="#2b2b2b",
-        linewidth=1.1,
-        label="Source",
-        zorder=7,
-    )
+    draw_source_marker(ax, map_metadata)
     draw_whisker_artists(ax, trajectory, left_points, right_points, frame_idx)
+    draw_robot_heading_marker(
+        ax,
+        trajectory[frame_idx],
+        float(robot_headings[frame_idx]),
+    )
 
     wind_direction_deg = math.degrees(float(wind_directions[frame_idx])) % 360.0
     left_value, right_value = sensor_values[frame_idx]
@@ -253,7 +419,7 @@ def render_static(episode_data: dict[str, object], output_path: Path, title: str
         0.97,
         "\n".join(
             [
-                "mode=whisker_only_puff",
+                "mode=wide_plume_whisker",
                 "frame=%d/%d | termination=%s"
                 % (frame_idx, concentration_frames.shape[0] - 1, episode_data["termination"]),
                 "wind=%.0fdeg | speed=%.2f"
@@ -282,7 +448,7 @@ def render_static(episode_data: dict[str, object], output_path: Path, title: str
     ax.set_xlabel("Grid X")
     ax.set_ylabel("Grid Y")
     ax.set_title(title, fontsize=18, pad=12)
-    ax.grid(alpha=0.08, linewidth=0.7)
+    ax.grid(alpha=0.14, linewidth=0.7)
     ax.legend(loc="lower right", framealpha=0.88)
     colorbar = fig.colorbar(heatmap, ax=ax, fraction=0.046, pad=0.04)
     colorbar.set_label("Gas concentration (a.u.)", fontsize=12)
@@ -291,14 +457,39 @@ def render_static(episode_data: dict[str, object], output_path: Path, title: str
     plt.close(fig)
 
 
-def render_animation(episode_data: dict[str, object], output_path: Path, title: str, fps: int) -> None:
+def render_animation(
+    episode_data: dict[str, object],
+    output_path: Path,
+    title: str,
+    fps: float | None,
+    stride: int,
+    realtime_speed: float,
+    interpolation_frames: int,
+) -> None:
     """按参考动画样式渲染 GIF：气味场、源点、机器人、左右触须和信息框。"""
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    stride = max(1, int(stride))
+    interpolation_frames = max(0, int(interpolation_frames))
+    subframes_per_segment = interpolation_frames + 1
+    dt = float(episode_data.get("dt", 0.2))
+    realtime_speed = max(float(realtime_speed), 1e-6)
+    if fps is None:
+        effective_frame_dt = dt * stride / subframes_per_segment
+        fps = realtime_speed / effective_frame_dt
+    fps = max(float(fps), 1e-6)
     cmap = build_plume_colormap()
     map_metadata = episode_data["map_metadata"]
     trajectory = np.asarray(episode_data["trajectory"], dtype=np.float32)
+    robot_headings = np.asarray(
+        episode_data.get(
+            "robot_headings",
+            np.full(trajectory.shape[0], float(map_metadata.get("robot_heading", 0.0))),
+        ),
+        dtype=np.float32,
+    )
     left_points = np.asarray(episode_data["left_points"], dtype=np.float32)
     right_points = np.asarray(episode_data["right_points"], dtype=np.float32)
+    whisker_length = float(episode_data["whisker_length"])
     left_sectors = np.asarray(episode_data["left_sectors"], dtype=np.int32)
     right_sectors = np.asarray(episode_data["right_sectors"], dtype=np.int32)
     sensor_values = np.asarray(episode_data["sensor_values"], dtype=np.float32)
@@ -310,17 +501,21 @@ def render_animation(episode_data: dict[str, object], output_path: Path, title: 
     frame_steps = np.asarray(episode_data["frame_steps"], dtype=np.int32)
     frame_rewards = np.asarray(episode_data["frame_rewards"], dtype=np.float32)
     cumulative_rewards = np.asarray(episode_data["cumulative_rewards"], dtype=np.float32)
+    vmax = max(0.05, float(np.percentile(concentration_frames, 99.2)))
 
     fig, ax = plt.subplots(figsize=(10.5, 8.5))
+    ax.set_facecolor("#f7f4ef")
     heatmap = ax.imshow(
         concentration_frames[0],
         extent=[xs.min(), xs.max(), ys.min(), ys.max()],
         origin="lower",
         cmap=cmap,
-        alpha=0.95,
+        alpha=0.88,
         interpolation="bilinear",
         aspect="equal",
         animated=True,
+        vmin=0.0,
+        vmax=vmax,
     )
     line, = ax.plot([], [], color="#212121", linewidth=2.0, alpha=0.88, zorder=5)
     start_marker = ax.scatter(
@@ -343,23 +538,19 @@ def render_animation(episode_data: dict[str, object], output_path: Path, title: 
         label="Robot",
         zorder=6,
     )
-    ax.scatter(
-        map_metadata["source_position"][0],
-        map_metadata["source_position"][1],
-        s=150,
-        color="#f0d43a",
-        marker="*",
-        edgecolor="#2b2b2b",
-        linewidth=1.1,
-        label="Source",
-        zorder=7,
-    )
+    draw_obstacles(ax, np.asarray(map_metadata["obstacles"], dtype=np.float32))
+    draw_source_marker(ax, map_metadata)
     left_line, right_line, left_tip, right_tip = draw_whisker_artists(
         ax,
         trajectory,
         left_points,
         right_points,
         0,
+    )
+    heading_shadow, heading_arrow = draw_robot_heading_marker(
+        ax,
+        trajectory[0],
+        float(robot_headings[0]),
     )
     info_box = ax.text(
         0.02,
@@ -383,47 +574,121 @@ def render_animation(episode_data: dict[str, object], output_path: Path, title: 
     ax.set_xlabel("Grid X")
     ax.set_ylabel("Grid Y")
     ax.set_title(title, fontsize=18, pad=12)
-    ax.grid(alpha=0.08, linewidth=0.7)
+    ax.grid(alpha=0.14, linewidth=0.7)
     ax.legend(loc="lower right", framealpha=0.88)
     colorbar = fig.colorbar(heatmap, ax=ax, fraction=0.046, pad=0.04)
     colorbar.set_label("Gas concentration (a.u.)", fontsize=12)
-    total_frames = concentration_frames.shape[0]
+    total_source_frames = concentration_frames.shape[0]
+    frame_indices = np.arange(0, total_source_frames, stride, dtype=np.int32)
+    if frame_indices[-1] != total_source_frames - 1:
+        frame_indices = np.append(frame_indices, total_source_frames - 1)
+    frame_specs: list[tuple[int, int, float]] = []
+    for idx in range(len(frame_indices) - 1):
+        start_idx = int(frame_indices[idx])
+        end_idx = int(frame_indices[idx + 1])
+        for sub_idx in range(subframes_per_segment):
+            alpha = sub_idx / subframes_per_segment
+            frame_specs.append((start_idx, end_idx, float(alpha)))
+    final_idx = int(frame_indices[-1])
+    frame_specs.append((final_idx, final_idx, 0.0))
+    total_frames = len(frame_specs)
 
-    def update(frame_idx: int):
-        heatmap.set_data(concentration_frames[frame_idx])
+    def update(animation_idx: int):
+        frame_idx, next_idx, alpha = frame_specs[animation_idx]
+        concentration_frame = (
+            (1.0 - alpha) * concentration_frames[frame_idx]
+            + alpha * concentration_frames[next_idx]
+        )
+        robot_xy = (1.0 - alpha) * trajectory[frame_idx] + alpha * trajectory[next_idx]
+        left_xy = interpolate_whisker_point(
+            robot_xy,
+            trajectory[frame_idx],
+            left_points[frame_idx],
+            trajectory[next_idx],
+            left_points[next_idx],
+            alpha,
+            whisker_length,
+        )
+        right_xy = interpolate_whisker_point(
+            robot_xy,
+            trajectory[frame_idx],
+            right_points[frame_idx],
+            trajectory[next_idx],
+            right_points[next_idx],
+            alpha,
+            whisker_length,
+        )
+        left_value, right_value = (
+            (1.0 - alpha) * sensor_values[frame_idx]
+            + alpha * sensor_values[next_idx]
+        )
+        wind_direction = (1.0 - alpha) * wind_directions[frame_idx] + alpha * wind_directions[next_idx]
+        wind_speed = (1.0 - alpha) * wind_speeds[frame_idx] + alpha * wind_speeds[next_idx]
+        robot_heading = interpolate_angle(
+            float(robot_headings[frame_idx]),
+            float(robot_headings[next_idx]),
+            alpha,
+        )
+        reward = (1.0 - alpha) * frame_rewards[frame_idx] + alpha * frame_rewards[next_idx]
+        cumulative_reward = (
+            (1.0 - alpha) * cumulative_rewards[frame_idx]
+            + alpha * cumulative_rewards[next_idx]
+        )
+        sim_step = (1.0 - alpha) * frame_steps[frame_idx] + alpha * frame_steps[next_idx]
+
+        heatmap.set_data(concentration_frame)
         line.set_data(trajectory[: frame_idx + 1, 0], trajectory[: frame_idx + 1, 1])
-        robot_marker.set_offsets(trajectory[frame_idx])
-        robot_xy = trajectory[frame_idx]
-        left_xy = left_points[frame_idx]
-        right_xy = right_points[frame_idx]
+        robot_marker.set_offsets(robot_xy)
+        heading_end = robot_heading_endpoint(robot_xy, robot_heading)
+        heading_shadow.set_positions(
+            (float(robot_xy[0]), float(robot_xy[1])),
+            heading_end,
+        )
+        heading_arrow.set_positions(
+            (float(robot_xy[0]), float(robot_xy[1])),
+            heading_end,
+        )
         left_line.set_data([robot_xy[0], left_xy[0]], [robot_xy[1], left_xy[1]])
         right_line.set_data([robot_xy[0], right_xy[0]], [robot_xy[1], right_xy[1]])
         left_tip.set_offsets(left_xy)
         right_tip.set_offsets(right_xy)
-        wind_direction_deg = math.degrees(float(wind_directions[frame_idx])) % 360.0
-        left_value, right_value = sensor_values[frame_idx]
+        wind_direction_deg = math.degrees(float(wind_direction)) % 360.0
         info_box.set_text(
             "\n".join(
                 [
-                    "mode=whisker_only_puff",
-                    "frame=%d/%d | termination=%s"
-                    % (frame_idx, total_frames - 1, episode_data["termination"]),
+                    "mode=wide_plume_whisker",
+                    "frame=%d/%d | interp=%d"
+                    % (animation_idx, total_frames - 1, interpolation_frames),
                     "wind=%.0fdeg | speed=%.2f"
-                    % (wind_direction_deg, float(wind_speeds[frame_idx])),
+                    % (wind_direction_deg, float(wind_speed)),
+                    "sim_time=%.2fs | playback=%.2fx"
+                    % (float(sim_step) * dt, realtime_speed),
                     "step=%d | reward=%.2f"
-                    % (int(frame_steps[frame_idx]), float(frame_rewards[frame_idx])),
+                    % (int(round(sim_step)), float(reward)),
                     "left_sector=%d | right_sector=%d"
                     % (int(left_sectors[frame_idx]), int(right_sectors[frame_idx])),
                     "left=%.3f | right=%.3f" % (left_value, right_value),
                     "cum_reward=%.2f | final_steps=%d"
                     % (
-                        float(cumulative_rewards[frame_idx]),
+                        float(cumulative_reward),
                         int(episode_data["steps"]),
                     ),
                 ]
             )
         )
-        return heatmap, line, robot_marker, info_box, start_marker, left_line, right_line, left_tip, right_tip
+        return (
+            heatmap,
+            line,
+            robot_marker,
+            heading_shadow,
+            heading_arrow,
+            info_box,
+            start_marker,
+            left_line,
+            right_line,
+            left_tip,
+            right_tip,
+        )
 
     anim = animation.FuncAnimation(
         fig,
@@ -432,7 +697,7 @@ def render_animation(episode_data: dict[str, object], output_path: Path, title: 
         interval=max(1, int(1000 / fps)),
         blit=False,
     )
-    anim.save(output_path, writer=animation.PillowWriter(fps=fps), dpi=160)
+    anim.save(output_path, writer=animation.PillowWriter(fps=fps), dpi=130)
     plt.close(fig)
 
 
@@ -446,7 +711,15 @@ def main() -> None:
         seed=args.seed,
     )
     render_static(episode_data, args.png_path, args.title)
-    render_animation(episode_data, args.gif_path, args.title, fps=args.fps)
+    render_animation(
+        episode_data,
+        args.gif_path,
+        args.title,
+        fps=args.fps,
+        stride=args.animation_stride,
+        realtime_speed=args.realtime_speed,
+        interpolation_frames=args.interpolation_frames,
+    )
     print(f"saved_png={args.png_path}")
     print(f"saved_gif={args.gif_path}")
 

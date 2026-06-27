@@ -59,6 +59,7 @@ class PlumeEnv(gym.Env):
         self.whiskers = DualWhiskerSampler(
             length=float(cfg.get("whisker_length", 0.3)),
             sector_count=int(cfg.get("whisker_sector_count", 10)),
+            servo_60deg_time_s=float(cfg.get("servo_60deg_time_s", 0.12)),
         )
         sensor_alpha = float(cfg.get("sensor_alpha", 0.95))
         self.left_sensor = FirstOrderGasSensor(sensor_alpha)
@@ -136,7 +137,12 @@ class PlumeEnv(gym.Env):
         logged_action: float,
     ) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
         state = self.robot.step(move_action)
-        whisker_state = self.whiskers.step(left_sector, right_sector, state)
+        whisker_state = self.whiskers.step(
+            left_sector,
+            right_sector,
+            state,
+            dt=self.robot.dt,
+        )
 
         raw_left = self.plume.concentration(*whisker_state.left_point, t=self.step_count)
         raw_right = self.plume.concentration(*whisker_state.right_point, t=self.step_count)
