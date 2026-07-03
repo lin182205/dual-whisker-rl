@@ -1068,8 +1068,249 @@ dt_s           ≈ 0.63   （从 CSV 时间戳自动推算，不手动指定）
 
 ### 15.7 对比图改为双 Y 轴叠加，及恢复尾巴被 baseline 吃掉的观察
 
-`baseline_preprocess<_label>.png` 已从原先 4 个分开子图改为**双 Y 轴叠加图**，方便直接对比原始数据和预处理后曲线：左右传感器各一行，每行左轴（蓝）画绝对量 raw ADC 与 baseline，右轴（红）画预处理后的相对量 signal 与 smooth，两者共享同一条时间轴。这样能直观看到 smooth 与 raw 形状完全吻合，只是去掉了基线偏置和噪声。
+脚本现在同时输出**两种图**，两者都保留：
+
+```text
+baseline_preprocess<_label>.png  分面板图（上一版风格）：raw/baseline、signal、smooth+est_input、trend+diff 各占一行，看每个特征自身细节。
+baseline_overlay<_label>.png     双 Y 轴叠加对比图：左右传感器各一行，左轴(蓝)画绝对量 raw ADC 与 baseline，右轴(红)画预处理后相对量 signal 与 smooth，共享同一时间轴，直接对比原始与预处理曲线。
+```
+
+叠加图能直观看到 smooth 与 raw 形状完全吻合，只是去掉了基线偏置和噪声。新增 `--overlay-path` 可单独指定叠加图路径，`--figure-path` 指定分面板图路径。
 
 这张叠加图还暴露出一个之前分开看不易发现的现象：在很长的慢恢复尾巴段（示例数据 t≈450~550s 起），baseline 自动更新逻辑会重新启动并向上追 raw。原因是恢复尾巴后期 smooth/trend 已降到 `_can_update_baseline` 的门限以下，预处理判定“差不多回到洁净空气”就开始缓慢更新基线，但传感器实际仍在缓慢恢复。结果是 `signal = raw - baseline` 中的 baseline 被抬高，**长时间残留气味会被 baseline 部分吃掉**，红色 smooth 比 raw 提前掉向 0。
 
 这对阶段一结论没有影响（洁净段平、气体段响应明显且未饱和的判定不变）。但如果后续要让策略利用“长时间残留气味”这类慢信息，需要把 `baseline_tau_s` 调更大，或在确认进入气体刺激阶段后用脚本已有的 `--freeze-baseline` 冻结基线，避免真实响应被缓慢更新的基线抵消。
+
+## 16. 阶段二框架：硬件采样模式对比脚本
+
+已经搭好阶段二脚本框架（尚未接硬件实采）：
+
+```text
+scripts/compare_hardware_sampling_modes.py
+```
+
+该脚本用于在真实硬件上比较三类触须采样方式的“信息获取能力”，回答整个课题最关键的问题：扫描触须是否真的比固定角度传感器获得更多有效气味信息。它复用阶段一标定的预处理参数（默认 `scale=1500`），把原始 ADC 转成 `norm_smooth/norm_trend/smooth_diff` 等相对特征，再据此计算统一指标。
+
+### 16.1 支持的模式与运行方式
+
+支持三种采样模式：
+
+```text
+fixed_angle    左右触须固定在某扇区不动（--fixed-sector）
+periodic_scan  往返三角波周期扫描 0->9->0，每扇区停留 --dwell-steps
+random_scan    随机扫描，--random-mode any(任意扇区) / neighbor(只动±1，更贴合舵机)
+```
+
+左右触须采用对称扇区（与现有 smoke_test/sector_scan 约定一致），但左右物理基座位置不同，仍是两个采样点。
+
+提供两种运行方式：
+
+```text
+实采：连 STM32 按模式下发 STEP 并采集（需要硬件）
+回放：--replay-csv 读已有 CSV，只复算特征/指标/图（离线，无需硬件）
+```
+
+回放模式既用于离线测试指标与绘图逻辑，也可对历史记录重新分析。当前已用固定扇区的 `live_plot.csv` 做回放自测，脚本端到端跑通：固定扇区下 `sector_coverage=0.10`、`sector_entropy=0`，符合预期。
+
+### 16.2 统一信息获取指标
+
+每次运行输出 `metrics.json`，统一指标包括：
+
+```text
+odor_hit_rate          max(left_smooth,right_smooth) 超阈值比例
+mean_max_smooth        平均有效气味响应
+mean_abs_smooth_diff   左右不对称强度
+mean_abs_trend_sum     响应变化能力
+positive_trend_rate    正趋势比例
+high_information_rate  高响应/高差分/高趋势三者之一满足的比例
+reacquisition_events   从丢失到重新捕获的事件数
+mean_reacquisition_time_s 平均重新捕获耗时
+sector_entropy_bits    访问扇区分布熵
+sector_coverage        访问过的扇区占比
+```
+
+阈值可调：`--hit-threshold`（默认 0.2，对应 norm_smooth）、`--diff-threshold`、`--trend-threshold`。
+
+### 16.3 输出结构
+
+每次运行在 `results/hardware/sampling_modes/<run_id>/` 下保存：
+
+```text
+raw.csv       step,t_rel_s,mode,left/right_sector,left/right_adc
+features.csv  左右 smooth/trend/norm 特征与差分
+metrics.json  统一指标 + 预处理配置 + 阈值 + 环境备注
+summary.md    指标摘要表
+plots.png     max_smooth(含阈值线) / sector 时间序列 / 左右 smooth diff
+```
+
+`run_id` 默认按时间和模式生成，可用 `--run-id` 覆盖；`--source-note` 记录气源/风扇/距离等环境信息。
+
+### 16.4 下一步：接硬件实采三种模式
+
+脚本框架已就绪，剩下需要接 STM32 实采。建议每种模式各采一段（保持不饱和、同一天同一环境、记录 `--source-note`），固定角度至少测多个代表性扇区（如 sector 1/3/5/7/9），不要只测一个，避免 baseline 不公平。采完后按决策树判断：周期扫描若在 `odor_hit_rate`、`mean_abs_trend_sum` 或 `mean_reacquisition_time_s` 上优于多数固定角度，说明主动/扫描触须有潜力，可进入 PPO；若都不如固定角度，先回去调采样节奏、停留时间、气源布置，而不是急着训 PPO。后续再把 `random_neighbor`、`heuristic_active`、`ppo_active` 模式接入对比。
+
+## 17. 仿真羽流与传感器真实度改造（间歇性 + 非对称传感器 + 域随机化）
+
+针对“自建 2D 仿真与现实差距大、气体扩散不够真实”的担忧，对 `WhiskerOnlyPuffEnv` 的气味场和传感器做了一轮真实度改造。核心判断是：决定 sim-to-real 成败的不是绝对浓度算得准，而是**羽流间歇性（whiff/blank 结构）**和**观测空间对齐**。改造坚持“先量基准、再改、再用同一指标验证”的流程，避免凭感觉调参。
+
+### 17.1 新增间歇性诊断脚本
+
+```text
+scripts/analyze_plume_intermittency.py
+```
+
+不训练、不改环境，把 `DynamicPuffPlume` 跑一段长时间，在气源下风向固定距离、沿横风向取一排采样点，记录瞬时浓度时间序列，计算并绘制：intermittency factor（高于阈值的时间占比）、whiff 时长分布、blank 时长分布、浓度时间序列。输出：
+
+```text
+results/figures/plume_intermittency_<label>.png
+results/figures/plume_intermittency_<label>.json
+```
+
+用途是把“感觉有 gap”变成可测量、可对比、论文可引用的证据。改进羽流前后用同一脚本复跑对比即可。
+
+### 17.2 改造前基准：羽流是连续饱和气幕，零间歇
+
+改造前的诊断基准非常清晰：中心线和边缘（横风 0.0~0.3m）的 intermittency factor 全部为 **1.00**，没有任何 blank，平均浓度高达 5~17（而 hit_threshold=0.08）。即旧羽流在整个场地是一张连续饱和气幕，传感器几乎永远“在羽流内”。这种场景下主动采样没有可利用的结构，正是 2D 仿真“不真实”的根源。
+
+### 17.3 羽流改造（A：相干湍流 + meander；B：filament 密度）
+
+`DynamicPuffPlume` 的主要改动：
+
+```text
+1. 小尺度湍流：把每步独立白噪声抖动，改为 per-puff OU 速度扰动（时间相关，AR(1)）。
+   同一 filament 的扰动在时间上连贯 → 形成蜿蜒成缕的相干气缕，而非各自乱抖。
+2. 大尺度蜿蜒：平均风向走 OU 过程（均值回归到 base），两种风模式都生效。
+   固定模式 = 固定平均风 + 湍流摆动，因此固定诊断下羽流仍是间歇的。
+   plume strand 整体摆动是固定点产生 whiff/blank 的主要来源。
+3. filament 密度/寿命：调成更细、更短寿命、适度密集，避免老 puff 膨胀叠加成连续气幕。
+```
+
+关键新增参数（`DynamicPuffPlume.__init__`）：
+
+```text
+wind_dir_meander_theta / wind_dir_meander_sigma   平均风向 OU（蜿蜒幅度）
+turbulence_vel_relax                               per-puff 速度 OU 相关系数
+turbulence_vel_std_downwind / _crosswind           per-puff 湍流速度强度（m/s）
+puff_init_sigma_*, decay_rate, max_puff_age, ...   filament 尺度/寿命
+```
+
+改造后诊断结果（与基准对比）：
+
+```text
+            改造前                       改造后
+中心线:     interm=1.00, 无 blank,      interm≈0.74, whiff≈2.5s / blank≈0.9s,
+            mean_c≈17                    mean_c≈0.22
+边缘0.3m:   interm=1.00, 无 blank,      interm≈0.68, whiff≈2.3s / blank≈1.1s,
+            mean_c≈5.3                   mean_c≈0.20
+```
+
+从“全程饱和、无间歇”变为“秒级一缕一缕经过、有中心→边缘梯度”，正是真实间歇羽流的结构。可视化 `results/figures/whisker_only_env.png` 也从平滑团块变为可见丝状气缕。
+
+### 17.4 非对称气体传感器（E）
+
+```text
+dual_whisker_rl/envs/sensor_model.py -> AsymmetricGasSensor
+```
+
+相比对称一阶模型，加入三个真实 MQ-3 特性：
+
+```text
+1. 响应/恢复非对称：上升用较快 response_tau，下降用较慢 recovery_tau
+   （MQ-3 吸附快、解吸慢）。tau 经 dt 换算为 alpha = exp(-dt/tau)。
+2. 基线漂移：输出叠加缓慢 OU 漂移，模拟上电后基线缓慢变化。
+3. 测量噪声：输出叠加高斯噪声。
+```
+
+`WhiskerOnlyPuffEnv` 默认改用该模型（可用 `sensor_model='first_order'` 回退）。默认 `response_tau=0.6`、`recovery_tau=3.0`，已验证“快升慢降”（5 步升到 0.81，再 5 步只回落到 0.58）。把噪声/漂移放进仿真传感器，是为了让仿真观测与真实 MQ-3 的“脏”数据同分布，使预处理层和策略在 sim-to-real 时不至失效。
+
+### 17.5 域随机化（D）
+
+每个 episode 在标称值附近随机化羽流物理（释放率、扩散、衰减、湍流强度、meander 幅度、puff 寿命）和传感器特性（响应/恢复时间、噪声、基线漂移）。默认关闭（便于复现和诊断），训练时打开：
+
+```powershell
+python scripts\train_whisker_only_ppo.py --timesteps 50000 --n-envs 4 --history-length 6 --domain-randomization
+```
+
+实现：`DynamicPuffPlume.domain_randomization` + `_randomize_params()`；环境侧 `WhiskerOnlyPuffEnv._randomize_sensors()`，并在每次 `reset` 重建传感器以同步当前 rng 和随机参数。DR 是跨 sim-to-real gap 的真正杠杆，比单一“逼真场景”更鲁棒。
+
+### 17.6 奖励按新浓度量级重标定（已完成）
+
+旧奖励阈值/系数是按改造前饱和羽流（mean_c≈15）调的。在改造后羽流上量出触须端点处传感器读数分布：`max(left,right)` 典型 0.3~1.3，≥0.08 占 99.9%、≥0.30 占 93.5%。这说明**二值“in-plume / strong”bonus 在新羽流下几乎一直为真、不再区分动作好坏**；真正依赖动作的可学习信号是**趋势（trend）**和**左右对比（contrast）**。
+
+因此重标定思路不是简单上移阈值，而是**把奖励重心移到连续、依赖动作的项（幅值 + 趋势 + 对比），并把近乎常驻的二值 bonus 权重调小**（与可行性文档 §10.5 的 reward 设计一致）。重标定后默认值：
+
+```text
+hit_threshold        = 0.08   仅用于观测 hit-rate 和初始位姿采样
+strong_threshold     = 0.60   强响应 bonus 门限（env 级，已与 plume 解耦）
+odor_hit_reward      = 0.08   presence 比例项，clip 到 presence_clip
+presence_clip        = 1.5
+trend_reward_scale   = 1.0    trend_clip = 0.12（旧为 4.0 / 0.04，新量级下会饱和）
+contrast_reward_scale= 0.15   旧为 0.04，太小
+tracking_bonus       = 0.05   旧为 0.12（近常驻，调小）
+strong_bonus         = 0.05   旧为 0.10
+time_penalty         = 0.04
+```
+
+随机策略下各项均值：trend 0.019(±0.045)、presence 0.061(±0.028)、contrast 0.049(±0.037)、track 0.050(±0.002)、strong 0.032。可学习项方差显著、常驻项方差≈0，平衡合理。
+
+短训练验证（30k steps，仅 smoke）：训练后 reward 61.2 ≥ 随机 57.4；左右扇区选择熵 2.90 / 2.38 bits（满熵 3.32），覆盖 0.9~1.0，**未塌缩到单一扇区**，开始形成偏好。正式结论仍需 200k+ 多 seed 训练。注意：若改了 plume 量级或 DR 范围，应重跑本节分布测量并重标定。
+
+### 17.7 本轮新增/改动文件小结
+
+```text
+新增  scripts/analyze_plume_intermittency.py     羽流间歇性诊断
+改动  dual_whisker_rl/envs/sensor_model.py        新增 AsymmetricGasSensor
+改动  dual_whisker_rl/envs/whisker_only_env.py    OU 湍流/meander、filament 密度、
+                                                  非对称传感器接入、域随机化
+改动  scripts/train_whisker_only_ppo.py           新增 --domain-randomization 开关
+```
+
+### 17.8 与外部参考的关系
+
+当前 `DynamicPuffPlume` 本质上属于 Farrell 丝状/puff 羽流模型家族（filament 释放 + 随风平流 + 扩散 + 衰减 + 湍流蜿蜒）。后续若需进一步对标，可用开源 `pompy`（Farrell 模型 Python 实现）离线产场，验证本环境 whiff/blank 统计是否接近文献；若远期做 3D/移动机器人，可参考 `GADEN`（CFD 预计算风场 + filament 扩散 + 自带 MOX 传感器响应模型）。但当前 1m×1m 固定基座场景不需要 CFD，重点应放在间歇结构、观测对齐和域随机化。
+
+## 18. 阶段三完成：whisker-only 环境观测硬件化
+
+为了让仿真训练的触须策略能迁移到真机，本阶段把 `WhiskerOnlyPuffEnv` 的观测改成**只含硬件可获得特征**，并让仿真读数走**和硬件一致的预处理**。改造前的 12 维观测含硬件拿不到的特权信息——真实风向 `cos/sin(wind_rel)` 和到气源的真实距离 `source_distance`——若用它训练 PPO，策略会依赖这些量，一上真机观测分布对不上，基本白训。本阶段只改观测层，**不动力学、奖励、羽流模型、动作空间**（奖励 `get_reward(left,right)` 只用原始读数，天然不受影响）。
+
+### 18.1 新增共享 observation builder
+
+```text
+dual_whisker_rl/observation/__init__.py
+dual_whisker_rl/observation/whisker_observation_builder.py
+```
+
+`WhiskerObservationBuilder` 内部持有一个 `DualGasPreprocessor`（复用阶段一的硬件预处理模块，不改它），把左右传感器读数转成扣基线/平滑/趋势/差分特征，再拼接触须角度和扇区，输出 12 维观测。**仿真环境和将来的硬件 rollout 脚本都 import 它**，保证训练时和部署时观测语义一致（sim-to-real 观测对齐）。
+
+12 维字段顺序（可行性文档 §9.3 简化版）：
+
+```text
+left_norm_signal, right_norm_signal,
+left_norm_smooth, right_norm_smooth,
+left_norm_trend,  right_norm_trend,
+norm_smooth_diff, norm_trend_diff,
+left_angle_norm,  right_angle_norm,      # 角度 / pi
+left_sector_norm, right_sector_norm      # 扇区 / (sector_count-1)
+```
+
+刻意**不用** `DualSensorFeatures.as_policy_vector()`（它含噪声大的 `estimated_input`、且缺角度/扇区）。
+
+### 18.2 环境改造要点
+
+- `__init__` 新增参数：`observation_mode`（`"hardware"` 默认 / `"privileged"`）、`sim_sensor_scale`（默认 0.35）及一组 `preprocess_*` 参数；据此构造 `SensorPreprocessConfig` 和 `self.observation_builder`。观测空间在 hardware 模式用 builder 的有限边界，privileged 模式用 ±inf。
+- **保留 privileged 模式做消融上界**：`observation_mode="privileged"` 时返回逐字保留的旧 12 维特权观测。可训一个带真实风向/气源距离的“上界”策略，论文里对照“硬件观测掉了多少性能”。
+- **修复一个隐藏陷阱（关键）**：`scripts/visualize_whisker_only_env.py` 每帧会**额外**调 `env._observe()` 取 `whisker_state`。由于预处理器有状态（EMA/trend/baseline 累积），若把预处理更新放进 `_observe()` 会每帧双重更新、污染状态。因此把观测方法拆成三块：`_build_observation()`（有状态，reset/step 各调一次，推进预处理恰好一次并缓存 `_last_obs`）、`_current_info()`（无副作用组装 info）、`_observe()`（无副作用薄壳，只返回缓存观测，保持签名兼容可视化脚本）。
+- `reset()` 调 `observation_builder.reset(init_baseline=None)`——用首帧读数锚基线，与硬件上电后在洁净空气锚基线一致，也对将来引入的每 episode 基线偏置随机化鲁棒。`step()` 记录**指令**扇区（硬件可得的“上一动作”）供观测使用。
+- `scripts/train_whisker_only_ppo.py` 的 `run_metadata.json` 追加 `observation_mode`、`observation_field_names`、`sim_sensor_scale`；观测维度和历史堆叠维度本就动态计算，`ObservationHistoryWrapper` 无需改。
+
+### 18.3 sim_sensor_scale 标定
+
+仿真传感器读数量级 ~0-1.5，硬件 ADC ~500-4000，二者 `scale` 必须不同（builder/config 形状共享、scale 各自标）。仿真取 `scale=0.35`：验证 rollout 中 `norm_smooth` 洁净时 min≈0.05、in-plume mean≈2.6 / max≈3.35，落在 clip=5 以内不饱和，洁净接近 0——“无气味”和“有气味”清晰可分。**注意**：若改羽流量级或 DR 范围，应重新测 `norm_smooth` 分布并重标 `sim_sensor_scale`。硬件侧对应值为阶段一标定的 `scale=1500`。
+
+### 18.4 端到端验证结论
+
+已跑通 8 项验证：观测 12 维、字段名正确；连调 `_observe()` 两次预处理状态不变（**无双重更新**）、step 恰好推进一次；reset 帧传感器槽≈0；`norm_smooth` 不饱和且信噪可分；`visualize_whisker_only_env.py` 正常出图（真实触发额外 `_observe()`）；privileged 模式回归正常；训练 smoke（2000 steps）无形状错误，metadata 记录 `base=12 / stacked=120 / mode=hardware / scale=0.35`；域随机化下观测无 NaN（clip 生效，max|obs|=5）。
+
+### 18.5 下一步
+
+阶段三完成，触须 PPO 现在是硬件可部署观测形状。下一步可正式训练 whisker-only PPO（建议 `--history-length 20` ≈ 4s 历史、多 seed），并与固定/周期/随机策略在信息获取指标上对比（阶段四）。等硬件可用时，硬件 rollout 脚本直接复用 `WhiskerObservationBuilder`（换 `scale=1500`），保证观测与训练一致。机器人移动 + 触须联合 PPO 仍按路线图放到固定基座验证之后。

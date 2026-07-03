@@ -10,8 +10,11 @@ from gymnasium import spaces
 import numpy as np
 
 from dual_whisker_rl.envs.robot_model import RobotState
+from dual_whisker_rl.envs.sensor_model import AsymmetricGasSensor
 from dual_whisker_rl.envs.sensor_model import FirstOrderGasSensor
 from dual_whisker_rl.envs.whisker_model import DualWhiskerSampler
+from dual_whisker_rl.hardware.sensor_preprocess import SensorPreprocessConfig
+from dual_whisker_rl.observation import WhiskerObservationBuilder
 
 
 WORLD_MIN = -0.5
@@ -69,9 +72,13 @@ class DynamicPuffPlume:
             self.wind_speed_range[0] + self.wind_speed_range[1]
         )
         self.wind_speed_std = 0.006
-        self.wind_dir_noise_std = 0.01
         self.wind_relaxation = 0.97
-        self.wind_direction_limit = math.radians(6.0)
+        # 平均风向的缓慢蜿蜒（meander）：OU 过程，均值回归到 wind_direction_base。
+        # 这是固定点上 whiff/blank 间歇的主要来源之一。std ≈ sigma/sqrt(2*theta)。
+        self.wind_dir_meander_theta = 0.30
+        self.wind_dir_meander_sigma = 0.32
+        self.wind_direction_limit = math.radians(45.0)  # 仅作安全夹紧
+        self.wind_dir_offset = 0.0  # OU 状态：当前风向相对 base 的偏移
         self.wind_speed_clip = (
             max(0.005, self.wind_speed_range[0] - 0.03),
             max(self.wind_speed_range[1] + 0.04, 0.12),
@@ -79,22 +86,26 @@ class DynamicPuffPlume:
 
         self.source_core_sigma = 0.12
         self.source_core_weight = 0.0
-        self.puff_release_per_step = 1
+        # 稀疏、细、短寿命的 filament：避免大量 puff 叠加成连续气幕，
+        # 使固定点看到一缕一缕经过（whiff/blank），而不是常通。
+        self.puff_release_per_step = 2
         self.puff_release_downwind_jitter = 0.02
-        self.puff_release_crosswind_jitter = 0.12
-        self.puff_init_mass = 0.18
+        self.puff_release_crosswind_jitter = 0.04
+        self.puff_init_mass = 0.012
         self.puff_mass_jitter = 0.45
-        self.puff_init_sigma_downwind = 0.10
-        self.puff_init_sigma_crosswind = 0.035
+        self.puff_init_sigma_downwind = 0.060
+        self.puff_init_sigma_crosswind = 0.028
         self.puff_sigma_jitter = 0.25
-        self.diffusion_downwind_rate = 0.020
-        self.diffusion_crosswind_rate = 0.006
-        self.decay_rate = 0.018
-        self.turbulence_downwind_std = 0.006
-        self.turbulence_crosswind_std = 0.018
-        self.max_puff_age = 16.0
-        self.min_puff_mass = 0.004
-        self.max_puffs = 260
+        self.diffusion_downwind_rate = 0.008
+        self.diffusion_crosswind_rate = 0.003
+        self.decay_rate = 0.045
+        # 小尺度湍流：per-puff OU 速度扰动（m/s），时间相关 → 相干 filament 蜿蜒。
+        self.turbulence_vel_relax = 0.90
+        self.turbulence_vel_std_downwind = 0.020
+        self.turbulence_vel_std_crosswind = 0.070
+        self.max_puff_age = 8.0
+        self.min_puff_mass = 0.0010
+        self.max_puffs = 360
         self.puff_bounds_margin = 1.1
         self.puff_warmup_steps = 80
         self.far_source_distance = 0.75
@@ -106,6 +117,19 @@ class DynamicPuffPlume:
         self.wind_direction = 0.0
         self.wind_speed = 1.0
         self.puffs: list[dict[str, float]] = []
+
+        # 域随机化：每个 episode 在标称值附近扰动羽流物理参数，提高策略鲁棒性。
+        self.domain_randomization = False
+        self._dr_nominal = {
+            "puff_release_per_step": self.puff_release_per_step,
+            "puff_init_mass": self.puff_init_mass,
+            "diffusion_downwind_rate": self.diffusion_downwind_rate,
+            "diffusion_crosswind_rate": self.diffusion_crosswind_rate,
+            "decay_rate": self.decay_rate,
+            "turbulence_vel_std_crosswind": self.turbulence_vel_std_crosswind,
+            "wind_dir_meander_sigma": self.wind_dir_meander_sigma,
+            "max_puff_age": self.max_puff_age,
+        }
 
     def metadata(self) -> dict[str, Any]:
         """返回绘图和调试所需的气味场元信息。"""
@@ -150,6 +174,7 @@ class DynamicPuffPlume:
 
     def _sample_wind(self) -> None:
         """每个 episode 开始时随机化风向和风速。"""
+        self.wind_dir_offset = 0.0
         if self.wind_sampling_mode == "fixed":
             self.wind_direction_base = math.radians(18.0)
             self.wind_direction = self.wind_direction_base
@@ -186,27 +211,29 @@ class DynamicPuffPlume:
         )
 
     def _update_wind(self) -> None:
-        """每个环境步小幅扰动风场，模拟真实气流的不稳定性。"""
-        if self.wind_sampling_mode == "fixed":
-            self.wind_direction = self.wind_direction_base
-            self.wind_speed = self.wind_speed_mean
-            return
-        direction_candidate = self._normalize_angle(
-            self.wind_direction + float(self.rng.normal(0.0, self.wind_dir_noise_std))
+        """每个环境步扰动风场。
+
+        风向蜿蜒（meander）在两种模式下都运行，因为它代表真实气流的大尺度
+        摆动，是固定点上 whiff/blank 间歇的主要来源。`fixed` 与 `random` 的
+        区别只在于：fixed 用确定的平均风（可复现的诊断基准、不随 episode 变），
+        random 每个 episode 随机化平均风向和风速。
+        """
+        # 风向偏移走 OU 过程：d_off = -theta*off*dt + sigma*sqrt(dt)*N，均值回归到 base。
+        theta = self.wind_dir_meander_theta
+        sigma = self.wind_dir_meander_sigma
+        self.wind_dir_offset += (
+            -theta * self.wind_dir_offset * self.dt
+            + sigma * math.sqrt(self.dt) * float(self.rng.normal())
         )
-        direction_offset = self._normalize_angle(
-            direction_candidate - self.wind_direction_base
-        )
-        direction_offset = float(
-            np.clip(
-                direction_offset,
-                -self.wind_direction_limit,
-                self.wind_direction_limit,
-            )
+        self.wind_dir_offset = float(
+            np.clip(self.wind_dir_offset, -self.wind_direction_limit, self.wind_direction_limit)
         )
         self.wind_direction = self._normalize_angle(
-            self.wind_direction_base + direction_offset
+            self.wind_direction_base + self.wind_dir_offset
         )
+        if self.wind_sampling_mode == "fixed":
+            self.wind_speed = self.wind_speed_mean
+            return
         speed_noise = float(
             self.rng.normal(0.0, self.wind_speed_std * (1.0 - self.wind_relaxation))
         )
@@ -273,6 +300,9 @@ class DynamicPuffPlume:
                     "sigma_crosswind": float(self.puff_init_sigma_crosswind * sigma_scale),
                     "direction": float(self.wind_direction),
                     "age": 0.0,
+                    # per-puff OU 湍流速度扰动（在该 puff 局部 downwind/crosswind 系下，m/s）
+                    "vd": 0.0,
+                    "vc": 0.0,
                 }
             )
         if len(self.puffs) > self.max_puffs:
@@ -283,29 +313,32 @@ class DynamicPuffPlume:
         wind_x = self.wind_speed * math.cos(self.wind_direction)
         wind_y = self.wind_speed * math.sin(self.wind_direction)
         active_puffs = []
+        relax = self.turbulence_vel_relax
         for puff in self.puffs:
             direction = float(puff.get("direction", self.wind_direction))
             downwind_x = math.cos(direction)
             downwind_y = math.sin(direction)
             crosswind_x = -downwind_y
             crosswind_y = downwind_x
-            downwind_turbulence = float(
-                self.rng.normal(0.0, self.turbulence_downwind_std)
+            # OU 速度扰动：时间相关（AR(1)），而非每步独立白噪声 →
+            # 同一 filament 的扰动在时间上连贯，形成蜿蜒的相干气缕。
+            puff["vd"] = relax * float(puff.get("vd", 0.0)) + (
+                self.turbulence_vel_std_downwind * float(self.rng.normal())
             )
-            crosswind_turbulence = float(
-                self.rng.normal(0.0, self.turbulence_crosswind_std)
+            puff["vc"] = relax * float(puff.get("vc", 0.0)) + (
+                self.turbulence_vel_std_crosswind * float(self.rng.normal())
             )
             puff["age"] += self.dt
             puff["x"] += (
-                wind_x * self.dt
-                + downwind_turbulence * downwind_x
-                + crosswind_turbulence * crosswind_x
-            )
+                wind_x
+                + puff["vd"] * downwind_x
+                + puff["vc"] * crosswind_x
+            ) * self.dt
             puff["y"] += (
-                wind_y * self.dt
-                + downwind_turbulence * downwind_y
-                + crosswind_turbulence * crosswind_y
-            )
+                wind_y
+                + puff["vd"] * downwind_y
+                + puff["vc"] * crosswind_y
+            ) * self.dt
             puff["sigma_downwind"] += self.diffusion_downwind_rate * self.dt
             puff["sigma_crosswind"] += self.diffusion_crosswind_rate * self.dt
             puff["mass"] *= math.exp(-self.decay_rate * self.dt)
@@ -405,9 +438,26 @@ class DynamicPuffPlume:
         for _ in range(self.puff_warmup_steps):
             self.advance()
 
+    def _randomize_params(self) -> None:
+        """在标称值附近随机化羽流物理参数（域随机化）。"""
+        n = self._dr_nominal
+        r = self.rng
+        self.puff_release_per_step = int(r.integers(1, 4))
+        self.puff_init_mass = n["puff_init_mass"] * float(r.uniform(0.7, 1.5))
+        self.diffusion_downwind_rate = n["diffusion_downwind_rate"] * float(r.uniform(0.7, 1.4))
+        self.diffusion_crosswind_rate = n["diffusion_crosswind_rate"] * float(r.uniform(0.7, 1.4))
+        self.decay_rate = n["decay_rate"] * float(r.uniform(0.7, 1.4))
+        self.turbulence_vel_std_crosswind = n["turbulence_vel_std_crosswind"] * float(
+            r.uniform(0.7, 1.4)
+        )
+        self.wind_dir_meander_sigma = n["wind_dir_meander_sigma"] * float(r.uniform(0.6, 1.4))
+        self.max_puff_age = n["max_puff_age"] * float(r.uniform(0.7, 1.3))
+
     def reset(self, seed: int | None = None) -> None:
         if seed is not None:
             self.rng = np.random.default_rng(seed)
+        if self.domain_randomization:
+            self._randomize_params()
         self._sample_wind()
         self._place_source_upwind()
         self._warmup_puffs()
@@ -440,10 +490,20 @@ class WhiskerOnlyPuffEnv(gym.Env):
         cfg = config or {}
         seed = int(cfg.get("seed", 0))
         self.max_steps = int(cfg.get("max_steps", 300))
+        # 奖励阈值/系数已按改造后羽流的浓度量级重标定（传感器读数典型 0.3~1.3）。
+        # hit_threshold 仍保持较低，用于观测 hit-rate 特征和初始位姿采样；
+        # strong_threshold 才是“强响应” bonus 的门限，按新量级设置。
         self.hit_threshold = float(cfg.get("hit_threshold", 0.08))
-        self.odor_hit_reward = float(cfg.get("odor_hit_reward", 0.10))
-        self.contrast_reward_scale = float(cfg.get("contrast_reward_scale", 0.04))
-        self.trend_reward_scale = float(cfg.get("trend_reward_scale", 4.0))
+        self.strong_threshold = float(cfg.get("strong_threshold", 0.60))
+        # 主要奖励来自连续、依赖动作的项：浓度幅值 + 上升趋势 + 左右对比。
+        self.odor_hit_reward = float(cfg.get("odor_hit_reward", 0.08))
+        self.presence_clip = float(cfg.get("presence_clip", 1.5))
+        self.trend_reward_scale = float(cfg.get("trend_reward_scale", 1.0))
+        self.trend_clip = float(cfg.get("trend_clip", 0.12))
+        self.contrast_reward_scale = float(cfg.get("contrast_reward_scale", 0.15))
+        # 近乎常驻的二值 bonus（在新羽流下几乎一直为真）权重调小，避免淹没可学习信号。
+        self.tracking_bonus = float(cfg.get("tracking_bonus", 0.05))
+        self.strong_bonus = float(cfg.get("strong_bonus", 0.05))
         self.time_penalty = float(cfg.get("time_penalty", 0.04))
 
         # 与 `PlumeEnv` 保持一致：环境持有一个 plume 对象负责气味场。
@@ -462,28 +522,113 @@ class WhiskerOnlyPuffEnv(gym.Env):
             sector_count=int(cfg.get("whisker_sector_count", 10)),
             servo_60deg_time_s=float(cfg.get("servo_60deg_time_s", 0.12)),
         )
-        sensor_alpha = float(cfg.get("sensor_alpha", 0.95))
-        self.left_sensor = FirstOrderGasSensor(sensor_alpha)
-        self.right_sensor = FirstOrderGasSensor(sensor_alpha)
+        self.rng = np.random.default_rng(seed)
+        self.dt = float(cfg.get("dt", 0.2))
+        self.sensor_model = str(cfg.get("sensor_model", "asymmetric"))
+        self.sensor_alpha = float(cfg.get("sensor_alpha", 0.95))
+        # 非对称传感器参数（默认贴近 MQ-3：响应快、恢复慢）。
+        self.sensor_response_tau = float(cfg.get("sensor_response_tau", 0.6))
+        self.sensor_recovery_tau = float(cfg.get("sensor_recovery_tau", 3.0))
+        self.sensor_noise_std = float(cfg.get("sensor_noise_std", 0.006))
+        self.sensor_baseline_drift_std = float(cfg.get("sensor_baseline_drift_std", 0.0))
+        self.sensor_baseline_tau = float(cfg.get("sensor_baseline_tau", 60.0))
+        self._sensor_nominal = {
+            "response_tau": self.sensor_response_tau,
+            "recovery_tau": self.sensor_recovery_tau,
+            "noise_std": self.sensor_noise_std,
+        }
+        self.left_sensor = self._build_sensor()
+        self.right_sensor = self._build_sensor()
+
+        # 域随机化：同时随机化羽流物理和传感器特性。默认关闭（便于复现/诊断），
+        # 训练时建议在配置中打开 domain_randomization=True 以提高 sim-to-real 鲁棒性。
+        self.domain_randomization = bool(cfg.get("domain_randomization", False))
+        self.plume.domain_randomization = self.domain_randomization
+
+        # 观测硬件化（阶段三）：默认 "hardware" 只用真机可获得特征，读数走和硬件
+        # 一致的预处理；"privileged" 保留旧观测（含真实风向/气源距离）做消融上界。
+        self.observation_mode = str(cfg.get("observation_mode", "hardware"))
+        if self.observation_mode not in ("hardware", "privileged"):
+            raise ValueError(
+                f"observation_mode must be 'hardware' or 'privileged', got {self.observation_mode!r}"
+            )
+        # 仿真预处理参数：sim_sensor_scale 是关键标定值（仿真读数 ~0-1.5，
+        # scale=0.35 使强响应归一化到 ~1-3、洁净接近 0，不撞 clip）。硬件用另一套
+        # scale（如 1500），但 builder/config 形状共享。
+        preprocess_config = SensorPreprocessConfig(
+            dt_s=float(cfg.get("preprocess_dt_s", self.dt)),
+            baseline_tau_s=float(cfg.get("preprocess_baseline_tau_s", 180.0)),
+            smooth_tau_s=float(cfg.get("preprocess_smooth_tau_s", 2.0)),
+            response_tau_s=float(cfg.get("preprocess_response_tau_s", 2.0)),
+            trend_window=int(cfg.get("preprocess_trend_window", 8)),
+            scale=float(cfg.get("sim_sensor_scale", 0.35)),
+            clip=float(cfg.get("preprocess_clip", 5.0)),
+            baseline_update_signal_threshold=float(
+                cfg.get("preprocess_baseline_update_signal_threshold", 0.20)
+            ),
+            baseline_update_trend_threshold=float(
+                cfg.get("preprocess_baseline_update_trend_threshold", 0.05)
+            ),
+        )
+        self.observation_builder = WhiskerObservationBuilder(
+            preprocess_config, self.whiskers.sector_count
+        )
+        self.observation_field_names = self.observation_builder.field_names
+        # 记录上一动作的指令扇区（硬件可得），用于观测的扇区/角度特征。
+        self.last_left_sector = 0
+        self.last_right_sector = 0
+        self._last_obs: np.ndarray | None = None
 
         self.robot_state = RobotState(0.0, 0.0, 0.0)
         self.action_space = spaces.MultiDiscrete(
             [self.whiskers.sector_count, self.whiskers.sector_count]
         )
+        # hardware 模式用 builder 提供的有限边界（比 ±inf 更规范）；privileged 旧
+        # 向量语义不同（含 cos/sin、归一化距离），仍用 ±inf 兜底。
+        obs_dim = self.observation_builder.dim
+        if self.observation_mode == "hardware":
+            obs_low = self.observation_builder.low
+            obs_high = self.observation_builder.high
+        else:
+            obs_low = np.full(obs_dim, -np.inf, dtype=np.float32)
+            obs_high = np.full(obs_dim, np.inf, dtype=np.float32)
         self.observation_space = spaces.Box(
-            low=-np.inf,
-            high=np.inf,
-            shape=(12,),
+            low=obs_low,
+            high=obs_high,
+            shape=(obs_dim,),
             dtype=np.float32,
         )
 
-        self.rng = np.random.default_rng(seed)
         self.step_count = 0
         self.prev_left = 0.0
         self.prev_right = 0.0
         self.left_hits: list[float] = []
         self.right_hits: list[float] = []
         self.trajectory: list[dict[str, Any]] = []
+
+    def _randomize_sensors(self) -> None:
+        """在标称值附近随机化传感器特性，并引入基线漂移（域随机化）。"""
+        n = self._sensor_nominal
+        r = self.rng
+        self.sensor_response_tau = n["response_tau"] * float(r.uniform(0.6, 1.6))
+        self.sensor_recovery_tau = n["recovery_tau"] * float(r.uniform(0.6, 1.8))
+        self.sensor_noise_std = n["noise_std"] * float(r.uniform(0.5, 2.0))
+        # DR 下引入随机基线漂移，模拟真实 MQ-3 每次上电基线不一致。
+        self.sensor_baseline_drift_std = float(r.uniform(0.0, 0.010))
+
+    def _build_sensor(self) -> FirstOrderGasSensor | AsymmetricGasSensor:
+        """按配置构造单个气体传感器。"""
+        if self.sensor_model == "first_order":
+            return FirstOrderGasSensor(self.sensor_alpha)
+        return AsymmetricGasSensor(
+            response_tau=self.sensor_response_tau,
+            recovery_tau=self.sensor_recovery_tau,
+            dt=self.dt,
+            noise_std=self.sensor_noise_std,
+            baseline_drift_std=self.sensor_baseline_drift_std,
+            baseline_tau=self.sensor_baseline_tau,
+            rng=self.rng,
+        )
 
     def reset(
         self,
@@ -494,6 +639,11 @@ class WhiskerOnlyPuffEnv(gym.Env):
         super().reset(seed=seed)
         if seed is not None:
             self.rng = np.random.default_rng(seed)
+        if self.domain_randomization:
+            self._randomize_sensors()
+        # 重建传感器：使其使用当前 rng 和（可能已随机化的）参数。
+        self.left_sensor = self._build_sensor()
+        self.right_sensor = self._build_sensor()
         self.plume.reset(seed)
         self.step_count = 0
         self.prev_left = 0.0
@@ -504,12 +654,21 @@ class WhiskerOnlyPuffEnv(gym.Env):
         self.left_sensor.reset()
         self.right_sensor.reset()
         self.whiskers.reset()
+        # 触须 reset 后两侧都回到 0 号扇区中心，指令扇区跟着复位。
+        self.last_left_sector = 0
+        self.last_right_sector = 0
+        # init_baseline=None：用首帧读数锚基线，与硬件上电锚基线一致。
+        self.observation_builder.reset(init_baseline=None)
 
         self.robot_state = self.sample_robot_pose_in_plume()
-        return self._observe()
+        obs = self._build_observation()
+        return obs, self._current_info()
 
     def step(self, action: Any) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
         left_sector, right_sector = self._decode_action(action)
+        # 记录指令扇区（硬件可得的“上一动作”），供观测的扇区/角度特征使用。
+        self.last_left_sector = left_sector
+        self.last_right_sector = right_sector
         self.plume.advance()
         whisker_state = self.whiskers.step(
             left_sector,
@@ -552,7 +711,8 @@ class WhiskerOnlyPuffEnv(gym.Env):
 
         self.prev_left = left
         self.prev_right = right
-        obs, info = self._observe()
+        obs = self._build_observation()
+        info = self._current_info()
         info.update(
             {
                 "left_sector": int(left_sector),
@@ -625,8 +785,29 @@ class WhiskerOnlyPuffEnv(gym.Env):
             theta = self.rng.uniform(-np.pi, np.pi)
             return RobotState(float(x), float(y), float(theta))
 
-    def _observe(self) -> tuple[np.ndarray, dict[str, Any]]:
+    def _build_observation(self) -> np.ndarray:
+        """构造并缓存本帧观测。**有状态**：hardware 模式会推进一次预处理器。
+
+        每帧只应在 reset()/step() 各调一次。可视化脚本另外调用的 `_observe()`
+        是无副作用的薄壳，只返回这里缓存的 `self._last_obs`，不会重复推进预处理。
+        """
         whisker_state = self.whiskers.state(self.robot_state)
+        if self.observation_mode == "privileged":
+            obs = self._build_privileged_observation(whisker_state)
+        else:
+            obs = self.observation_builder.build(
+                self.left_sensor.value,
+                self.right_sensor.value,
+                whisker_state.left_angle,
+                whisker_state.right_angle,
+                self.last_left_sector,
+                self.last_right_sector,
+            )
+        self._last_obs = obs
+        return obs
+
+    def _build_privileged_observation(self, whisker_state: Any) -> np.ndarray:
+        """旧的 12 维特权观测（含真实风向、气源距离），仅用于消融上界对照。"""
         left = self.left_sensor.value
         right = self.right_sensor.value
         wind_rel = self._wrap_angle(self.plume.wind_direction - self.robot_state.heading)
@@ -634,8 +815,7 @@ class WhiskerOnlyPuffEnv(gym.Env):
             self.robot_state.x - self.plume.source_x,
             self.robot_state.y - self.plume.source_y,
         )
-
-        obs = np.array(
+        return np.array(
             [
                 left,
                 right,
@@ -652,27 +832,43 @@ class WhiskerOnlyPuffEnv(gym.Env):
             ],
             dtype=np.float32,
         )
-        return obs, {
+
+    def _current_info(self) -> dict[str, Any]:
+        """无副作用地组装 info（不推进预处理器），键与改动前一致。"""
+        return {
             "robot_state": self.robot_state,
-            "whisker_state": whisker_state,
+            "whisker_state": self.whiskers.state(self.robot_state),
             "step": self.step_count,
         }
+
+    def _observe(self) -> tuple[np.ndarray, dict[str, Any]]:
+        """无副作用薄壳：返回最近一次构造的观测 + 当前 info。
+
+        保留此方法是为了兼容可视化脚本对 `env._observe()` 的额外调用；它不会
+        重复推进有状态的预处理器。若 `_build_observation()` 尚未被调用（异常路径），
+        退化为构造一次。
+        """
+        if self._last_obs is None:
+            return self._build_observation(), self._current_info()
+        return self._last_obs, self._current_info()
 
     def get_reward(self, left: float, right: float) -> float:
         gas_concentration = max(left, right)
         gas_trend = max(left - self.prev_left, right - self.prev_right)
         in_plume = gas_concentration >= self.hit_threshold
-        strong_plume = gas_concentration >= self.plume.plume_strong_threshold
+        strong_plume = gas_concentration >= self.strong_threshold
 
+        # 连续、依赖动作的主项：上升趋势、浓度幅值、左右对比。
         gas_trend_reward = self.trend_reward_scale * float(
-            np.clip(gas_trend, -0.04, 0.04)
+            np.clip(gas_trend, -self.trend_clip, self.trend_clip)
         )
         gas_presence_reward = self.odor_hit_reward * float(
-            np.clip(gas_concentration, 0.0, 1.0)
+            np.clip(gas_concentration, 0.0, self.presence_clip)
         )
-        plume_tracking_bonus = 0.12 if in_plume else 0.0
-        strong_plume_bonus = 0.10 if strong_plume else 0.0
         contrast_reward = self.contrast_reward_scale * abs(left - right)
+        # 二值 bonus 权重已调小：仅作弱引导，避免在新量级下变成常驻偏置淹没梯度。
+        plume_tracking_bonus = self.tracking_bonus if in_plume else 0.0
+        strong_plume_bonus = self.strong_bonus if strong_plume else 0.0
         return float(
             gas_trend_reward
             + gas_presence_reward

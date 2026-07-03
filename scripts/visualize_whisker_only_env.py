@@ -27,17 +27,22 @@ from dual_whisker_rl.envs.whisker_only_env import WORLD_MIN
 
 
 def build_plume_colormap() -> colors.LinearSegmentedColormap:
-    """参考图风格：背景浅色，气体由深蓝逐渐过渡到黄色高浓度。"""
+    """参考图风格：低浓度融入奶白背景，羽流随浓度加深为蓝，峰值跳到黄色。
+
+    低端锚定到与 facecolor 一致的奶白，使空白区（浓度≈0）与背景无缝衔接；
+    浓度升高时蓝色逐渐加深至深海军蓝（羽流核心），最高浓度过渡到黄色高亮。
+    """
     return colors.LinearSegmentedColormap.from_list(
         "puff_demo",
         [
-            "#0c2747",
-            "#174f91",
-            "#2d79bd",
-            "#65a9dc",
-            "#b8d6dc",
-            "#eee9dc",
-            "#ffe27a",
+            (0.00, "#f7f4ef"),
+            (0.15, "#cfe2ec"),
+            (0.35, "#93c1e0"),
+            (0.55, "#4f93cc"),
+            (0.75, "#22619f"),
+            (0.90, "#123b6b"),
+            (0.97, "#0c2747"),
+            (1.00, "#ffe27a"),
         ],
         N=256,
     )

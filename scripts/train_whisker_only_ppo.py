@@ -88,6 +88,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log-interval", type=int, default=1)
     parser.add_argument("--eval-freq", type=int, default=1_000)
     parser.add_argument("--eval-episodes", type=int, default=5)
+    parser.add_argument(
+        "--domain-randomization",
+        action="store_true",
+        help="开启羽流物理和传感器特性的 episode 级域随机化，提高 sim-to-real 鲁棒性。",
+    )
     return parser.parse_args()
 
 
@@ -134,6 +139,8 @@ def make_env(
 
 def train(args: argparse.Namespace) -> PPO:
     config = load_config(args.config)
+    if args.domain_randomization:
+        config["domain_randomization"] = True
     args.seed = resolve_seed(args.seed)
     if args.n_envs < 1:
         raise ValueError("--n-envs must be at least 1")
@@ -236,6 +243,9 @@ def save_run_metadata(args: argparse.Namespace, config: dict) -> None:
         "history_length": args.history_length,
         "base_observation_dim": base_obs_dim,
         "stacked_observation_dim": base_obs_dim * args.history_length,
+        "observation_mode": metadata_env.observation_mode,
+        "observation_field_names": metadata_env.observation_field_names,
+        "sim_sensor_scale": metadata_env.observation_builder.config.scale,
         "action_space": "[left_sector, right_sector]",
         "servo_60deg_time_s": metadata_env.whiskers.servo_60deg_time_s,
         "servo_angular_speed_deg_s": float(
