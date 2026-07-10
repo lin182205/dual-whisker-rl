@@ -77,10 +77,10 @@ class ObservationHistoryWrapper(gym.Wrapper):
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, default=None)
-    parser.add_argument("--timesteps", type=int, default=50_000)
+    parser.add_argument("--timesteps", type=int, default=20_0000)
     parser.add_argument("--seed", type=int, default=None)
-    parser.add_argument("--n-envs", type=int, default=4)
-    parser.add_argument("--history-length", type=int, default=6)
+    parser.add_argument("--n-envs", type=int, default=8)
+    parser.add_argument("--history-length", type=int, default=20)
     parser.add_argument("--model-path", type=Path, default=ROOT / "results" / "models" / "whisker_only_ppo.zip")
     parser.add_argument("--log-dir", type=Path, default=ROOT / "results" / "logs" / "whisker_only_ppo")
     parser.add_argument("--tensorboard-dir", type=Path, default=ROOT / "results" / "tensorboard")
@@ -246,6 +246,7 @@ def save_run_metadata(args: argparse.Namespace, config: dict) -> None:
         "observation_mode": metadata_env.observation_mode,
         "observation_field_names": metadata_env.observation_field_names,
         "sim_sensor_scale": metadata_env.observation_builder.config.scale,
+        "init_pose_mode": metadata_env.init_pose_mode,
         "action_space": "[left_sector, right_sector]",
         "servo_60deg_time_s": metadata_env.whiskers.servo_60deg_time_s,
         "servo_angular_speed_deg_s": float(

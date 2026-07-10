@@ -52,7 +52,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Render a SimpleGasEnv-style puff animation for the whisker-only environment."
     )
-    parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument("--seed", type=int, default=9)
     parser.add_argument("--steps", type=int, default=120)
     parser.add_argument("--resolution", type=int, default=100)
     parser.add_argument("--png-path", type=Path, default=ROOT / "results" / "figures" / "whisker_only_env.png")
@@ -81,7 +81,23 @@ def parse_args() -> argparse.Namespace:
         default=1,
         help="相邻关键帧之间插入的过渡帧数；越大越丝滑但文件越大。",
     )
-    parser.add_argument("--title", type=str, default="Whisker-only Puff Sampling Demo")
+    parser.add_argument("--title", type=str, default="Whisker-only Puff Sampling")
+    parser.add_argument(
+        "--model-path",
+        type=Path,
+        default=ROOT / "results" / "models" / "whisker_only_ppo.zip",
+        help="给定则用训练好的 PPO 策略驱动触须；不给则用随机动作。",
+    )
+    parser.add_argument(
+        "--stochastic",
+        action="store_true",
+        help="策略采样动作（默认 deterministic，更能看清学到的稳定偏好）。",
+    )
+    parser.add_argument(
+        "--domain-randomization",
+        action="store_true",
+        help="可视化环境也开域随机化（与训练一致的分布）。",
+    )
     return parser.parse_args()
 
 
@@ -90,10 +106,24 @@ def capture_rollout(
     max_steps: int,
     grid_resolution: int,
     seed: int,
+    model: object | None = None,
+    history_length: int = 1,
+    deterministic: bool = True,
 ) -> dict[str, object]:
-    """随机触须动作采样一段 rollout，并缓存每一帧气体场用于动画。"""
+    """采样一段 rollout 并缓存每帧气体场用于动画。
+
+    `model` 为 None 时用随机触须动作；给定 PPO 模型时，维护一个与训练
+    `ObservationHistoryWrapper` 完全一致的历史缓冲（首帧复制填满、每步 append、
+    从旧到新拼接），用堆叠观测驱动策略，使可视化反映真实学到的行为。
+    """
+    from collections import deque
+
     rng = np.random.default_rng(seed + 123)
-    env.reset(seed=seed)
+    obs, _ = env.reset(seed=seed)
+    obs = np.asarray(obs, dtype=np.float32)
+    history: deque[np.ndarray] = deque(maxlen=max(1, history_length))
+    for _ in range(history.maxlen):
+        history.append(obs.copy())
     map_metadata = env.get_map_metadata()
     xs, ys, initial_grid = env.concentration_grid(resolution=grid_resolution)
 
@@ -118,11 +148,17 @@ def capture_rollout(
     right_points.append(initial_whisker.right_point)
 
     for step_idx in range(max_steps):
-        action = [
-            int(rng.integers(0, env.whiskers.sector_count)),
-            int(rng.integers(0, env.whiskers.sector_count)),
-        ]
-        _, reward, _, _, info = env.step(action)
+        if model is None:
+            action = [
+                int(rng.integers(0, env.whiskers.sector_count)),
+                int(rng.integers(0, env.whiskers.sector_count)),
+            ]
+        else:
+            stacked = np.concatenate(tuple(history)).astype(np.float32)
+            action, _ = model.predict(stacked, deterministic=deterministic)
+            action = [int(action[0]), int(action[1])]
+        obs, reward, _, _, info = env.step(action)
+        history.append(np.asarray(obs, dtype=np.float32))
         total_reward += reward
         obs_info = env._observe()[1]
         whisker_state = obs_info["whisker_state"]
@@ -708,12 +744,39 @@ def render_animation(
 
 def main() -> None:
     args = parse_args()
-    env = WhiskerOnlyPuffEnv()
+    env = WhiskerOnlyPuffEnv({"domain_randomization": args.domain_randomization})
+
+    model = None
+    history_length = 1
+    if args.model_path is not None:
+        if not args.model_path.exists():
+            raise FileNotFoundError(f"模型不存在: {args.model_path}")
+        from stable_baselines3 import PPO
+
+        model = PPO.load(str(args.model_path))
+        # 从模型堆叠观测维度反推 history 长度，无需手动指定。
+        base_dim = int(env.observation_space.shape[0])
+        stacked_dim = int(model.observation_space.shape[0])
+        if stacked_dim % base_dim != 0:
+            raise ValueError(
+                f"模型观测维度 {stacked_dim} 不是环境观测维度 {base_dim} 的整数倍，"
+                "可能观测格式不匹配（模型是否用当前环境训练的？）。"
+            )
+        history_length = stacked_dim // base_dim
+        print(
+            f"loaded_model={args.model_path} base_obs={base_dim} "
+            f"stacked_obs={stacked_dim} history_length={history_length} "
+            f"deterministic={not args.stochastic}"
+        )
+
     episode_data = capture_rollout(
         env,
         max_steps=args.steps,
         grid_resolution=args.resolution,
         seed=args.seed,
+        model=model,
+        history_length=history_length,
+        deterministic=not args.stochastic,
     )
     render_static(episode_data, args.png_path, args.title)
     render_animation(

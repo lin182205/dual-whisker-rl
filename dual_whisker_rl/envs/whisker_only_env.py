@@ -41,6 +41,7 @@ class DynamicPuffPlume:
         wind_speed_range: tuple[float, float] = (0.06, 0.11),
         wind_sampling_mode: str = "random",
         obstacles: np.ndarray | None = None,
+        plume_overrides: dict[str, Any] | None = None,
     ) -> None:
         self.rng = np.random.default_rng(seed)
         self.source_position_override = source_position
@@ -88,22 +89,25 @@ class DynamicPuffPlume:
         self.source_core_weight = 0.0
         # 稀疏、细、短寿命的 filament：避免大量 puff 叠加成连续气幕，
         # 使固定点看到一缕一缕经过（whiff/blank），而不是常通。
-        self.puff_release_per_step = 2
+        # 参数已调稀疏/变窄（release 2→1、sigma 缩小、寿命缩短），使固定点在整段
+        # episode 里都呈明显 whiff/blank 间歇（intermittency≈0.3），而非几乎常通。
+        # 这样“触须指向哪个扇区”才持续影响信息获取，主动采样才有可学信号。
+        self.puff_release_per_step = 1
         self.puff_release_downwind_jitter = 0.02
         self.puff_release_crosswind_jitter = 0.04
         self.puff_init_mass = 0.012
         self.puff_mass_jitter = 0.45
-        self.puff_init_sigma_downwind = 0.060
-        self.puff_init_sigma_crosswind = 0.028
+        self.puff_init_sigma_downwind = 0.052
+        self.puff_init_sigma_crosswind = 0.024
         self.puff_sigma_jitter = 0.25
         self.diffusion_downwind_rate = 0.008
         self.diffusion_crosswind_rate = 0.003
-        self.decay_rate = 0.045
+        self.decay_rate = 0.052
         # 小尺度湍流：per-puff OU 速度扰动（m/s），时间相关 → 相干 filament 蜿蜒。
         self.turbulence_vel_relax = 0.90
         self.turbulence_vel_std_downwind = 0.020
         self.turbulence_vel_std_crosswind = 0.070
-        self.max_puff_age = 8.0
+        self.max_puff_age = 7.0
         self.min_puff_mass = 0.0010
         self.max_puffs = 360
         self.puff_bounds_margin = 1.1
@@ -117,6 +121,14 @@ class DynamicPuffPlume:
         self.wind_direction = 0.0
         self.wind_speed = 1.0
         self.puffs: list[dict[str, float]] = []
+
+        # 羽流物理参数覆盖（用于调稀疏/尺寸而无需改代码）。在 _dr_nominal 之前应用，
+        # 使域随机化也围绕覆盖后的新值扰动。只允许覆盖已存在的属性。
+        if plume_overrides:
+            for key, value in plume_overrides.items():
+                if not hasattr(self, key):
+                    raise KeyError(f"未知 plume 覆盖参数: {key}")
+                setattr(self, key, value)
 
         # 域随机化：每个 episode 在标称值附近扰动羽流物理参数，提高策略鲁棒性。
         self.domain_randomization = False
@@ -515,6 +527,7 @@ class WhiskerOnlyPuffEnv(gym.Env):
             gas_field_mode=str(cfg.get("gas_field_mode", "puff")),
             wind_speed_range=tuple(cfg.get("wind_speed_range", (0.06, 0.11))),
             wind_sampling_mode=str(cfg.get("wind_sampling_mode", "random")),
+            plume_overrides=cfg.get("plume_overrides"),
         )
         self.field = self.plume  # 兼容旧可视化脚本中的 env.field 访问。
         self.whiskers = DualWhiskerSampler(
@@ -599,6 +612,19 @@ class WhiskerOnlyPuffEnv(gym.Env):
             dtype=np.float32,
         )
 
+        # 初始位姿模式（实验旋钮）：控制机器人/触须起始落点相对羽流的密度。
+        # in_plume  = 浓度密集区（易拿信号，旧默认，会让奖励被“羽流存在”主导）；
+        # plume_edge= 羽流边缘/弱覆盖区（whiff/blank 间歇明显，最能考验主动采样）；
+        # uniform   = 全场均匀（起始常在羽流外，信号最稀疏）。
+        self.init_pose_mode = str(cfg.get("init_pose_mode", "plume_edge"))
+        if self.init_pose_mode not in ("in_plume", "plume_edge", "uniform"):
+            raise ValueError(
+                f"init_pose_mode must be 'in_plume'/'plume_edge'/'uniform', got {self.init_pose_mode!r}"
+            )
+        # plume_edge 用“活跃格子”浓度分布的分位带定义边缘（默认取 10~50 分位的弱覆盖）。
+        self.init_edge_pct_low = float(cfg.get("init_edge_pct_low", 10.0))
+        self.init_edge_pct_high = float(cfg.get("init_edge_pct_high", 50.0))
+
         self.step_count = 0
         self.prev_left = 0.0
         self.prev_right = 0.0
@@ -660,7 +686,7 @@ class WhiskerOnlyPuffEnv(gym.Env):
         # init_baseline=None：用首帧读数锚基线，与硬件上电锚基线一致。
         self.observation_builder.reset(init_baseline=None)
 
-        self.robot_state = self.sample_robot_pose_in_plume()
+        self.robot_state = self.sample_initial_robot_pose()
         obs = self._build_observation()
         return obs, self._current_info()
 
@@ -747,33 +773,73 @@ class WhiskerOnlyPuffEnv(gym.Env):
         )
         return metadata
 
-    def sample_robot_pose_in_plume(self) -> RobotState:
-        """优先把机器人/触须初始化到当前羽流覆盖区域附近。
-
-        训练触须主动采样时，如果初始位置总在细窄羽流外，策略会看到大量
-        接近零的传感器读数。这里先用当前 puff 场生成浓度网格，再从高于
-        分位数阈值的覆盖区域中随机选点，使触须更容易获得有效气味信息。
-        """
-        xs, ys, concentration = self.plume.grid(resolution=60, add_noise=False)
-        threshold = max(
-            self.hit_threshold * 0.35,
-            float(np.percentile(concentration, 70.0)),
-        )
-        candidate_rows, candidate_cols = np.where(concentration >= threshold)
-        if candidate_rows.size == 0:
+    def sample_initial_robot_pose(self) -> RobotState:
+        """按 init_pose_mode 选择初始位姿采样策略。"""
+        if self.init_pose_mode == "uniform":
             return self.sample_robot_pose_uniform()
+        if self.init_pose_mode == "plume_edge":
+            return self.sample_robot_pose_plume_edge()
+        return self.sample_robot_pose_in_plume()
 
+    def _sample_from_grid_candidates(
+        self,
+        xs: np.ndarray,
+        ys: np.ndarray,
+        rows: np.ndarray,
+        cols: np.ndarray,
+    ) -> RobotState | None:
+        """在候选格子里带有效性检查地随机选点；全部失败返回 None。"""
         for _ in range(128):
-            idx = int(self.rng.integers(0, candidate_rows.size))
-            x = float(xs[candidate_cols[idx]])
-            y = float(ys[candidate_rows[idx]])
+            idx = int(self.rng.integers(0, rows.size))
+            x = float(xs[cols[idx]])
+            y = float(ys[rows[idx]])
             if not self.plume.is_position_valid(x, y, margin=0.16):
                 continue
             if math.hypot(x - self.plume.source_x, y - self.plume.source_y) < 0.10:
                 continue
             theta = self.rng.uniform(-np.pi, np.pi)
             return RobotState(x, y, float(theta))
-        return self.sample_robot_pose_uniform()
+        return None
+
+    def sample_robot_pose_in_plume(self) -> RobotState:
+        """把机器人/触须初始化到当前羽流覆盖的密集区域（浓度高分位）。
+
+        起始就在密集区会让触须几乎每步都读到气味，奖励被“羽流存在”主导、
+        主动采样缺乏可学信号；因此这不再是默认，仅作对照。
+        """
+        xs, ys, concentration = self.plume.grid(resolution=60, add_noise=False)
+        threshold = max(
+            self.hit_threshold * 0.35,
+            float(np.percentile(concentration, 70.0)),
+        )
+        rows, cols = np.where(concentration >= threshold)
+        if rows.size == 0:
+            return self.sample_robot_pose_uniform()
+        pose = self._sample_from_grid_candidates(xs, ys, rows, cols)
+        return pose if pose is not None else self.sample_robot_pose_uniform()
+
+    def sample_robot_pose_plume_edge(self) -> RobotState:
+        """把机器人落在羽流边缘 / 弱覆盖区：局部有微弱、间歇气味但非密集核心。
+
+        这样左右触须指向不同扇区时更容易产生 whiff/blank 差异与左右不对称，是
+        检验“主动采样是否比固定/随机更有信息”的关键场景。做法：取“活跃格子”
+        （浓度高于背景噪声）的浓度分布，选落在 [init_edge_pct_low, init_edge_pct_high]
+        分位带内的弱覆盖格子；活跃格子太少时退化为均匀采样。
+        """
+        xs, ys, concentration = self.plume.grid(resolution=60, add_noise=False)
+        active_floor = self.hit_threshold * 0.25
+        active_mask = concentration > active_floor
+        if not np.any(active_mask):
+            return self.sample_robot_pose_uniform()
+        active_vals = concentration[active_mask]
+        lo = float(np.percentile(active_vals, self.init_edge_pct_low))
+        hi = float(np.percentile(active_vals, self.init_edge_pct_high))
+        band_mask = active_mask & (concentration >= lo) & (concentration <= hi)
+        rows, cols = np.where(band_mask)
+        if rows.size == 0:
+            return self.sample_robot_pose_uniform()
+        pose = self._sample_from_grid_candidates(xs, ys, rows, cols)
+        return pose if pose is not None else self.sample_robot_pose_uniform()
 
     def sample_robot_pose_uniform(self) -> RobotState:
         """兜底采样：如果羽流覆盖区候选失败，则在 1m 场地内均匀采样。"""

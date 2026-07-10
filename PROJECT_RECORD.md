@@ -1314,3 +1314,110 @@ left_sector_norm, right_sector_norm      # 扇区 / (sector_count-1)
 ### 18.5 下一步
 
 阶段三完成，触须 PPO 现在是硬件可部署观测形状。下一步可正式训练 whisker-only PPO（建议 `--history-length 20` ≈ 4s 历史、多 seed），并与固定/周期/随机策略在信息获取指标上对比（阶段四）。等硬件可用时，硬件 rollout 脚本直接复用 `WhiskerObservationBuilder`（换 `scale=1500`），保证观测与训练一致。机器人移动 + 触须联合 PPO 仍按路线图放到固定基座验证之后。
+
+## 19. 初始位姿模式：让主动采样有可学信号
+
+### 19.1 问题：奖励被“羽流存在”主导
+
+首次正式训练（seed 1、200k、history 20、hardware 观测）后发现 `rollout/ep_rew_mean` 和 `eval/mean_reward` **全程持平**（分别约 54 和 51~57，无上升趋势），策略扇区分布收敛到固定偏好（左→3/4、右→5，熵 1.3~2.3，明显低于随机的 3.3，但未塌到 0）。结合诊断，判断根因是：初始位姿采样 `sample_robot_pose_in_plume()` 故意把机器人丢进浓度高分位（≥70%）的**密集区**，导致触须几乎每步都读到气味，`tracking_bonus`/presence 等常驻项贡献了大部分回报，**“触须指哪个扇区”对回报几乎没有影响**，主动采样缺乏可学梯度。也就是说，策略只学到了一个“还不错的固定采样姿态”，而非随气味变化的动态主动采样。
+
+关键认识：决定“起始入羽流概率”的主要不是场地大小，而是这个初始位姿采样函数。
+
+### 19.2 方案：加初始位姿模式旋钮（默认改为 plume_edge）
+
+在 `WhiskerOnlyPuffEnv` 增加 `init_pose_mode` 配置（不改羽流场、不改奖励函数、不改动作空间，只改机器人落点分布，因此奖励量级和羽流间歇诊断不受影响）：
+
+```text
+in_plume    浓度密集区（旧默认，保留作对照）
+plume_edge  羽流边缘/弱覆盖区（新默认）——取“活跃格子”（浓度>hit_threshold*0.25）
+            浓度分布的 [init_edge_pct_low, init_edge_pct_high]=[10,50] 分位带，
+            落在弱覆盖格子；活跃格子太少时退化为均匀采样
+uniform     全场均匀（起始常在羽流外，信号最稀疏）
+```
+
+配套：`sample_initial_robot_pose()` 按模式分发；`sample_robot_pose_plume_edge()` 新增；`in_plume`/`edge` 共用 `_sample_from_grid_candidates()` 做带有效性检查的重试。训练 `run_metadata.json` 记录 `init_pose_mode`。
+
+### 19.3 验证：起始入羽流率显著下降且信号变间歇
+
+对每种模式 reset 60 次、看首步左右传感器 max 读数：
+
+```text
+in_plume  : 起始入羽流率 0.87   首步max mean 0.200  p10 0.068  p90 0.375
+plume_edge: 起始入羽流率 0.52   首步max mean 0.095  p10 0.016  p90 0.200
+uniform   : 起始入羽流率 0.40   首步max mean 0.091  p10 0.009  p90 0.227
+```
+
+`plume_edge` 把起始入羽流率从 87% 降到 52%、首步信号均值减半，且分布拉开（p10 近空白、p90 中等）——正是 whiff/blank 间歇、“触须指向影响信息获取”的场景，比 uniform 温和、不至于长期采不到气味。训练管线冒烟通过，默认已生效。
+
+### 19.4 下一步
+
+在 `plume_edge` 新默认下重新训练 whisker-only PPO（多 seed），并配合阶段四评估脚本用信息获取指标对比 ppo / random / periodic / fixed——只有在这个起始更间歇的场景里，才能真正检验主动采样相对固定/随机是否有增益。若仍无增益，再检查奖励是否需要进一步弱化常驻项、强化 trend/contrast。
+
+## 20. 阶段四评估脚本 + 羽流稀疏化
+
+### 20.1 触须采样策略评估脚本
+
+新增 `scripts/evaluate_whisker_sampling_policies.py`：在同一批 plume seed 上公平对比 ppo / periodic / random_neighbor / 多个 fixed 角度，用**信息获取指标**（odor_hit_rate、mean_max_smooth、mean_abs_smooth_diff、mean_abs_trend_sum、reacquisition、sector_entropy 等）而非总回报评判。指标定义与动作序列生成**直接复用**硬件脚本 `compare_hardware_sampling_modes.py` 的 `compute_metrics`/`make_action_sequence`，保证仿真评估与硬件评估口径一致；指标从环境 hardware 观测槽读取。输出 `results/figures/whisker_policy_eval/`（metrics.json + summary.md + 柱状图）。
+
+首轮评估（旧密集羽流、seed-1 模型）结论：命中率所有策略饱和到 0.92-0.96，PPO 未赢过最佳固定角度（fixed_5 的 max_smooth/contrast 反而更高）——即决策树"结论 C"。根因是奖励被"羽流存在"主导、采样位置对信息几乎无影响。
+
+### 20.2 羽流稀疏化（让采样位置持续重要）
+
+诊断发现 `plume_edge` 只改起始落点，但 300 步内动态羽流会扫过整场、固定基座照样被浸没（intermittency 0.73、whiff 2.5s/blank 0.9s）。因此把 `DynamicPuffPlume` 默认参数调稀疏+变窄：`puff_release_per_step 2→1`、`puff_init_sigma_crosswind 0.028→0.024`、`puff_init_sigma_downwind 0.060→0.052`、`decay_rate 0.045→0.052`、`max_puff_age 8→7`。并加 `plume_overrides` 覆盖机制（env cfg 可传，`DynamicPuffPlume(..., plume_overrides=...)`，在 `_dr_nominal` 之前应用，DR 围绕新值扰动），便于以后不改代码扫参。
+
+before/after 诊断：intermittency `0.73→0.24`、whiff `2.5s→0.84s`、blank `0.92s→2.73s`（标准短 whiff/长 blank 结构）。重跑评估：命中率从 0.95 降到 0.71-0.87 且固定角度之间拉开，采样位置开始真正影响信息。但主动采样仍未明显赢过最佳固定角度（当前 PPO 是旧密集羽流训的、OOD，需在新羽流下重训才公平）。
+
+## 21. 移动机器人触须气源搜索环境（MobileWhiskerPuffEnv）
+
+把触须装到移动差速机器人上做气源搜索，复用 `WhiskerOnlyPuffEnv` 的全部新组件（稀疏羽流、AsymmetricGasSensor、硬件观测、舵机触须）。**注意**：路线图把移动机器人列为最后阶段（前提是固定基座已证明主动采样有增益，而该结论目前尚不明确）；本环境按用户要求提前搭建，严肃结论仍应回头以固定基座验证为前提。
+
+### 21.1 环境设计
+
+新增 `dual_whisker_rl/envs/mobile_whisker_env.py`，`MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv)`：
+
+- 动作 `MultiDiscrete([6, 10, 10])` = [移动, 左扇区, 右扇区]，与硬件命令兼容。
+- 气源置于场内上风侧 `(-0.35, 0.0)`，机器人从下风侧随机起点、大致朝上风出发（`sample_initial_robot_pose` override），导航到源。差速底盘 `DifferentialDriveRobot(forward_speed=0.15, turn_rate=1.5, dt=0.2)`：0.03m/步、约 17°/步。
+- **step 里先推进机器人位姿再采样触须**（触须点由 `whisker_model._point` 依位姿自动跟随）；父类 step 单体不可 hook，故整体重写（父类零改动）。
+- 观测 = 父 12 维硬件特征 + 3 维本体感受（heading cos/sin、上一步移动动作），共 **15 维**；**不含**真实风向/气源方向等特权信息。奖励可用真实气源距离（仅训练期）。
+- 奖励（初版）= 源搜索为主：`progress_reward_scale=15`（potential 式主项）+ `goal_bonus=10` + 小幅 trend/contrast。**问题**：progress 用真实距离、goal 必得，20k 冒烟就 0.9 成功率，策略可无视触须 → 见 §21.5 奖励重设计。
+
+### 21.2 配套脚本与一处兼容修改
+
+- `scripts/train_mobile_whisker_ppo.py`（复用 `ObservationHistoryWrapper`，history 20，PPO MlpPolicy）；`scripts/evaluate_mobile_whisker_ppo.py`（复用 `evaluate_policy`）；`scripts/visualize_mobile_whisker_env.py`（3 元动作、到达即停、goal 圆，复用 whisker 可视化助手）。
+- `dual_whisker_rl/evaluation.py`：gymnasium 1.2.3 的 `gym.Wrapper` 不再转发属性访问，而评估工厂会套历史包装器，故把 `env.trajectory`/`env.goal_radius`/`env.hit_threshold` 三处改为 `env.unwrapped.*`（对旧 `PlumeEnv` 路径向后兼容）。
+- 导出：`envs/__init__.py` 加 `MobileWhiskerPuffEnv`。
+
+### 21.3 验证结论
+
+- 环境：obs (15,)、action [6,10,10]；目标导向脚本控制器 20/20 到达、mean_return≈19（progress+goal 奖励符号正确）；随机策略 3/20（拉开）。历史堆叠 300 维。
+- 可视化：羽流从场内源 `(-0.35,0)` 释放、随风飘向 +x、间歇结构在；机器人从下风侧导航到源、goal 圆正常。
+- 训练冒烟（20k）跑通，metadata 记录 base=15/stacked=300/动作串/goal_radius/proprio 字段。
+- 评估（20k 冒烟模型，10 回合）success_rate≈0.9。
+
+### 21.4 关键风险与下一步
+
+**风险**：progress 奖励用真实距离，导航梯度与羽流无关——本质是"带气味 bonus 的点导航"。20k 冒烟就 0.9 成功率，说明当前设置下策略可基本忽略触须、"主动采样"研究问题在此环境退化。要让触须真正起作用，需退火 progress 或做 odor-only 消融，并对比 hardware-obs vs privileged 上界。移动 sim-to-real 差距（理想底盘、假设可靠里程计）也需后续把速度/转率纳入域随机化。
+
+**下一步**：正式训练 `--timesteps 300000 --n-envs 8 --history-length 20 --domain-randomization --seed 1` 并评估；同时补固定基座（whisker-only）的主动采样验证，作为移动结论的前提。
+
+### 21.5 奖励重设计：让触须有可显现的效果
+
+针对 §21.4 的风险（progress 主导使策略无视触须），重设奖励哲学：**把"触须端采到的气味"变成主导稠密项，特权 progress 降为弱引导**。新增 `odor_reach` 项（奖励 `max(left,right)`，依赖触须指向），并加重 trend/contrast。全部为可配置旋钮，新默认：
+
+```text
+progress_reward_scale 15 → 1.0    goal_bonus 10 → 4.0    oob_penalty 5
+odor_reach_scale 0.7 (新增, clip 1.0)    mobile_trend_scale 0.3 → 1.5    mobile_contrast_scale 0.05 → 0.6
+mobile_odor_hit_reward 0.02    mobile_time_penalty 0.01
+```
+
+odor_reach / trend / contrast 三项都依赖触须端读数 → 依赖触须指向。验证（同一"朝源导航"脚本控制器，只换触须子策略，30 seed）：
+
+```text
+固定触须(5,5)   mean_total_reward 15.35
+周期扫描        mean_total_reward 16.65
+随机扫描        mean_total_reward 17.08
+```
+
+动触须（扫描/随机）比固定触须多拿约 8-11% 回报，且差异稳定（std~2.8），说明触须指向现在对回报有可显现影响。random≥scan 因随机覆盖更多角度多抓间歇 whiff；训练好的主动策略应能靠智能瞄准超过两者。
+
+**局限与定论路径**：这只证明"触须位置影响回报"。要定论"主动触须优于固定/扫描"，需在此奖励下训练 active-whisker PPO 与 fixed-scan-whisker 基线并对比（即课题主线 Joint > Fixed-whisker 结构）。若要触须更决定性，可进一步把 `progress_reward_scale` 设 0（气味驱动导航，触须成为找源必需），但训练更难。

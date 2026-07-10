@@ -54,14 +54,14 @@ def evaluate_policy(
             last_x = state.x
             last_y = state.y
 
-        trajectory = list(env.trajectory)
+        trajectory = list(env.unwrapped.trajectory)
         returns.append(episode_return)
         lengths.append(len(trajectory))
-        successes.append(1.0 if info["distance_to_source"] <= env.goal_radius else 0.0)
+        successes.append(1.0 if info["distance_to_source"] <= env.unwrapped.goal_radius else 0.0)
         final_distances.append(float(info["distance_to_source"]))
         path_lengths.append(path_length)
-        hit_count, episode_reacquisitions = _odor_hit_stats(trajectory, env.hit_threshold)
-        whisker_stats = _whisker_info_stats(trajectory, env.hit_threshold)
+        hit_count, episode_reacquisitions = _odor_hit_stats(trajectory, env.unwrapped.hit_threshold)
+        whisker_stats = _whisker_info_stats(trajectory, env.unwrapped.hit_threshold)
         odor_hits.append(float(hit_count))
         reacquisition_times.extend(episode_reacquisitions)
         mean_raw_concentrations.append(whisker_stats["mean_raw_concentration"])
