@@ -21,8 +21,6 @@ from gymnasium import spaces
 from dual_whisker_rl.envs.robot_model import DifferentialDriveRobot
 from dual_whisker_rl.envs.robot_model import RobotState
 from dual_whisker_rl.envs.whisker_only_env import WhiskerOnlyPuffEnv
-from dual_whisker_rl.envs.whisker_only_env import WORLD_MAX
-from dual_whisker_rl.envs.whisker_only_env import WORLD_MIN
 
 
 class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
@@ -30,9 +28,16 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         cfg = dict(config or {})
-        # 注入 mobile 默认：气源置于上风侧场内、回合更短。
-        cfg.setdefault("source_position", (-0.35, 0.0))
-        cfg.setdefault("max_steps", 200)
+        # 注入 mobile 默认：更大场地（2m，±1.0）以显现追踪；气源置于上风侧场内。
+        cfg.setdefault("world_half", 1.0)
+        wh = float(cfg["world_half"])
+        cfg.setdefault("source_position", (-(wh - 0.2), 0.0))
+        cfg.setdefault("max_steps", 400)
+        # 大场地需要羽流能横跨过去，否则下风侧起点闻不到气味：加大风速、延长 puff 寿命。
+        cfg.setdefault("wind_speed_range", (0.12, 0.20))
+        overrides = dict(cfg.get("plume_overrides") or {})
+        overrides.setdefault("max_puff_age", 16.0)
+        cfg["plume_overrides"] = overrides
         # 本环境的观测拼接假定父类 12 维硬件观测，禁止 privileged。
         if str(cfg.get("observation_mode", "hardware")) != "hardware":
             raise ValueError("MobileWhiskerPuffEnv 只支持 observation_mode='hardware'")
@@ -55,23 +60,49 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
 
         # 源搜索奖励系数（按 1m 几何 + 传感器 ~0-1.5 量级标定，config 可覆盖）。
         self.goal_radius = float(cfg.get("goal_radius", 0.10))
-        # 奖励哲学（可配置）：让"触须采到的气味"成为主导稠密项，特权 progress 只作弱引导，
-        # 使触须指向真正影响回报——否则策略会退化成无视触须的纯点导航。
-        self.progress_reward_scale = float(cfg.get("progress_reward_scale", 1.0))
-        self.goal_bonus = float(cfg.get("goal_bonus", 4.0))
-        self.oob_penalty = float(cfg.get("oob_penalty", 5.0))
-        # odor_reach：奖励触须端采到的气味 max(left,right)（依赖触须指向），主导稠密项。
-        self.odor_reach_scale = float(cfg.get("odor_reach_scale", 0.7))
+        # 源搜索奖励必须以“接近并到达气源”为主目标。气味相关项只提供弱塑形；如果按
+        # 每步绝对浓度给予较大奖励，策略会在羽流中原地旋转直到超时，而不是继续寻源。
+        self.progress_reward_scale = float(cfg.get("progress_reward_scale", 10.0))
+        self.goal_bonus = float(cfg.get("goal_bonus", 30.0))
+        self.oob_penalty = float(cfg.get("oob_penalty", 20.0))
+        # odor_reach 仍让触须指向影响回报，但其累计量级低于 progress + goal。
+        self.odor_reach_scale = float(cfg.get("odor_reach_scale", 0.02))
         self.odor_reach_clip = float(cfg.get("odor_reach_clip", 1.0))
-        self.mobile_odor_hit_reward = float(cfg.get("mobile_odor_hit_reward", 0.02))
-        self.mobile_trend_scale = float(cfg.get("mobile_trend_scale", 1.5))
+        self.mobile_odor_hit_reward = float(cfg.get("mobile_odor_hit_reward", 0.001))
+        self.mobile_trend_scale = float(cfg.get("mobile_trend_scale", 0.1))
         self.mobile_trend_clip = float(cfg.get("mobile_trend_clip", 0.1))
+        # 恢复强左右差异信号，但默认只在触须实际运动时发放，避免固定在高差异姿态
+        # 也能逐步累积分数。absolute 用于复现实验，delta 用于差异增量消融。
         self.mobile_contrast_scale = float(cfg.get("mobile_contrast_scale", 0.6))
+        self.mobile_contrast_mode = str(
+            cfg.get("mobile_contrast_mode", "motion_gated")
+        )
+        if self.mobile_contrast_mode not in {"motion_gated", "absolute", "delta"}:
+            raise ValueError(
+                "mobile_contrast_mode must be one of: motion_gated, absolute, delta"
+            )
+        self.mobile_contrast_delta_clip = float(
+            cfg.get("mobile_contrast_delta_clip", 0.1)
+        )
+        if self.mobile_contrast_delta_clip <= 0.0:
+            raise ValueError("mobile_contrast_delta_clip must be positive")
+        self.whisker_motion_epsilon_rad = float(
+            cfg.get("whisker_motion_epsilon_rad", math.radians(0.5))
+        )
+        if self.whisker_motion_epsilon_rad < 0.0:
+            raise ValueError("whisker_motion_epsilon_rad must be non-negative")
+        self.stationary_sampling_reward_factor = float(
+            cfg.get("stationary_sampling_reward_factor", 0.25)
+        )
+        if not 0.0 <= self.stationary_sampling_reward_factor <= 1.0:
+            raise ValueError(
+                "stationary_sampling_reward_factor must satisfy 0 <= value <= 1"
+            )
         self.mobile_time_penalty = float(cfg.get("mobile_time_penalty", 0.01))
 
         # 供 evaluation.py / 旧可视化按需读取的场地尺寸别名。
-        self.width = float(WORLD_MAX - WORLD_MIN)
-        self.height = float(WORLD_MAX - WORLD_MIN)
+        self.width = float(self.world_max - self.world_min)
+        self.height = float(self.world_max - self.world_min)
 
         # 观测 = 父 12 维硬件 + 3 维本体感受（朝向 cos/sin、上一步移动动作）。
         base_low = self.observation_builder.low
@@ -91,10 +122,11 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
     # ---- 位姿与观测 ----
 
     def sample_initial_robot_pose(self) -> RobotState:
-        """在下风侧随机起点、大致朝上风（朝向气源）。同步底盘位姿。"""
+        """在下风侧（+x 半场）随机起点、大致朝上风（朝向气源）。同步底盘位姿。"""
+        wh = self.world_max
         for _ in range(128):
-            x = float(self.rng.uniform(0.15, 0.40))
-            y = float(self.rng.uniform(-0.35, 0.35))
+            x = float(self.rng.uniform(0.35 * wh, wh - 0.15))
+            y = float(self.rng.uniform(-(wh - 0.15), wh - 0.15))
             if not self.plume.is_position_valid(x, y, margin=0.16):
                 continue
             if math.hypot(x - self.plume.source_x, y - self.plume.source_y) < 0.15:
@@ -103,7 +135,7 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
             self.robot.reset(x, y, heading)
             return self.robot.state
         # 兜底：场地中偏下风处。
-        self.robot.reset(0.3, 0.0, math.pi)
+        self.robot.reset(0.5 * wh, 0.0, math.pi)
         return self.robot.state
 
     def _build_observation(self) -> np.ndarray:
@@ -161,11 +193,19 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         # 先推进机器人位姿，再采样触须（触须点由 whisker_model 依位姿自动计算）。
         self.robot_state = self.robot.step(move)
         self.plume.advance()
+        previous_left_angle = self.whiskers.left_angle
+        previous_right_angle = self.whiskers.right_angle
         whisker_state = self.whiskers.step(
             left_sector,
             right_sector,
             self.robot_state,
             dt=self.plume.dt,
+        )
+        left_angle_delta = abs(whisker_state.left_angle - previous_left_angle)
+        right_angle_delta = abs(whisker_state.right_angle - previous_right_angle)
+        whisker_moved = bool(
+            max(left_angle_delta, right_angle_delta)
+            > self.whisker_motion_epsilon_rad
         )
 
         raw_left = self.plume.concentration(*whisker_state.left_point)
@@ -182,8 +222,19 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
 
         distance = self._distance_to_source()
         reached = distance <= self.goal_radius
-        oob = not (WORLD_MIN < self.robot_state.x < WORLD_MAX and WORLD_MIN < self.robot_state.y < WORLD_MAX)
-        reward = self._source_search_reward(distance, reached, oob, left, right)
+        oob = not (self.world_min < self.robot_state.x < self.world_max and self.world_min < self.robot_state.y < self.world_max)
+        reward = self._source_search_reward(
+            distance,
+            reached,
+            oob,
+            left,
+            right,
+            whisker_moved=whisker_moved,
+            mobile_translating=(
+                DifferentialDriveRobot.ACTIONS[move]
+                in {"forward", "turn_left", "turn_right"}
+            ),
+        )
 
         self.step_count += 1
         self.trajectory.append(
@@ -197,6 +248,9 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
                 "raw_right": raw_right,
                 "left_angle": whisker_state.left_angle,
                 "right_angle": whisker_state.right_angle,
+                "left_angle_delta": left_angle_delta,
+                "right_angle_delta": right_angle_delta,
+                "whisker_moved": whisker_moved,
                 "left_sector": int(left_sector),
                 "right_sector": int(right_sector),
                 "move_action": DifferentialDriveRobot.ACTIONS[move],
@@ -218,6 +272,9 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
                 "move_action": DifferentialDriveRobot.ACTIONS[move],
                 "left": left,
                 "right": right,
+                "left_angle_delta": left_angle_delta,
+                "right_angle_delta": right_angle_delta,
+                "whisker_moved": whisker_moved,
                 "raw_left": raw_left,
                 "raw_right": raw_right,
                 "wind_direction": self.plume.wind_direction,
@@ -225,6 +282,7 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
                 "source": (self.plume.source_x, self.plume.source_y),
                 "distance_to_source": distance,
                 "out_of_bounds": oob,
+                "is_success": reached,
             }
         )
         terminated = bool(reached or oob)
@@ -238,6 +296,9 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         oob: bool,
         left: float,
         right: float,
+        *,
+        whisker_moved: bool,
+        mobile_translating: bool,
     ) -> float:
         """触须采到的气味为主导稠密项 + 弱 progress 引导 + 终点/惩罚。
 
@@ -256,7 +317,23 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         r += self.mobile_trend_scale * float(
             np.clip(trend, -self.mobile_trend_clip, self.mobile_trend_clip)
         )
-        r += self.mobile_contrast_scale * abs(left - right)
+        contrast = abs(left - right)
+        if self.mobile_contrast_mode == "motion_gated":
+            contrast_signal = contrast if whisker_moved else 0.0
+            if not mobile_translating:
+                contrast_signal *= self.stationary_sampling_reward_factor
+        elif self.mobile_contrast_mode == "absolute":
+            contrast_signal = contrast
+        else:
+            previous_contrast = abs(self.prev_left - self.prev_right)
+            contrast_signal = float(
+                np.clip(
+                    contrast - previous_contrast,
+                    -self.mobile_contrast_delta_clip,
+                    self.mobile_contrast_delta_clip,
+                )
+            )
+        r += self.mobile_contrast_scale * contrast_signal
         r -= self.mobile_time_penalty
         if reached:
             r += self.goal_bonus

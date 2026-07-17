@@ -1,8 +1,9 @@
 """移动机器人 + 双触须气源搜索可视化（静态 PNG + GIF）。
 
 复用 `visualize_whisker_only_env` 的羽流配色与触须/机器人绘制助手；本脚本负责
-3 元动作 rollout（[移动, 左扇区, 右扇区]）、到达/出界即停、并绘制 goal-radius 圆。
-给定 --model-path 时用 PPO 策略驱动（历史堆叠长度从模型反推），否则随机动作。
+3 元动作 rollout（[移动, 左扇区, 右扇区]）、到达/出界即停，并在信息框显示左右
+传感器浓度、L-R 差值及 mean|L-R|。给定 --model-path 时用 PPO 策略驱动（历史堆叠
+长度从模型反推），否则随机动作。
 """
 
 from __future__ import annotations
@@ -18,7 +19,6 @@ import matplotlib
 matplotlib.use("Agg")
 
 import matplotlib.animation as animation
-from matplotlib import patches
 from matplotlib import pyplot as plt
 import numpy as np
 
@@ -27,22 +27,23 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from dual_whisker_rl.envs import MobileWhiskerPuffEnv
-from dual_whisker_rl.envs.whisker_only_env import WORLD_MAX
-from dual_whisker_rl.envs.whisker_only_env import WORLD_MIN
 from visualize_whisker_only_env import build_plume_colormap
 from visualize_whisker_only_env import draw_robot_heading_marker
-from visualize_whisker_only_env import draw_source_marker
 from visualize_whisker_only_env import draw_whisker_artists
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model-path", type=Path, default=ROOT / "results" / "models" / "mobile_whisker_ppo.zip")
+    parser.add_argument(
+        "--model-path",
+        type=Path,
+        default=ROOT / "results" / "models" / "mobile_whisker_transformer_ppo.zip",
+    )
     parser.add_argument("--no-model", action="store_true", help="忽略模型、用随机动作。")
     parser.add_argument("--seed", type=int, default=3)
     parser.add_argument("--steps", type=int, default=200)
     parser.add_argument("--resolution", type=int, default=100)
-    parser.add_argument("--stride", type=int, default=2, help="GIF 每隔多少步取一帧。")
+    parser.add_argument("--stride", type=int, default=1, help="GIF 每隔多少步取一帧。")
     parser.add_argument("--stochastic", action="store_true")
     parser.add_argument("--domain-randomization", action="store_true")
     parser.add_argument("--png-path", type=Path, default=ROOT / "results" / "figures" / "mobile_whisker_env.png")
@@ -96,6 +97,8 @@ def capture_rollout(env, model, history_length, steps, resolution, seed, determi
             termination = "reached_goal" if reached else ("out_of_bounds" if info.get("out_of_bounds") else "timeout")
             break
 
+    sensor_values = np.asarray(sensors, dtype=np.float32)
+    sensor_differences = sensor_values[:, 0] - sensor_values[:, 1]
     return {
         "xs": xs,
         "ys": ys,
@@ -104,7 +107,8 @@ def capture_rollout(env, model, history_length, steps, resolution, seed, determi
         "headings": np.asarray(headings, dtype=np.float32),
         "left_points": np.asarray(left_pts, dtype=np.float32),
         "right_points": np.asarray(right_pts, dtype=np.float32),
-        "sensor_values": np.asarray(sensors, dtype=np.float32),
+        "sensor_values": sensor_values,
+        "sensor_differences": sensor_differences,
         "distances": np.asarray(dists, dtype=np.float32),
         "reward": total_reward,
         "termination": termination,
@@ -114,19 +118,14 @@ def capture_rollout(env, model, history_length, steps, resolution, seed, determi
     }
 
 
-def _draw_goal(ax, source, goal_radius):
-    ax.add_patch(
-        patches.Circle(
-            (float(source[0]), float(source[1])),
-            goal_radius,
-            fill=False,
-            edgecolor="#e45756",
-            linewidth=1.4,
-            linestyle="--",
-            zorder=7,
-            label="Goal radius",
-        )
-    )
+def summarize_sensor_differences(differences):
+    """汇总真实 step 的 L-R；跳过仅用于绘图的 reset 初始帧。"""
+    values = np.asarray(differences, dtype=np.float32).reshape(-1)
+    if values.size > 1:
+        values = values[1:]
+    if values.size == 0:
+        return 0.0, 0.0
+    return float(np.mean(values)), float(np.mean(np.abs(values)))
 
 
 def _setup_axes(ax, data, cmap, frame_idx, title):
@@ -145,10 +144,17 @@ def _setup_axes(ax, data, cmap, frame_idx, title):
         vmax=vmax,
         animated=True,
     )
-    draw_source_marker(ax, data["map_metadata"])
-    _draw_goal(ax, data["source"], data["goal_radius"])
-    ax.set_xlim(WORLD_MIN, WORLD_MAX)
-    ax.set_ylim(WORLD_MIN, WORLD_MAX)
+    # 用星标记目标气源位置。
+    sx, sy = data["source"]
+    ax.scatter(
+        [float(sx)], [float(sy)],
+        s=200, marker="*", color="#f2c53d", edgecolor="#2b2b2b",
+        linewidth=1.0, zorder=7, label="Source",
+    )
+    wmin = float(data["map_metadata"]["world_min"])
+    wmax = float(data["map_metadata"]["world_max"])
+    ax.set_xlim(wmin, wmax)
+    ax.set_ylim(wmin, wmax)
     ax.set_aspect("equal", adjustable="box")
     ax.set_xlabel("x (m)")
     ax.set_ylabel("y (m)")
@@ -170,12 +176,18 @@ def render_static(data, path, title):
     draw_whisker_artists(ax, traj, data["left_points"], data["right_points"], idx)
     draw_robot_heading_marker(ax, traj[idx], float(data["headings"][idx]))
     left_v, right_v = data["sensor_values"][idx]
+    difference = float(data["sensor_differences"][idx])
+    mean_difference, mean_abs_difference = summarize_sensor_differences(
+        data["sensor_differences"]
+    )
     ax.text(
         0.02, 0.98,
         "\n".join([
             f"termination = {data['termination']}",
             f"steps = {idx}   dist = {data['distances'][idx]:.3f} m",
             f"sensor  L {left_v:.3f}   R {right_v:.3f}",
+            f"delta(L-R) = {difference:+.3f}",
+            f"mean delta = {mean_difference:+.3f}   mean|delta| = {mean_abs_difference:.3f}",
             f"cum_reward = {data['reward']:.2f}",
         ]),
         transform=ax.transAxes, ha="left", va="top", fontsize=9.5, family="monospace",
@@ -223,11 +235,266 @@ def render_animation(data, path, title, stride, fps):
         left_tip.set_offsets(lp)
         right_tip.set_offsets(rp)
         lv, rv = data["sensor_values"][fi]
-        txt.set_text(f"step {fi}   dist {data['distances'][fi]:.3f}\nsensor L {lv:.3f} R {rv:.3f}")
+        difference = float(data["sensor_differences"][fi])
+        _, running_mean_abs_difference = summarize_sensor_differences(
+            data["sensor_differences"][: fi + 1]
+        )
+        txt.set_text(
+            f"step {fi}   dist {data['distances'][fi]:.3f}\n"
+            f"sensor L {lv:.3f} R {rv:.3f}\n"
+            f"delta(L-R) {difference:+.3f}   "
+            f"mean|delta| {running_mean_abs_difference:.3f}"
+        )
         return heatmap, line, robot, hs, ha, left_line, right_line, left_tip, right_tip, txt
 
     anim = animation.FuncAnimation(fig, update, frames=frame_ids, interval=int(1000 / fps), blit=False)
     anim.save(path, writer=animation.PillowWriter(fps=fps), dpi=120)
+    plt.close(fig)
+
+
+def render_static_rollouts(rollouts, path, title):
+    """在同一 PNG 中绘制一个或两个评估 episode。"""
+    if not 1 <= len(rollouts) <= 2:
+        raise ValueError("render_static_rollouts expects one or two rollouts")
+    if len(rollouts) == 1:
+        label, data = rollouts[0]
+        render_static(data, path, f"{title}\n{label}")
+        return
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cmap = build_plume_colormap()
+    fig, axes = plt.subplots(1, len(rollouts), figsize=(9.0 * len(rollouts), 8.2))
+    axes = np.atleast_1d(axes)
+    for ax, (label, data) in zip(axes, rollouts):
+        idx = data["trajectory"].shape[0] - 1
+        heatmap, _ = _setup_axes(ax, data, cmap, idx, label)
+        traj = data["trajectory"]
+        ax.plot(
+            traj[:, 0],
+            traj[:, 1],
+            color="#54524e",
+            lw=1.8,
+            alpha=0.85,
+            zorder=5,
+            label="Robot trace",
+        )
+        ax.scatter(
+            traj[0, 0],
+            traj[0, 1],
+            s=85,
+            facecolor="white",
+            edgecolor="#7a756c",
+            linewidth=1.4,
+            zorder=6,
+            label="Start",
+        )
+        ax.scatter(
+            traj[idx, 0],
+            traj[idx, 1],
+            s=95,
+            color="#2b2b2b",
+            edgecolor="white",
+            linewidth=1.3,
+            zorder=6,
+            label="Robot",
+        )
+        draw_whisker_artists(
+            ax,
+            traj,
+            data["left_points"],
+            data["right_points"],
+            idx,
+        )
+        draw_robot_heading_marker(ax, traj[idx], float(data["headings"][idx]))
+        left_v, right_v = data["sensor_values"][idx]
+        difference = float(data["sensor_differences"][idx])
+        mean_difference, mean_abs_difference = summarize_sensor_differences(
+            data["sensor_differences"]
+        )
+        ax.text(
+            0.02,
+            0.98,
+            "\n".join(
+                [
+                    f"termination = {data['termination']}",
+                    f"steps = {idx}   dist = {data['distances'][idx]:.3f} m",
+                    f"sensor  L {left_v:.3f}   R {right_v:.3f}",
+                    f"delta(L-R) = {difference:+.3f}",
+                    f"mean delta = {mean_difference:+.3f}",
+                    f"mean|delta| = {mean_abs_difference:.3f}",
+                    f"cum_reward = {data['reward']:.2f}",
+                ]
+            ),
+            transform=ax.transAxes,
+            ha="left",
+            va="top",
+            fontsize=8.5,
+            family="monospace",
+            bbox=dict(
+                boxstyle="round,pad=0.5",
+                facecolor="white",
+                alpha=0.72,
+                edgecolor="#d8d2c7",
+            ),
+            zorder=8,
+        )
+        ax.legend(loc="lower right", fontsize=8, framealpha=0.85)
+        fig.colorbar(heatmap, ax=ax, fraction=0.043, pad=0.03).set_label(
+            "Gas concentration (a.u.)"
+        )
+    fig.suptitle(title, fontsize=16)
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.96))
+    fig.savefig(path, dpi=170)
+    plt.close(fig)
+
+
+def render_animation_rollouts(rollouts, path, title, stride, fps):
+    """在同一 GIF 中并排播放一个或两个评估 episode。"""
+    if not 1 <= len(rollouts) <= 2:
+        raise ValueError("render_animation_rollouts expects one or two rollouts")
+    if len(rollouts) == 1:
+        label, data = rollouts[0]
+        render_animation(data, path, f"{title}\n{label}", stride, fps)
+        return
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cmap = build_plume_colormap()
+    fig, axes = plt.subplots(1, len(rollouts), figsize=(9.0 * len(rollouts), 8.2))
+    axes = np.atleast_1d(axes)
+    artists = []
+    frame_sequences = []
+
+    for ax, (label, data) in zip(axes, rollouts):
+        traj = data["trajectory"]
+        n = traj.shape[0]
+        frame_ids = list(range(0, n, max(1, stride)))
+        if frame_ids[-1] != n - 1:
+            frame_ids.append(n - 1)
+        frame_sequences.append(frame_ids)
+
+        heatmap, _ = _setup_axes(ax, data, cmap, 0, label)
+        (line,) = ax.plot(
+            [], [], color="#54524e", lw=1.8, alpha=0.85, zorder=5,
+            label="Robot trace",
+        )
+        robot = ax.scatter(
+            [traj[0, 0]],
+            [traj[0, 1]],
+            s=95,
+            color="#2b2b2b",
+            edgecolor="white",
+            linewidth=1.3,
+            zorder=6,
+            label="Robot",
+        )
+        left_line, right_line, left_tip, right_tip = draw_whisker_artists(
+            ax, traj, data["left_points"], data["right_points"], 0
+        )
+        hs, ha = draw_robot_heading_marker(
+            ax, traj[0], float(data["headings"][0])
+        )
+        txt = ax.text(
+            0.02,
+            0.98,
+            "",
+            transform=ax.transAxes,
+            ha="left",
+            va="top",
+            fontsize=8.5,
+            family="monospace",
+            bbox=dict(
+                boxstyle="round,pad=0.5",
+                facecolor="white",
+                alpha=0.72,
+                edgecolor="#d8d2c7",
+            ),
+            zorder=8,
+        )
+        ax.legend(loc="lower right", fontsize=8, framealpha=0.85)
+        fig.colorbar(heatmap, ax=ax, fraction=0.043, pad=0.03).set_label(
+            "Gas concentration (a.u.)"
+        )
+        artists.append(
+            {
+                "data": data,
+                "heatmap": heatmap,
+                "line": line,
+                "robot": robot,
+                "heading_shadow": hs,
+                "heading_arrow": ha,
+                "left_line": left_line,
+                "right_line": right_line,
+                "left_tip": left_tip,
+                "right_tip": right_tip,
+                "text": txt,
+            }
+        )
+
+    fig.suptitle(title, fontsize=16)
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.96))
+
+    def update(frame_position):
+        updated = []
+        for state, frame_ids in zip(artists, frame_sequences):
+            data = state["data"]
+            traj = data["trajectory"]
+            fi = frame_ids[min(frame_position, len(frame_ids) - 1)]
+            state["heatmap"].set_data(data["frames"][fi])
+            state["line"].set_data(traj[: fi + 1, 0], traj[: fi + 1, 1])
+            state["robot"].set_offsets([traj[fi]])
+            end = (
+                traj[fi, 0] + 0.07 * math.cos(data["headings"][fi]),
+                traj[fi, 1] + 0.07 * math.sin(data["headings"][fi]),
+            )
+            start = (float(traj[fi, 0]), float(traj[fi, 1]))
+            state["heading_shadow"].set_positions(start, end)
+            state["heading_arrow"].set_positions(start, end)
+            left_point = data["left_points"][fi]
+            right_point = data["right_points"][fi]
+            state["left_line"].set_data(
+                [traj[fi, 0], left_point[0]], [traj[fi, 1], left_point[1]]
+            )
+            state["right_line"].set_data(
+                [traj[fi, 0], right_point[0]], [traj[fi, 1], right_point[1]]
+            )
+            state["left_tip"].set_offsets([left_point])
+            state["right_tip"].set_offsets([right_point])
+            left_value, right_value = data["sensor_values"][fi]
+            difference = float(data["sensor_differences"][fi])
+            _, mean_abs_difference = summarize_sensor_differences(
+                data["sensor_differences"][: fi + 1]
+            )
+            state["text"].set_text(
+                f"step {fi}   dist {data['distances'][fi]:.3f}\n"
+                f"sensor L {left_value:.3f} R {right_value:.3f}\n"
+                f"delta(L-R) {difference:+.3f}\n"
+                f"mean|delta| {mean_abs_difference:.3f}"
+            )
+            updated.extend(
+                [
+                    state["heatmap"],
+                    state["line"],
+                    state["robot"],
+                    state["heading_shadow"],
+                    state["heading_arrow"],
+                    state["left_line"],
+                    state["right_line"],
+                    state["left_tip"],
+                    state["right_tip"],
+                    state["text"],
+                ]
+            )
+        return updated
+
+    frame_count = max(len(frame_ids) for frame_ids in frame_sequences)
+    anim = animation.FuncAnimation(
+        fig,
+        update,
+        frames=range(frame_count),
+        interval=int(1000 / fps),
+        blit=False,
+    )
+    anim.save(path, writer=animation.PillowWriter(fps=fps), dpi=100)
     plt.close(fig)
 
 
@@ -240,7 +507,9 @@ def main() -> None:
     history_length = 1
     if not args.no_model and args.model_path.exists():
         from stable_baselines3 import PPO
+        from dual_whisker_rl.agents import TransformerHistoryExtractor
 
+        _ = TransformerHistoryExtractor
         model = PPO.load(str(args.model_path))
         base = int(env.observation_space.shape[0])
         history_length = int(model.observation_space.shape[0]) // base
@@ -251,7 +520,18 @@ def main() -> None:
     data = capture_rollout(env, model, history_length, args.steps, args.resolution, args.seed, not args.stochastic)
     render_static(data, args.png_path, args.title)
     render_animation(data, args.gif_path, args.title, args.stride, fps=6)
+    mean_difference, mean_abs_difference = summarize_sensor_differences(
+        data["sensor_differences"]
+    )
     print(f"termination={data['termination']} steps={data['trajectory'].shape[0]-1} final_dist={data['distances'][-1]:.3f}")
+    print(
+        "mean_left_right_difference="
+        f"{mean_difference:+.6f}"
+    )
+    print(
+        "mean_abs_left_right_difference="
+        f"{mean_abs_difference:.6f}"
+    )
     print(f"saved_png={args.png_path}")
     print(f"saved_gif={args.gif_path}")
 

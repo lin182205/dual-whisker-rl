@@ -1,8 +1,8 @@
 """训练移动机器人 + 双触须气源搜索 PPO。
 
 动作 `MultiDiscrete([6, 10, 10])` = [移动, 左扇区, 右扇区]。观测为 15 维硬件可部署
-特征（12 维气味特征 + 朝向 cos/sin + 上一步移动），经历史堆叠喂给 PPO（MQ-3 慢响应
-需要短时历史）。复用 `train_whisker_only_ppo` 的历史包装器与工具函数。
+特征（12 维气味特征 + 朝向 cos/sin + 上一步移动）。历史仍由包装器堆叠为扁平向量，
+可选择直接交给 MLP，或先通过 Transformer 编码时间依赖后再交给 PPO。
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from dual_whisker_rl.agents import TransformerHistoryExtractor
 from dual_whisker_rl.envs import MobileWhiskerPuffEnv
 from train_whisker_only_ppo import ObservationHistoryWrapper
 from train_whisker_only_ppo import load_config
@@ -36,10 +37,48 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--n-envs", type=int, default=8)
     parser.add_argument("--history-length", type=int, default=20)
-    parser.add_argument("--model-path", type=Path, default=ROOT / "results" / "models" / "mobile_whisker_ppo.zip")
-    parser.add_argument("--log-dir", type=Path, default=ROOT / "results" / "logs" / "mobile_whisker_ppo")
+    parser.add_argument(
+        "--temporal-encoder",
+        choices=("transformer", "mlp"),
+        default="transformer",
+        help="历史信息编码方式：Transformer 时序编码或原始扁平 MLP 基线。",
+    )
+    parser.add_argument("--transformer-d-model", type=int, default=64)
+    parser.add_argument("--transformer-heads", type=int, default=4)
+    parser.add_argument("--transformer-layers", type=int, default=2)
+    parser.add_argument("--transformer-ff-dim", type=int, default=128)
+    parser.add_argument("--transformer-dropout", type=float, default=0.1)
+    parser.add_argument("--transformer-features-dim", type=int, default=64)
+    parser.add_argument("--learning-rate", type=float, default=1e-4)
+    parser.add_argument("--n-steps", type=int, default=512)
+    parser.add_argument("--batch-size", type=int, default=256)
+    parser.add_argument("--n-epochs", type=int, default=5)
+    parser.add_argument("--ent-coef", type=float, default=0.003)
+    parser.add_argument(
+        "--target-kl",
+        type=float,
+        default=0.02,
+        help="PPO 近似 KL 超过该值时提前停止当前轮更新，抑制 Transformer 过大更新。",
+    )
+    parser.add_argument(
+        "--model-path",
+        type=Path,
+        default=None,
+        help="默认按 temporal encoder 写入独立模型文件。",
+    )
+    parser.add_argument(
+        "--log-dir",
+        type=Path,
+        default=None,
+        help="默认按 temporal encoder 写入独立日志目录。",
+    )
     parser.add_argument("--tensorboard-dir", type=Path, default=ROOT / "results" / "tensorboard")
-    parser.add_argument("--run-name", type=str, default="mobile_whisker_ppo")
+    parser.add_argument(
+        "--run-name",
+        type=str,
+        default=None,
+        help="默认使用 mobile_whisker_<encoder>_ppo。",
+    )
     parser.add_argument("--log-interval", type=int, default=1)
     parser.add_argument("--eval-freq", type=int, default=2_000)
     parser.add_argument("--eval-episodes", type=int, default=10)
@@ -48,7 +87,85 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="开启羽流/传感器 episode 级域随机化，提高 sim-to-real 鲁棒性。",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    resolve_output_paths(args)
+    return args
+
+
+def resolve_output_paths(args: argparse.Namespace) -> None:
+    """按编码器生成默认输出名，同时保留显式 CLI 路径。"""
+    experiment_name = f"mobile_whisker_{args.temporal_encoder}_ppo"
+    if args.model_path is None:
+        args.model_path = ROOT / "results" / "models" / f"{experiment_name}.zip"
+    if args.log_dir is None:
+        args.log_dir = ROOT / "results" / "logs" / experiment_name
+    if args.run_name is None:
+        args.run_name = experiment_name
+
+
+def validate_args(args: argparse.Namespace) -> None:
+    if args.n_envs < 1:
+        raise ValueError("--n-envs must be at least 1")
+    if args.history_length < 1:
+        raise ValueError("--history-length must be at least 1")
+    if args.learning_rate <= 0.0:
+        raise ValueError("--learning-rate must be positive")
+    if args.n_steps < 1:
+        raise ValueError("--n-steps must be at least 1")
+    if args.batch_size < 2:
+        raise ValueError("--batch-size must be at least 2")
+    if args.n_epochs < 1:
+        raise ValueError("--n-epochs must be at least 1")
+    if args.ent_coef < 0.0:
+        raise ValueError("--ent-coef must be non-negative")
+    if args.target_kl <= 0.0:
+        raise ValueError("--target-kl must be positive")
+    rollout_size = args.n_steps * args.n_envs
+    if args.batch_size > rollout_size or rollout_size % args.batch_size != 0:
+        raise ValueError(
+            "--batch-size must not exceed n_steps * n_envs and must divide it exactly "
+            f"(got batch_size={args.batch_size}, rollout_size={rollout_size})"
+        )
+
+    positive_transformer_args = {
+        "--transformer-d-model": args.transformer_d_model,
+        "--transformer-heads": args.transformer_heads,
+        "--transformer-layers": args.transformer_layers,
+        "--transformer-ff-dim": args.transformer_ff_dim,
+        "--transformer-features-dim": args.transformer_features_dim,
+    }
+    for name, value in positive_transformer_args.items():
+        if value < 1:
+            raise ValueError(f"{name} must be at least 1")
+    if args.transformer_d_model % args.transformer_heads != 0:
+        raise ValueError("--transformer-d-model must be divisible by --transformer-heads")
+    if not 0.0 <= args.transformer_dropout < 1.0:
+        raise ValueError("--transformer-dropout must satisfy 0 <= dropout < 1")
+
+
+def build_policy_kwargs(args: argparse.Namespace, base_observation_dim: int) -> dict:
+    """构造 MLP 基线或 Transformer 历史编码策略参数。"""
+    policy_kwargs: dict = {
+        "net_arch": [160, 160],
+        "share_features_extractor": True,
+    }
+    if args.temporal_encoder == "transformer":
+        policy_kwargs.update(
+            {
+                "features_extractor_class": TransformerHistoryExtractor,
+                "features_extractor_kwargs": {
+                    "history_length": args.history_length,
+                    "base_observation_dim": base_observation_dim,
+                    "d_model": args.transformer_d_model,
+                    "n_heads": args.transformer_heads,
+                    "n_layers": args.transformer_layers,
+                    "dim_feedforward": args.transformer_ff_dim,
+                    "dropout": args.transformer_dropout,
+                    "features_dim": args.transformer_features_dim,
+                },
+            }
+        )
+    return policy_kwargs
 
 
 def make_env(config, seed, history_length, monitor_dir=None, monitor_name="monitor") -> Monitor:
@@ -63,14 +180,12 @@ def make_env(config, seed, history_length, monitor_dir=None, monitor_name="monit
 
 
 def train(args: argparse.Namespace) -> PPO:
+    resolve_output_paths(args)
+    validate_args(args)
     config = load_config(args.config)
     if args.domain_randomization:
         config["domain_randomization"] = True
     args.seed = resolve_seed(args.seed)
-    if args.n_envs < 1:
-        raise ValueError("--n-envs must be at least 1")
-    if args.history_length < 1:
-        raise ValueError("--history-length must be at least 1")
 
     set_random_seed(args.seed)
     env = DummyVecEnv(
@@ -87,6 +202,7 @@ def train(args: argparse.Namespace) -> PPO:
             for rank in range(args.n_envs)
         ]
     )
+    base_observation_dim = int(env.envs[0].unwrapped.observation_space.shape[0])
     eval_env = make_env(config, args.seed + 100_000, args.history_length, args.log_dir / "eval")
     eval_callback = EvalCallback(
         eval_env,
@@ -102,15 +218,16 @@ def train(args: argparse.Namespace) -> PPO:
     model = PPO(
         policy="MlpPolicy",
         env=env,
-        learning_rate=3e-4,
-        n_steps=512,
-        batch_size=64,
-        n_epochs=10,
+        learning_rate=args.learning_rate,
+        n_steps=args.n_steps,
+        batch_size=args.batch_size,
+        n_epochs=args.n_epochs,
         gamma=0.99,
         gae_lambda=0.95,
         clip_range=0.2,
-        ent_coef=0.01,
-        policy_kwargs={"net_arch": [160, 160]},
+        ent_coef=args.ent_coef,
+        target_kl=args.target_kl,
+        policy_kwargs=build_policy_kwargs(args, base_observation_dim),
         tensorboard_log=str(args.tensorboard_dir),
         seed=args.seed,
         verbose=1,
@@ -128,7 +245,7 @@ def train(args: argparse.Namespace) -> PPO:
     preview_policy_command(model, config, args)
     env.close()
     eval_env.close()
-    save_run_metadata(args, config)
+    save_run_metadata(args, config, model)
     return model
 
 
@@ -143,25 +260,69 @@ def preview_policy_command(model: PPO, config: dict, args: argparse.Namespace) -
     env.close()
 
 
-def save_run_metadata(args: argparse.Namespace, config: dict) -> None:
+def save_run_metadata(args: argparse.Namespace, config: dict, model: PPO) -> None:
     args.log_dir.mkdir(parents=True, exist_ok=True)
     metadata_env = MobileWhiskerPuffEnv(config)
     base_obs_dim = int(metadata_env.observation_space.shape[0])
+    extractor = model.policy.features_extractor
+    transformer_config = None
+    if args.temporal_encoder == "transformer":
+        transformer_config = {
+            "d_model": args.transformer_d_model,
+            "n_heads": args.transformer_heads,
+            "n_layers": args.transformer_layers,
+            "dim_feedforward": args.transformer_ff_dim,
+            "dropout": args.transformer_dropout,
+            "features_dim": args.transformer_features_dim,
+        }
     metadata = {
         "seed": args.seed,
         "train_env_seeds": [args.seed + idx for idx in range(args.n_envs)],
         "eval_seed": args.seed + 100_000,
         "n_envs": args.n_envs,
         "timesteps": args.timesteps,
+        "ppo": {
+            "learning_rate": args.learning_rate,
+            "n_steps": args.n_steps,
+            "batch_size": args.batch_size,
+            "n_epochs": args.n_epochs,
+            "ent_coef": args.ent_coef,
+            "target_kl": args.target_kl,
+        },
         "history_length": args.history_length,
         "base_observation_dim": base_obs_dim,
         "stacked_observation_dim": base_obs_dim * args.history_length,
+        "temporal_encoder": args.temporal_encoder,
+        "transformer": transformer_config,
+        "policy_features_dim": int(extractor.features_dim),
+        "features_extractor_class": type(extractor).__name__,
+        "features_extractor_parameters": sum(
+            parameter.numel() for parameter in extractor.parameters()
+        ),
         "observation_mode": metadata_env.observation_mode,
         "observation_field_names": metadata_env.observation_field_names,
         "sim_sensor_scale": metadata_env.observation_builder.config.scale,
         "init_pose_mode": metadata_env.init_pose_mode,
         "action_space": "[move_action, left_sector, right_sector]",
         "goal_radius": metadata_env.goal_radius,
+        "reward": {
+            "progress_reward_scale": metadata_env.progress_reward_scale,
+            "goal_bonus": metadata_env.goal_bonus,
+            "oob_penalty": metadata_env.oob_penalty,
+            "odor_reach_scale": metadata_env.odor_reach_scale,
+            "odor_reach_clip": metadata_env.odor_reach_clip,
+            "mobile_odor_hit_reward": metadata_env.mobile_odor_hit_reward,
+            "mobile_trend_scale": metadata_env.mobile_trend_scale,
+            "mobile_trend_clip": metadata_env.mobile_trend_clip,
+            "mobile_contrast_scale": metadata_env.mobile_contrast_scale,
+            "mobile_contrast_mode": metadata_env.mobile_contrast_mode,
+            "mobile_contrast_delta_clip": metadata_env.mobile_contrast_delta_clip,
+            "whisker_motion_epsilon_rad": metadata_env.whisker_motion_epsilon_rad,
+            "stationary_sampling_reward_factor": (
+                metadata_env.stationary_sampling_reward_factor
+            ),
+            "mobile_time_penalty": metadata_env.mobile_time_penalty,
+        },
         "source_position": (metadata_env.plume.source_x, metadata_env.plume.source_y),
         "model_path": str(args.model_path),
         "tensorboard_dir": str(args.tensorboard_dir),
@@ -179,6 +340,7 @@ def main() -> None:
     train(args)
     print(f"saved_model={args.model_path}")
     print(f"seed={args.seed}")
+    print(f"temporal_encoder={args.temporal_encoder}")
 
 
 if __name__ == "__main__":

@@ -42,11 +42,16 @@ class DynamicPuffPlume:
         wind_sampling_mode: str = "random",
         obstacles: np.ndarray | None = None,
         plume_overrides: dict[str, Any] | None = None,
+        world_half: float = WORLD_MAX,
     ) -> None:
         self.rng = np.random.default_rng(seed)
+        # 场地半宽可配置（默认 ±0.5 = 1m）。移动机器人环境用更大的场地以显现追踪行为。
+        self.world_half = float(world_half)
+        self.world_min = -self.world_half
+        self.world_max = self.world_half
         self.source_position_override = source_position
         if source_position is None:
-            self.source_x = WORLD_MIN - 0.7
+            self.source_x = self.world_min - 0.7
             self.source_y = 0.0
         else:
             self.source_x = float(source_position[0])
@@ -146,8 +151,8 @@ class DynamicPuffPlume:
     def metadata(self) -> dict[str, Any]:
         """返回绘图和调试所需的气味场元信息。"""
         return {
-            "world_min": WORLD_MIN,
-            "world_max": WORLD_MAX,
+            "world_min": self.world_min,
+            "world_max": self.world_max,
             "source_position": (float(self.source_x), float(self.source_y)),
             "obstacles": self.obstacles.copy(),
             "gas_field_mode": "puff",
@@ -163,7 +168,7 @@ class DynamicPuffPlume:
         return math.atan2(math.sin(angle), math.cos(angle))
 
     def is_occupied(self, x: float, y: float) -> bool:
-        if x <= WORLD_MIN or x >= WORLD_MAX or y <= WORLD_MIN or y >= WORLD_MAX:
+        if x <= self.world_min or x >= self.world_max or y <= self.world_min or y >= self.world_max:
             return True
         for xmin, xmax, ymin, ymax in self.obstacles:
             if xmin <= x <= xmax and ymin <= y <= ymax:
@@ -172,8 +177,8 @@ class DynamicPuffPlume:
 
     def is_position_valid(self, x: float, y: float, margin: float = 0.0) -> bool:
         if not (
-            WORLD_MIN + margin < x < WORLD_MAX - margin
-            and WORLD_MIN + margin < y < WORLD_MAX - margin
+            self.world_min + margin < x < self.world_max - margin
+            and self.world_min + margin < y < self.world_max - margin
         ):
             return False
         for xmin, xmax, ymin, ymax in self.obstacles:
@@ -357,10 +362,10 @@ class DynamicPuffPlume:
             if puff["age"] > self.max_puff_age or puff["mass"] < self.min_puff_mass:
                 continue
             if (
-                puff["x"] < WORLD_MIN - self.puff_bounds_margin
-                or puff["x"] > WORLD_MAX + self.puff_bounds_margin
-                or puff["y"] < WORLD_MIN - self.puff_bounds_margin
-                or puff["y"] > WORLD_MAX + self.puff_bounds_margin
+                puff["x"] < self.world_min - self.puff_bounds_margin
+                or puff["x"] > self.world_max + self.puff_bounds_margin
+                or puff["y"] < self.world_min - self.puff_bounds_margin
+                or puff["y"] > self.world_max + self.puff_bounds_margin
             ):
                 continue
             active_puffs.append(puff)
@@ -406,8 +411,8 @@ class DynamicPuffPlume:
         add_noise: bool = False,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """返回整张二维气味场网格，主要用于绘图和动画。"""
-        xs = np.linspace(WORLD_MIN, WORLD_MAX, resolution, dtype=np.float32)
-        ys = np.linspace(WORLD_MIN, WORLD_MAX, resolution, dtype=np.float32)
+        xs = np.linspace(self.world_min, self.world_max, resolution, dtype=np.float32)
+        ys = np.linspace(self.world_min, self.world_max, resolution, dtype=np.float32)
         grid_x, grid_y = np.meshgrid(xs, ys)
         concentration = self._source_core_concentration(grid_x, grid_y).astype(
             np.float32
@@ -440,8 +445,8 @@ class DynamicPuffPlume:
 
     def _sample_source_position(self) -> tuple[float, float]:
         """随机采样场外上风侧气源位置，用于兼容旧调试入口。"""
-        x = self.rng.uniform(WORLD_MIN - self.far_source_distance, WORLD_MIN - 0.25)
-        y = self.rng.uniform(WORLD_MIN, WORLD_MAX)
+        x = self.rng.uniform(self.world_min - self.far_source_distance, self.world_min - 0.25)
+        y = self.rng.uniform(self.world_min, self.world_max)
         return float(x), float(y)
 
     def _warmup_puffs(self) -> None:
@@ -518,6 +523,11 @@ class WhiskerOnlyPuffEnv(gym.Env):
         self.strong_bonus = float(cfg.get("strong_bonus", 0.05))
         self.time_penalty = float(cfg.get("time_penalty", 0.04))
 
+        # 场地半宽可配置（默认 ±0.5 = 1m）。移动机器人环境用更大场地以显现追踪。
+        self.world_half = float(cfg.get("world_half", WORLD_MAX))
+        self.world_min = -self.world_half
+        self.world_max = self.world_half
+
         # 与 `PlumeEnv` 保持一致：环境持有一个 plume 对象负责气味场。
         source_position = cfg.get("source_position")
         self.plume = DynamicPuffPlume(
@@ -528,6 +538,7 @@ class WhiskerOnlyPuffEnv(gym.Env):
             wind_speed_range=tuple(cfg.get("wind_speed_range", (0.06, 0.11))),
             wind_sampling_mode=str(cfg.get("wind_sampling_mode", "random")),
             plume_overrides=cfg.get("plume_overrides"),
+            world_half=self.world_half,
         )
         self.field = self.plume  # 兼容旧可视化脚本中的 env.field 访问。
         self.whiskers = DualWhiskerSampler(
@@ -844,8 +855,8 @@ class WhiskerOnlyPuffEnv(gym.Env):
     def sample_robot_pose_uniform(self) -> RobotState:
         """兜底采样：如果羽流覆盖区候选失败，则在 1m 场地内均匀采样。"""
         while True:
-            x = self.rng.uniform(WORLD_MIN + 0.16, WORLD_MAX - 0.16)
-            y = self.rng.uniform(WORLD_MIN + 0.16, WORLD_MAX - 0.16)
+            x = self.rng.uniform(self.world_min + 0.16, self.world_max - 0.16)
+            y = self.rng.uniform(self.world_min + 0.16, self.world_max - 0.16)
             if math.hypot(x - self.plume.source_x, y - self.plume.source_y) < 0.10:
                 continue
             theta = self.rng.uniform(-np.pi, np.pi)
@@ -894,7 +905,7 @@ class WhiskerOnlyPuffEnv(gym.Env):
                 whisker_state.right_angle / np.pi,
                 math.cos(wind_rel),
                 math.sin(wind_rel),
-                source_distance / (WORLD_MAX - WORLD_MIN),
+                source_distance / (self.world_max - self.world_min),
             ],
             dtype=np.float32,
         )
