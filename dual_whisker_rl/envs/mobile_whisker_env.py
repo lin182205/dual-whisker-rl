@@ -60,45 +60,24 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
 
         # 源搜索奖励系数（按 1m 几何 + 传感器 ~0-1.5 量级标定，config 可覆盖）。
         self.goal_radius = float(cfg.get("goal_radius", 0.10))
-        # 源搜索奖励必须以“接近并到达气源”为主目标。气味相关项只提供弱塑形；如果按
-        # 每步绝对浓度给予较大奖励，策略会在羽流中原地旋转直到超时，而不是继续寻源。
-        self.progress_reward_scale = float(cfg.get("progress_reward_scale", 10.0))
-        self.goal_bonus = float(cfg.get("goal_bonus", 30.0))
-        self.oob_penalty = float(cfg.get("oob_penalty", 20.0))
-        # odor_reach 仍让触须指向影响回报，但其累计量级低于 progress + goal。
-        self.odor_reach_scale = float(cfg.get("odor_reach_scale", 0.02))
+        # 奖励哲学（可配置）：让“触须采到的气味”成为主导稠密项，特权 progress 只作弱引导，
+        # 使触须指向真正影响回报——否则策略会退化成无视触须的纯点导航。
+        self.progress_reward_scale = float(cfg.get("progress_reward_scale", 1.0))
+        self.goal_bonus = float(cfg.get("goal_bonus", 50.0))
+        self.oob_penalty = float(cfg.get("oob_penalty", 5.0))
+        # odor_reach：奖励触须端采到的气味 max(left,right)（依赖触须指向），主导稠密项。
+        self.odor_reach_scale = float(cfg.get("odor_reach_scale", 0.3))
         self.odor_reach_clip = float(cfg.get("odor_reach_clip", 1.0))
-        self.mobile_odor_hit_reward = float(cfg.get("mobile_odor_hit_reward", 0.001))
-        self.mobile_trend_scale = float(cfg.get("mobile_trend_scale", 0.1))
-        self.mobile_trend_clip = float(cfg.get("mobile_trend_clip", 0.1))
-        # 恢复强左右差异信号，但默认只在触须实际运动时发放，避免固定在高差异姿态
-        # 也能逐步累积分数。absolute 用于复现实验，delta 用于差异增量消融。
-        self.mobile_contrast_scale = float(cfg.get("mobile_contrast_scale", 0.6))
-        self.mobile_contrast_mode = str(
-            cfg.get("mobile_contrast_mode", "motion_gated")
-        )
-        if self.mobile_contrast_mode not in {"motion_gated", "absolute", "delta"}:
-            raise ValueError(
-                "mobile_contrast_mode must be one of: motion_gated, absolute, delta"
-            )
-        self.mobile_contrast_delta_clip = float(
-            cfg.get("mobile_contrast_delta_clip", 0.1)
-        )
-        if self.mobile_contrast_delta_clip <= 0.0:
-            raise ValueError("mobile_contrast_delta_clip must be positive")
+        self.mobile_odor_hit_reward = float(cfg.get("mobile_odor_hit_reward", 0.1))
+        self.mobile_contrast_scale = float(cfg.get("mobile_contrast_scale", 0.5))
+        self.mobile_time_penalty = float(cfg.get("mobile_time_penalty", 0.05))
+
+        # 仅用于评估主动采样比例，不参与奖励计算。
         self.whisker_motion_epsilon_rad = float(
             cfg.get("whisker_motion_epsilon_rad", math.radians(0.5))
         )
         if self.whisker_motion_epsilon_rad < 0.0:
             raise ValueError("whisker_motion_epsilon_rad must be non-negative")
-        self.stationary_sampling_reward_factor = float(
-            cfg.get("stationary_sampling_reward_factor", 0.25)
-        )
-        if not 0.0 <= self.stationary_sampling_reward_factor <= 1.0:
-            raise ValueError(
-                "stationary_sampling_reward_factor must satisfy 0 <= value <= 1"
-            )
-        self.mobile_time_penalty = float(cfg.get("mobile_time_penalty", 0.01))
 
         # 供 evaluation.py / 旧可视化按需读取的场地尺寸别名。
         self.width = float(self.world_max - self.world_min)
@@ -223,18 +202,14 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         distance = self._distance_to_source()
         reached = distance <= self.goal_radius
         oob = not (self.world_min < self.robot_state.x < self.world_max and self.world_min < self.robot_state.y < self.world_max)
-        reward = self._source_search_reward(
+        reward_components = self._source_search_reward_components(
             distance,
             reached,
             oob,
             left,
             right,
-            whisker_moved=whisker_moved,
-            mobile_translating=(
-                DifferentialDriveRobot.ACTIONS[move]
-                in {"forward", "turn_left", "turn_right"}
-            ),
         )
+        reward = float(sum(reward_components.values()))
 
         self.step_count += 1
         self.trajectory.append(
@@ -256,6 +231,7 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
                 "move_action": DifferentialDriveRobot.ACTIONS[move],
                 "distance_to_source": distance,
                 "reward": reward,
+                "reward_components": reward_components,
             }
         )
 
@@ -283,6 +259,7 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
                 "distance_to_source": distance,
                 "out_of_bounds": oob,
                 "is_success": reached,
+                "reward_components": reward_components,
             }
         )
         terminated = bool(reached or oob)
@@ -296,47 +273,49 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         oob: bool,
         left: float,
         right: float,
-        *,
-        whisker_moved: bool,
-        mobile_translating: bool,
     ) -> float:
+        return float(
+            sum(
+                self._source_search_reward_components(
+                    distance,
+                    reached,
+                    oob,
+                    left,
+                    right,
+                ).values()
+            )
+        )
+
+    def _source_search_reward_components(
+        self,
+        distance: float,
+        reached: bool,
+        oob: bool,
+        left: float,
+        right: float,
+    ) -> dict[str, float]:
         """触须采到的气味为主导稠密项 + 弱 progress 引导 + 终点/惩罚。
 
-        odor_reach / trend / contrast 三项都依赖触须端读数，因而依赖触须指向：
+        odor_reach / contrast 两项都依赖触须端读数，因而依赖触须指向：
         把触须主动指向气味缕、扩大命中、制造左右不对称都会直接涨分，使主动采样
         对回报有可显现的影响，而非被特权 progress 掩盖。
         """
-        r = self.progress_reward_scale * (self.prev_distance - distance)
-        # 主导稠密项：触须端采到的气味幅值（依赖触须指向）。
-        r += self.odor_reach_scale * float(
-            np.clip(max(left, right), 0.0, self.odor_reach_clip)
-        )
-        if max(left, right) >= self.hit_threshold:
-            r += self.mobile_odor_hit_reward
-        trend = max(left - self.prev_left, right - self.prev_right)
-        r += self.mobile_trend_scale * float(
-            np.clip(trend, -self.mobile_trend_clip, self.mobile_trend_clip)
-        )
-        contrast = abs(left - right)
-        if self.mobile_contrast_mode == "motion_gated":
-            contrast_signal = contrast if whisker_moved else 0.0
-            if not mobile_translating:
-                contrast_signal *= self.stationary_sampling_reward_factor
-        elif self.mobile_contrast_mode == "absolute":
-            contrast_signal = contrast
-        else:
-            previous_contrast = abs(self.prev_left - self.prev_right)
-            contrast_signal = float(
-                np.clip(
-                    contrast - previous_contrast,
-                    -self.mobile_contrast_delta_clip,
-                    self.mobile_contrast_delta_clip,
-                )
-            )
-        r += self.mobile_contrast_scale * contrast_signal
-        r -= self.mobile_time_penalty
-        if reached:
-            r += self.goal_bonus
-        if oob:
-            r -= self.oob_penalty
-        return float(r)
+        max_concentration = max(left, right)
+        return {
+            "progress": float(
+                self.progress_reward_scale * (self.prev_distance - distance)
+            ),
+            "odor_reach": float(
+                self.odor_reach_scale
+                * np.clip(max_concentration, 0.0, self.odor_reach_clip)
+            ),
+            "odor_hit": float(
+                self.mobile_odor_hit_reward
+                if max_concentration >= self.hit_threshold
+                else 0.0
+            ),
+            "contrast": float(self.mobile_contrast_scale * abs(left - right)),
+            "time_penalty": float(-self.mobile_time_penalty),
+            "goal_bonus": float(self.goal_bonus if reached else 0.0),
+            "out_of_bounds_penalty": float(-self.oob_penalty if oob else 0.0),
+        }

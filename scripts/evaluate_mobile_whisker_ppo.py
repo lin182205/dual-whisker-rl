@@ -2,12 +2,14 @@
 
 复用 `dual_whisker_rl.evaluation.evaluate_policy`（源搜索指标、左右触须浓度差、
 reacquisition 等）。环境工厂用 `ObservationHistoryWrapper` 包装，堆叠长度从模型
-观测维度反推；默认额外生成首个评估 seed 的静态 PNG 和动态 GIF。
+观测维度反推；默认选择首个成功和首个失败 episode 生成 PNG/GIF，并单独输出
+这些可视化轨迹的奖励分解 CSV。若评估结果只有一类，则只输出一个 episode。
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 from pathlib import Path
 import sys
@@ -55,6 +57,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="默认按模型文件名写入评估 GIF。",
     )
+    parser.add_argument(
+        "--reward-breakdown-path",
+        type=Path,
+        default=None,
+        help="可视化 episode 的奖励分解 CSV；默认写入对应日志目录。",
+    )
     parser.add_argument("--visualization-steps", type=int, default=200)
     parser.add_argument("--visualization-resolution", type=int, default=100)
     parser.add_argument("--animation-stride", type=int, default=1)
@@ -88,6 +96,10 @@ def parse_args() -> argparse.Namespace:
         args.gif_path = (
             ROOT / "results" / "figures" / f"{args.model_path.stem}_eval.gif"
         )
+    if args.reward_breakdown_path is None:
+        args.reward_breakdown_path = (
+            args.json_path.parent / "visualized_reward_breakdown.csv"
+        )
     return args
 
 
@@ -116,6 +128,151 @@ def select_visualization_episode_indices(
     if first_failure is not None:
         selected.append(("failure", first_failure))
     return selected
+
+
+def write_reward_breakdown(
+    trajectories: list[list[dict]],
+    selected_episodes: list[tuple[str, int]],
+    *,
+    base_seed: int,
+    path: Path,
+) -> Path:
+    """写入机器可读 CSV，并生成便于直接查看的定宽文本表。"""
+    component_order = [
+        "progress",
+        "odor_reach",
+        "odor_hit",
+        "contrast",
+        "time_penalty",
+        "goal_bonus",
+        "out_of_bounds_penalty",
+    ]
+    rows = []
+    for result, episode_index in selected_episodes:
+        trajectory = trajectories[episode_index]
+        component_sums = {name: 0.0 for name in component_order}
+        for step_index, step in enumerate(trajectory):
+            components = step.get("reward_components")
+            if not isinstance(components, dict):
+                raise RuntimeError(
+                    "Evaluation trajectory is missing reward_components at "
+                    f"episode={episode_index}, step={step_index}"
+                )
+            for name in component_order:
+                component_sums[name] += float(components.get(name, 0.0))
+
+        reward_total = float(sum(float(step["reward"]) for step in trajectory))
+        component_total = float(sum(component_sums.values()))
+        final_components = trajectory[-1]["reward_components"]
+        if result == "success":
+            termination = "success"
+        elif float(final_components.get("out_of_bounds_penalty", 0.0)) < 0.0:
+            termination = "out_of_bounds"
+        else:
+            termination = "timeout"
+        row = {
+            "result": result,
+            "termination": termination,
+            "episode_number": episode_index + 1,
+            "episode_index": episode_index,
+            "seed": base_seed + episode_index,
+            "steps": len(trajectory),
+            "final_distance": float(trajectory[-1]["distance_to_source"]),
+            **component_sums,
+            "component_total": component_total,
+            "reward_total": reward_total,
+            "reward_mean_per_step": reward_total / max(len(trajectory), 1),
+            "reconstruction_error": reward_total - component_total,
+        }
+        rows.append(row)
+
+    fieldnames = [
+        "result",
+        "termination",
+        "episode_number",
+        "episode_index",
+        "seed",
+        "steps",
+        "final_distance",
+        *component_order,
+        "component_total",
+        "reward_total",
+        "reward_mean_per_step",
+        "reconstruction_error",
+    ]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8-sig", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    aligned_path = path.with_suffix(".txt")
+    if aligned_path == path:
+        aligned_path = path.with_name(f"{path.stem}_aligned.txt")
+    write_aligned_reward_breakdown(rows, component_order, aligned_path)
+    return aligned_path
+
+
+def write_aligned_reward_breakdown(
+    rows: list[dict],
+    component_order: list[str],
+    path: Path,
+) -> None:
+    """将奖励名称左对齐、累计值右对齐写入定宽文本文件。"""
+    summary_fields = (
+        "component_total",
+        "reward_total",
+        "reward_mean_per_step",
+        "reconstruction_error",
+    )
+    label_width = max(
+        28,
+        *(len(name) for name in component_order),
+        *(len(name) for name in summary_fields),
+    )
+    value_width = 18
+    table_width = label_width + 2 + value_width
+    separator = f"{'-' * label_width}  {'-' * value_width}"
+    lines = ["Visualized reward breakdown", "=" * table_width]
+
+    for row_index, row in enumerate(rows):
+        if row_index:
+            lines.extend(("", "=" * table_width))
+        lines.extend(
+            (
+                "",
+                (
+                    f"Episode {int(float(row['episode_number']))} | "
+                    f"result={row['result']} | termination={row['termination']} | "
+                    f"seed={int(float(row['seed']))} | steps={int(float(row['steps']))}"
+                ),
+                f"Final distance: {float(row['final_distance']):.6f}",
+                "",
+                f"{'reward_component':<{label_width}}  {'cumulative_value':>{value_width}}",
+                separator,
+            )
+        )
+        for component_name in component_order:
+            lines.append(
+                f"{component_name:<{label_width}}  "
+                f"{float(row[component_name]):>{value_width}.6f}"
+            )
+        lines.extend(
+            (
+                separator,
+                f"{'component_total':<{label_width}}  "
+                f"{float(row['component_total']):>{value_width}.6f}",
+                f"{'reward_total':<{label_width}}  "
+                f"{float(row['reward_total']):>{value_width}.6f}",
+                f"{'reward_mean_per_step':<{label_width}}  "
+                f"{float(row['reward_mean_per_step']):>{value_width}.6f}",
+                f"{'reconstruction_error':<{label_width}}  "
+                f"{float(row['reconstruction_error']):>{value_width}.6e}",
+            )
+        )
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def main() -> None:
@@ -175,6 +332,14 @@ def main() -> None:
     print(f"saved_metrics={args.json_path}")
 
     if not args.no_visualization:
+        aligned_reward_breakdown_path = write_reward_breakdown(
+            trajectories,
+            selected_episodes,
+            base_seed=args.seed,
+            path=args.reward_breakdown_path,
+        )
+        print(f"saved_reward_breakdown={args.reward_breakdown_path}")
+        print(f"saved_reward_breakdown_table={aligned_reward_breakdown_path}")
         visualization_rollouts = []
         for result, episode_index in selected_episodes:
             episode_seed = args.seed + episode_index

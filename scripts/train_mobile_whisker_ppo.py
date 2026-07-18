@@ -14,6 +14,8 @@ import sys
 
 import numpy as np
 from stable_baselines3 import PPO
+from stable_baselines3.common.callbacks import CallbackList
+from stable_baselines3.common.callbacks import CheckpointCallback
 from stable_baselines3.common.callbacks import EvalCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.utils import set_random_seed
@@ -83,6 +85,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval-freq", type=int, default=2_000)
     parser.add_argument("--eval-episodes", type=int, default=10)
     parser.add_argument(
+        "--checkpoint-freq",
+        type=int,
+        default=50_000,
+        help="每隔多少个全局环境步保存一次 checkpoint。",
+    )
+    parser.add_argument(
+        "--checkpoint-dir",
+        type=Path,
+        default=None,
+        help="默认保存到 <log-dir>/checkpoints。",
+    )
+    parser.add_argument(
+        "--resume-from",
+        type=Path,
+        default=None,
+        help="从指定 PPO checkpoint 继续训练；--timesteps 表示额外训练步数。",
+    )
+    parser.add_argument(
         "--domain-randomization",
         action="store_true",
         help="开启羽流/传感器 episode 级域随机化，提高 sim-to-real 鲁棒性。",
@@ -101,9 +121,13 @@ def resolve_output_paths(args: argparse.Namespace) -> None:
         args.log_dir = ROOT / "results" / "logs" / experiment_name
     if args.run_name is None:
         args.run_name = experiment_name
+    if args.checkpoint_dir is None:
+        args.checkpoint_dir = args.log_dir / "checkpoints"
 
 
 def validate_args(args: argparse.Namespace) -> None:
+    if args.timesteps < 1:
+        raise ValueError("--timesteps must be at least 1")
     if args.n_envs < 1:
         raise ValueError("--n-envs must be at least 1")
     if args.history_length < 1:
@@ -120,6 +144,14 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--ent-coef must be non-negative")
     if args.target_kl <= 0.0:
         raise ValueError("--target-kl must be positive")
+    if args.eval_freq < 1:
+        raise ValueError("--eval-freq must be at least 1")
+    if args.eval_episodes < 1:
+        raise ValueError("--eval-episodes must be at least 1")
+    if args.checkpoint_freq < 1:
+        raise ValueError("--checkpoint-freq must be at least 1")
+    if args.resume_from is not None and not args.resume_from.exists():
+        raise FileNotFoundError(f"checkpoint does not exist: {args.resume_from}")
     rollout_size = args.n_steps * args.n_envs
     if args.batch_size > rollout_size or rollout_size % args.batch_size != 0:
         raise ValueError(
@@ -213,31 +245,70 @@ def train(args: argparse.Namespace) -> PPO:
         deterministic=True,
         render=False,
     )
+    args.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_callback = CheckpointCallback(
+        save_freq=max(args.checkpoint_freq // args.n_envs, 1),
+        save_path=str(args.checkpoint_dir),
+        name_prefix=args.run_name,
+        save_replay_buffer=False,
+        save_vecnormalize=False,
+        verbose=2,
+    )
+    callbacks = CallbackList([eval_callback, checkpoint_callback])
 
     # PPO 原生支持 MultiDiscrete([6, 10, 10])。
-    model = PPO(
-        policy="MlpPolicy",
-        env=env,
-        learning_rate=args.learning_rate,
-        n_steps=args.n_steps,
-        batch_size=args.batch_size,
-        n_epochs=args.n_epochs,
-        gamma=0.99,
-        gae_lambda=0.95,
-        clip_range=0.2,
-        ent_coef=args.ent_coef,
-        target_kl=args.target_kl,
-        policy_kwargs=build_policy_kwargs(args, base_observation_dim),
-        tensorboard_log=str(args.tensorboard_dir),
-        seed=args.seed,
-        verbose=1,
-    )
+    if args.resume_from is None:
+        model = PPO(
+            policy="MlpPolicy",
+            env=env,
+            learning_rate=args.learning_rate,
+            n_steps=args.n_steps,
+            batch_size=args.batch_size,
+            n_epochs=args.n_epochs,
+            gamma=0.99,
+            gae_lambda=0.95,
+            clip_range=0.2,
+            ent_coef=args.ent_coef,
+            target_kl=args.target_kl,
+            policy_kwargs=build_policy_kwargs(args, base_observation_dim),
+            tensorboard_log=str(args.tensorboard_dir),
+            seed=args.seed,
+            verbose=1,
+        )
+        starting_num_timesteps = 0
+    else:
+        model = PPO.load(
+            str(args.resume_from),
+            env=env,
+            device="auto",
+            force_reset=True,
+        )
+        starting_num_timesteps = int(model.num_timesteps)
+        model.tensorboard_log = str(args.tensorboard_dir)
+        actual_transformer = isinstance(
+            model.policy.features_extractor,
+            TransformerHistoryExtractor,
+        )
+        requested_transformer = args.temporal_encoder == "transformer"
+        if actual_transformer != requested_transformer:
+            raise ValueError(
+                "--temporal-encoder does not match checkpoint features extractor: "
+                f"requested={args.temporal_encoder}, "
+                f"checkpoint={type(model.policy.features_extractor).__name__}"
+            )
+        print(f"resumed_from={args.resume_from}")
+        print(f"starting_num_timesteps={starting_num_timesteps}")
+        print(
+            "resume_note=checkpoint PPO/model/optimizer parameters are preserved; "
+            "--timesteps is additional training"
+        )
     model.learn(
         total_timesteps=args.timesteps,
         progress_bar=False,
-        callback=eval_callback,
+        callback=callbacks,
         tb_log_name=args.run_name,
         log_interval=args.log_interval,
+        reset_num_timesteps=args.resume_from is None,
     )
 
     args.model_path.parent.mkdir(parents=True, exist_ok=True)
@@ -245,7 +316,7 @@ def train(args: argparse.Namespace) -> PPO:
     preview_policy_command(model, config, args)
     env.close()
     eval_env.close()
-    save_run_metadata(args, config, model)
+    save_run_metadata(args, config, model, starting_num_timesteps)
     return model
 
 
@@ -260,7 +331,12 @@ def preview_policy_command(model: PPO, config: dict, args: argparse.Namespace) -
     env.close()
 
 
-def save_run_metadata(args: argparse.Namespace, config: dict, model: PPO) -> None:
+def save_run_metadata(
+    args: argparse.Namespace,
+    config: dict,
+    model: PPO,
+    starting_num_timesteps: int,
+) -> None:
     args.log_dir.mkdir(parents=True, exist_ok=True)
     metadata_env = MobileWhiskerPuffEnv(config)
     base_obs_dim = int(metadata_env.observation_space.shape[0])
@@ -281,13 +357,20 @@ def save_run_metadata(args: argparse.Namespace, config: dict, model: PPO) -> Non
         "eval_seed": args.seed + 100_000,
         "n_envs": args.n_envs,
         "timesteps": args.timesteps,
+        "starting_num_timesteps": starting_num_timesteps,
+        "final_num_timesteps": int(model.num_timesteps),
+        "resume_from": str(args.resume_from) if args.resume_from is not None else None,
+        "checkpoint_freq": args.checkpoint_freq,
+        "checkpoint_dir": str(args.checkpoint_dir),
         "ppo": {
-            "learning_rate": args.learning_rate,
-            "n_steps": args.n_steps,
-            "batch_size": args.batch_size,
-            "n_epochs": args.n_epochs,
-            "ent_coef": args.ent_coef,
-            "target_kl": args.target_kl,
+            "learning_rate": float(model.lr_schedule(1.0)),
+            "n_steps": int(model.n_steps),
+            "batch_size": int(model.batch_size),
+            "n_epochs": int(model.n_epochs),
+            "ent_coef": float(model.ent_coef),
+            "target_kl": (
+                float(model.target_kl) if model.target_kl is not None else None
+            ),
         },
         "history_length": args.history_length,
         "base_observation_dim": base_obs_dim,
@@ -299,6 +382,7 @@ def save_run_metadata(args: argparse.Namespace, config: dict, model: PPO) -> Non
         "features_extractor_parameters": sum(
             parameter.numel() for parameter in extractor.parameters()
         ),
+        "whisker_motion_epsilon_rad": metadata_env.whisker_motion_epsilon_rad,
         "observation_mode": metadata_env.observation_mode,
         "observation_field_names": metadata_env.observation_field_names,
         "sim_sensor_scale": metadata_env.observation_builder.config.scale,
@@ -312,15 +396,7 @@ def save_run_metadata(args: argparse.Namespace, config: dict, model: PPO) -> Non
             "odor_reach_scale": metadata_env.odor_reach_scale,
             "odor_reach_clip": metadata_env.odor_reach_clip,
             "mobile_odor_hit_reward": metadata_env.mobile_odor_hit_reward,
-            "mobile_trend_scale": metadata_env.mobile_trend_scale,
-            "mobile_trend_clip": metadata_env.mobile_trend_clip,
             "mobile_contrast_scale": metadata_env.mobile_contrast_scale,
-            "mobile_contrast_mode": metadata_env.mobile_contrast_mode,
-            "mobile_contrast_delta_clip": metadata_env.mobile_contrast_delta_clip,
-            "whisker_motion_epsilon_rad": metadata_env.whisker_motion_epsilon_rad,
-            "stationary_sampling_reward_factor": (
-                metadata_env.stationary_sampling_reward_factor
-            ),
             "mobile_time_penalty": metadata_env.mobile_time_penalty,
         },
         "source_position": (metadata_env.plume.source_x, metadata_env.plume.source_y),
@@ -337,8 +413,10 @@ def save_run_metadata(args: argparse.Namespace, config: dict, model: PPO) -> Non
 
 def main() -> None:
     args = parse_args()
-    train(args)
+    model = train(args)
     print(f"saved_model={args.model_path}")
+    print(f"checkpoint_dir={args.checkpoint_dir}")
+    print(f"final_num_timesteps={model.num_timesteps}")
     print(f"seed={args.seed}")
     print(f"temporal_encoder={args.temporal_encoder}")
 
