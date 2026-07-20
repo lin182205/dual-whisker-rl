@@ -8,7 +8,7 @@ python scripts\train_mobile_whisker_ppo.py --scenario-mode fixed --temporal-enco
 
 tensorboard --logdir results\tensorboard
 
-python scripts\evaluate_mobile_whisker_ppo.py --model-path results\models\mobile_whisker_mlp_ppo.zip --episodes 50
+python scripts\evaluate_mobile_whisker_ppo.py --model-path results\models\mobile_whisker_gru_ppo.zip --episodes 50
 
 python scripts\train_mobile_whisker_ppo.py 
 --temporal-encoder gru 

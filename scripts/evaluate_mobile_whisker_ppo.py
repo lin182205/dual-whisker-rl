@@ -146,15 +146,7 @@ def write_reward_breakdown(
     path: Path,
 ) -> Path:
     """写入机器可读 CSV，并生成便于直接查看的定宽文本表。"""
-    component_order = [
-        "progress",
-        "odor_reach",
-        "odor_hit",
-        "contrast",
-        "time_penalty",
-        "goal_bonus",
-        "out_of_bounds_penalty",
-    ]
+    component_order = list(MobileWhiskerPuffEnv.REWARD_COMPONENT_NAMES)
     rows = []
     for result, episode_index in selected_episodes:
         trajectory = trajectories[episode_index]

@@ -26,6 +26,15 @@ from dual_whisker_rl.envs.whisker_only_env import WhiskerOnlyPuffEnv
 class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
     """移动机器人 + 双触须气源搜索环境。"""
 
+    REWARD_COMPONENT_NAMES = (
+        "distance_potential_progress",
+        "best_concentration_improvement",
+        "time_penalty",
+        "stagnation_penalty",
+        "goal_bonus",
+        "out_of_bounds_penalty",
+    )
+
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         cfg = dict(config or {})
         # 注入 mobile 默认：更大场地（2m，±1.0）以显现追踪。
@@ -125,19 +134,87 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         sc = int(self.whiskers.sector_count)
         self.action_space = spaces.MultiDiscrete([self.n_move_actions, sc, sc])
 
-        # 源搜索奖励系数（按 1m 几何 + 传感器 ~0-1.5 量级标定，config 可覆盖）。
+        obsolete_reward_keys = (
+            "odor_reach_scale",
+            "odor_reach_clip",
+            "mobile_odor_hit_reward",
+            "mobile_contrast_scale",
+        )
+        configured_obsolete_keys = [
+            key for key in obsolete_reward_keys if key in cfg
+        ]
+        if configured_obsolete_keys:
+            raise ValueError(
+                "obsolete mobile reward config keys are not supported: "
+                f"{', '.join(configured_obsolete_keys)}; use "
+                "best_concentration_reward_scale/best_concentration_clip instead"
+            )
+
+        # 防刷分奖励：浓度只奖励 episode 历史最佳值增量；距离项为有符号势差。
         self.goal_radius = float(cfg.get("goal_radius", 0.10))
-        # 奖励哲学（可配置）：让“触须采到的气味”成为主导稠密项，特权 progress 只作弱引导，
-        # 使触须指向真正影响回报——否则策略会退化成无视触须的纯点导航。
         self.progress_reward_scale = float(cfg.get("progress_reward_scale", 1.0))
-        self.goal_bonus = float(cfg.get("goal_bonus", 50.0))
+        configured_goal_bonus = float(cfg.get("goal_bonus", 50.0))
+        if not math.isclose(configured_goal_bonus, 50.0, rel_tol=0.0, abs_tol=1e-12):
+            raise ValueError("goal_bonus is fixed at 50.0 for mobile source search")
+        self.goal_bonus = 50.0
         self.oob_penalty = float(cfg.get("oob_penalty", 5.0))
-        # odor_reach：奖励触须端采到的气味 max(left,right)（依赖触须指向），主导稠密项。
-        self.odor_reach_scale = float(cfg.get("odor_reach_scale", 0.3))
-        self.odor_reach_clip = float(cfg.get("odor_reach_clip", 1.0))
-        self.mobile_odor_hit_reward = float(cfg.get("mobile_odor_hit_reward", 0.0))
-        self.mobile_contrast_scale = float(cfg.get("mobile_contrast_scale", 0.5))
+        self.best_concentration_reward_scale = float(
+            cfg.get("best_concentration_reward_scale", 5.0)
+        )
+        self.best_concentration_clip = float(
+            cfg.get("best_concentration_clip", 1.0)
+        )
+        self.concentration_progress_epsilon = float(
+            cfg.get("concentration_progress_epsilon", 0.01)
+        )
+        self.position_progress_epsilon = float(
+            cfg.get("position_progress_epsilon", 1e-4)
+        )
+        self.distance_progress_epsilon = float(
+            cfg.get("distance_progress_epsilon", 1e-4)
+        )
+        stagnation_window_value = float(cfg.get("stagnation_window", 5))
+        if not stagnation_window_value.is_integer():
+            raise ValueError("stagnation_window must be an integer")
+        self.stagnation_window = int(stagnation_window_value)
+        self.stagnation_penalty = float(cfg.get("stagnation_penalty", 0.10))
         self.mobile_time_penalty = float(cfg.get("mobile_time_penalty", 0.05))
+
+        nonnegative_reward_values = {
+            "progress_reward_scale": self.progress_reward_scale,
+            "oob_penalty": self.oob_penalty,
+            "best_concentration_reward_scale": self.best_concentration_reward_scale,
+            "concentration_progress_epsilon": self.concentration_progress_epsilon,
+            "position_progress_epsilon": self.position_progress_epsilon,
+            "distance_progress_epsilon": self.distance_progress_epsilon,
+            "stagnation_penalty": self.stagnation_penalty,
+            "mobile_time_penalty": self.mobile_time_penalty,
+        }
+        for name, value in nonnegative_reward_values.items():
+            if not math.isfinite(value) or value < 0.0:
+                raise ValueError(f"{name} must be finite and non-negative")
+        if (
+            not math.isfinite(self.best_concentration_clip)
+            or self.best_concentration_clip <= 0.0
+        ):
+            raise ValueError("best_concentration_clip must be finite and positive")
+        if self.stagnation_window < 1:
+            raise ValueError("stagnation_window must be at least 1")
+
+        world_diameter = 2.0 * math.sqrt(2.0) * self.world_half
+        self.positive_auxiliary_reward_upper_bound = (
+            self.best_concentration_reward_scale * self.best_concentration_clip
+            + self.progress_reward_scale * world_diameter
+        )
+        if (
+            self.positive_auxiliary_reward_upper_bound
+            > self.goal_bonus / 5.0 + 1e-12
+        ):
+            raise ValueError(
+                "positive auxiliary reward upper bound must not exceed "
+                f"goal_bonus / 5 = {self.goal_bonus / 5.0:.6f}; got "
+                f"{self.positive_auxiliary_reward_upper_bound:.6f}"
+            )
 
         # 仅用于评估主动采样比例，不参与奖励计算。
         self.whisker_motion_epsilon_rad = float(
@@ -164,6 +241,8 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
 
         self.last_move = self.stop_action
         self.prev_distance = 0.0
+        self.best_concentration = 0.0
+        self.stagnation_steps = 0
 
     # ---- 位姿与观测 ----
 
@@ -334,6 +413,8 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         options: dict[str, Any] | None = None,
     ) -> tuple[np.ndarray, dict[str, Any]]:
         self.last_move = self.stop_action
+        self.best_concentration = 0.0
+        self.stagnation_steps = 0
         if self.scenario_mode == "randomized":
             if seed is not None:
                 self._scenario_rng = np.random.default_rng(
@@ -371,7 +452,15 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         self.last_right_sector = right_sector
 
         # 先推进机器人位姿，再采样触须（触须点由 whisker_model 依位姿自动计算）。
+        previous_x = self.robot_state.x
+        previous_y = self.robot_state.y
         self.robot_state = self.robot.step(move)
+        position_displacement = float(
+            math.hypot(
+                self.robot_state.x - previous_x,
+                self.robot_state.y - previous_y,
+            )
+        )
         self.plume.advance()
         previous_left_angle = self.whiskers.left_angle
         previous_right_angle = self.whiskers.right_angle
@@ -409,6 +498,7 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
             oob,
             left,
             right,
+            position_displacement,
         )
         reward = float(sum(reward_components.values()))
 
@@ -431,6 +521,9 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
                 "right_sector": int(right_sector),
                 "move_action": DifferentialDriveRobot.ACTIONS[move],
                 "distance_to_source": distance,
+                "best_concentration": self.best_concentration,
+                "position_displacement": position_displacement,
+                "stagnation_steps": self.stagnation_steps,
                 "reward": reward,
                 "reward_components": reward_components,
             }
@@ -460,6 +553,9 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
                 "scenario_mode": self.scenario_mode,
                 "initial_heading_mode": self.initial_heading_mode,
                 "distance_to_source": distance,
+                "best_concentration": self.best_concentration,
+                "position_displacement": position_displacement,
+                "stagnation_steps": self.stagnation_steps,
                 "out_of_bounds": oob,
                 "is_success": reached,
                 "reward_components": reward_components,
@@ -476,6 +572,7 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         oob: bool,
         left: float,
         right: float,
+        position_displacement: float = 0.0,
     ) -> float:
         return float(
             sum(
@@ -485,6 +582,7 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
                     oob,
                     left,
                     right,
+                    position_displacement,
                 ).values()
             )
         )
@@ -496,29 +594,56 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         oob: bool,
         left: float,
         right: float,
+        position_displacement: float = 0.0,
     ) -> dict[str, float]:
-        """触须采到的气味为主导稠密项 + 弱 progress 引导 + 终点/惩罚。
+        """计算可望远镜求和、不能靠原地保持高浓度重复刷取的奖励。"""
+        clipped_concentration = float(
+            np.clip(max(left, right), 0.0, self.best_concentration_clip)
+        )
+        concentration_improvement = max(
+            0.0,
+            clipped_concentration - self.best_concentration,
+        )
+        self.best_concentration = max(
+            self.best_concentration,
+            clipped_concentration,
+        )
 
-        odor_reach / contrast 两项都依赖触须端读数，因而依赖触须指向：
-        把触须主动指向气味缕、扩大命中、制造左右不对称都会直接涨分，使主动采样
-        对回报有可显现的影响，而非被特权 progress 掩盖。
-        """
-        max_concentration = max(left, right)
+        distance_improvement = self.prev_distance - distance
+        position_progressed = (
+            position_displacement > self.position_progress_epsilon
+        )
+        concentration_progressed = (
+            concentration_improvement > self.concentration_progress_epsilon
+        )
+        distance_progressed = (
+            distance_improvement > self.distance_progress_epsilon
+        )
+        terminal = reached or oob
+        if (
+            terminal
+            or position_progressed
+            or concentration_progressed
+            or distance_progressed
+        ):
+            self.stagnation_steps = 0
+        else:
+            self.stagnation_steps += 1
+        stagnation_active = (
+            not terminal and self.stagnation_steps >= self.stagnation_window
+        )
+
         return {
-            "progress": float(
-                self.progress_reward_scale * (self.prev_distance - distance)
+            "distance_potential_progress": float(
+                self.progress_reward_scale * distance_improvement
             ),
-            "odor_reach": float(
-                self.odor_reach_scale
-                * np.clip(max_concentration, 0.0, self.odor_reach_clip)
+            "best_concentration_improvement": float(
+                self.best_concentration_reward_scale * concentration_improvement
             ),
-            "odor_hit": float(
-                self.mobile_odor_hit_reward
-                if max_concentration >= self.hit_threshold
-                else 0.0
-            ),
-            "contrast": float(self.mobile_contrast_scale * abs(left - right)),
             "time_penalty": float(-self.mobile_time_penalty),
+            "stagnation_penalty": float(
+                -self.stagnation_penalty if stagnation_active else 0.0
+            ),
             "goal_bonus": float(self.goal_bonus if reached else 0.0),
             "out_of_bounds_penalty": float(-self.oob_penalty if oob else 0.0),
         }

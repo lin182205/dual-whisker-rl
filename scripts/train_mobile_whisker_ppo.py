@@ -14,6 +14,7 @@ import sys
 
 import numpy as np
 from stable_baselines3 import PPO
+from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.callbacks import CallbackList
 from stable_baselines3.common.callbacks import CheckpointCallback
 from stable_baselines3.common.callbacks import EvalCallback
@@ -31,6 +32,70 @@ from dual_whisker_rl.envs import MobileWhiskerPuffEnv
 from train_whisker_only_ppo import ObservationHistoryWrapper
 from train_whisker_only_ppo import load_config
 from train_whisker_only_ppo import resolve_seed
+
+
+class RewardComponentsTensorboardCallback(BaseCallback):
+    """按 rollout 均值和完整 episode 累计值记录各奖励分量。"""
+
+    _NON_TENSORBOARD_OUTPUTS = ("stdout", "log", "json", "csv")
+
+    def __init__(self, component_names: tuple[str, ...], verbose: int = 0) -> None:
+        super().__init__(verbose=verbose)
+        self.component_names = component_names
+        self._episode_sums: list[dict[str, float]] = []
+        self._rollout_sums: dict[str, float] = {}
+        self._rollout_count = 0
+        self._completed_episode_sums: dict[str, list[float]] = {}
+
+    def _on_training_start(self) -> None:
+        self._episode_sums = [
+            {name: 0.0 for name in self.component_names}
+            for _ in range(self.training_env.num_envs)
+        ]
+
+    def _on_rollout_start(self) -> None:
+        self._rollout_sums = {name: 0.0 for name in self.component_names}
+        self._rollout_count = 0
+        self._completed_episode_sums = {
+            name: [] for name in self.component_names
+        }
+
+    def _on_step(self) -> bool:
+        infos = self.locals.get("infos", ())
+        dones = np.asarray(self.locals.get("dones", ()), dtype=bool).reshape(-1)
+        for env_index, info in enumerate(infos):
+            components = info.get("reward_components")
+            if not isinstance(components, dict):
+                continue
+            self._rollout_count += 1
+            for name in self.component_names:
+                value = float(components.get(name, 0.0))
+                self._rollout_sums[name] += value
+                self._episode_sums[env_index][name] += value
+            if env_index < dones.size and bool(dones[env_index]):
+                for name in self.component_names:
+                    self._completed_episode_sums[name].append(
+                        self._episode_sums[env_index][name]
+                    )
+                    self._episode_sums[env_index][name] = 0.0
+        return True
+
+    def _on_rollout_end(self) -> None:
+        if self._rollout_count > 0:
+            for name in self.component_names:
+                self.logger.record(
+                    f"reward_components/{name}_step_mean",
+                    self._rollout_sums[name] / self._rollout_count,
+                    exclude=self._NON_TENSORBOARD_OUTPUTS,
+                )
+        for name in self.component_names:
+            completed_values = self._completed_episode_sums[name]
+            if completed_values:
+                self.logger.record(
+                    f"reward_components/{name}_episode_sum_mean",
+                    float(np.mean(completed_values)),
+                    exclude=self._NON_TENSORBOARD_OUTPUTS,
+                )
 
 
 def parse_args() -> argparse.Namespace:
@@ -292,7 +357,12 @@ def train(args: argparse.Namespace) -> PPO:
         save_vecnormalize=False,
         verbose=2,
     )
-    callbacks = CallbackList([eval_callback, checkpoint_callback])
+    reward_components_callback = RewardComponentsTensorboardCallback(
+        MobileWhiskerPuffEnv.REWARD_COMPONENT_NAMES
+    )
+    callbacks = CallbackList(
+        [reward_components_callback, eval_callback, checkpoint_callback]
+    )
 
     # PPO 原生支持 MultiDiscrete([6, 10, 10])。
     if args.resume_from is None:
@@ -447,11 +517,22 @@ def save_run_metadata(
             "progress_reward_scale": metadata_env.progress_reward_scale,
             "goal_bonus": metadata_env.goal_bonus,
             "oob_penalty": metadata_env.oob_penalty,
-            "odor_reach_scale": metadata_env.odor_reach_scale,
-            "odor_reach_clip": metadata_env.odor_reach_clip,
-            "mobile_odor_hit_reward": metadata_env.mobile_odor_hit_reward,
-            "mobile_contrast_scale": metadata_env.mobile_contrast_scale,
+            "best_concentration_reward_scale": (
+                metadata_env.best_concentration_reward_scale
+            ),
+            "best_concentration_clip": metadata_env.best_concentration_clip,
+            "concentration_progress_epsilon": (
+                metadata_env.concentration_progress_epsilon
+            ),
+            "position_progress_epsilon": metadata_env.position_progress_epsilon,
+            "distance_progress_epsilon": metadata_env.distance_progress_epsilon,
+            "stagnation_window": metadata_env.stagnation_window,
+            "stagnation_penalty": metadata_env.stagnation_penalty,
             "mobile_time_penalty": metadata_env.mobile_time_penalty,
+            "positive_auxiliary_reward_upper_bound": (
+                metadata_env.positive_auxiliary_reward_upper_bound
+            ),
+            "component_names": list(metadata_env.REWARD_COMPONENT_NAMES),
         },
         "source_position": (
             list(metadata_env.plume.source_position_override)
