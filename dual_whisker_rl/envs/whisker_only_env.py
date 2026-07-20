@@ -74,6 +74,10 @@ class DynamicPuffPlume:
             float(wind_speed_range[1]),
         )
         self.wind_sampling_mode = str(wind_sampling_mode)
+        self.wind_direction_range = (
+            math.radians(-12.0),
+            math.radians(12.0),
+        )
         self.wind_speed_mean = 0.5 * (
             self.wind_speed_range[0] + self.wind_speed_range[1]
         )
@@ -119,6 +123,11 @@ class DynamicPuffPlume:
         self.puff_warmup_steps = 80
         self.far_source_distance = 0.75
         self.far_source_crosswind_range = (-0.18, 0.18)
+        self.source_distance_range = (
+            self.far_source_distance,
+            self.far_source_distance,
+        )
+        self.require_source_in_world = False
 
         self.plume_contact_threshold = 0.08
         self.plume_strong_threshold = 0.18
@@ -134,6 +143,14 @@ class DynamicPuffPlume:
                 if not hasattr(self, key):
                     raise KeyError(f"未知 plume 覆盖参数: {key}")
                 setattr(self, key, value)
+            if (
+                "far_source_distance" in plume_overrides
+                and "source_distance_range" not in plume_overrides
+            ):
+                self.source_distance_range = (
+                    float(self.far_source_distance),
+                    float(self.far_source_distance),
+                )
 
         # 域随机化：每个 episode 在标称值附近扰动羽流物理参数，提高策略鲁棒性。
         self.domain_randomization = False
@@ -197,9 +214,7 @@ class DynamicPuffPlume:
             self.wind_direction = self.wind_direction_base
             self.wind_speed = self.wind_speed_mean
             return
-        self.wind_direction_base = float(
-            self.rng.uniform(math.radians(-12.0), math.radians(12.0))
-        )
+        self.wind_direction_base = float(self.rng.uniform(*self.wind_direction_range))
         self.wind_direction = self.wind_direction_base
         self.wind_speed = float(
             self.rng.uniform(self.wind_speed_range[0], self.wind_speed_range[1])
@@ -215,17 +230,52 @@ class DynamicPuffPlume:
         wind_y = math.sin(self.wind_direction_base)
         cross_x = -wind_y
         cross_y = wind_x
-        cross_offset = float(self.rng.uniform(*self.far_source_crosswind_range))
-        self.source_x = (
-            0.0
-            - self.far_source_distance * wind_x
-            + cross_offset * cross_x
+
+        def candidate(source_distance: float, cross_offset: float) -> tuple[float, float]:
+            return (
+                -source_distance * wind_x + cross_offset * cross_x,
+                -source_distance * wind_y + cross_offset * cross_y,
+            )
+
+        attempts = 256 if self.require_source_in_world else 1
+        for _ in range(attempts):
+            if self.source_distance_range[0] == self.source_distance_range[1]:
+                source_distance = float(self.source_distance_range[0])
+            else:
+                source_distance = float(
+                    self.rng.uniform(*self.source_distance_range)
+                )
+            cross_offset = float(self.rng.uniform(*self.far_source_crosswind_range))
+            source_x, source_y = candidate(source_distance, cross_offset)
+            if not self.require_source_in_world or self.is_position_valid(
+                source_x,
+                source_y,
+                margin=self.source_clearance,
+            ):
+                self.source_x = source_x
+                self.source_y = source_y
+                return
+
+        distance_values = np.linspace(*self.source_distance_range, num=33)
+        crosswind_values = sorted(
+            np.linspace(*self.far_source_crosswind_range, num=33),
+            key=abs,
         )
-        self.source_y = (
-            0.0
-            - self.far_source_distance * wind_y
-            + cross_offset * cross_y
-        )
+        for source_distance in distance_values:
+            for cross_offset in crosswind_values:
+                source_x, source_y = candidate(
+                    float(source_distance),
+                    float(cross_offset),
+                )
+                if self.is_position_valid(
+                    source_x,
+                    source_y,
+                    margin=self.source_clearance,
+                ):
+                    self.source_x = source_x
+                    self.source_y = source_y
+                    return
+        raise RuntimeError("could not place source inside the configured world")
 
     def _update_wind(self) -> None:
         """每个环境步扰动风场。

@@ -24,6 +24,7 @@ from dual_whisker_rl.agents import TransformerHistoryExtractor
 from dual_whisker_rl.envs import MobileWhiskerPuffEnv
 from dual_whisker_rl.evaluation import evaluate_policy
 from train_whisker_only_ppo import ObservationHistoryWrapper
+from train_whisker_only_ppo import load_config
 from visualize_mobile_whisker_env import capture_rollout
 from visualize_mobile_whisker_env import render_animation_rollouts
 from visualize_mobile_whisker_env import render_static_rollouts
@@ -35,6 +36,13 @@ def parse_args() -> argparse.Namespace:
         "--model-path",
         type=Path,
         default=ROOT / "results" / "models" / "mobile_whisker_transformer_ppo.zip",
+    )
+    parser.add_argument("--config", type=Path, default=None)
+    parser.add_argument(
+        "--scenario-mode",
+        choices=("randomized", "fixed"),
+        default=None,
+        help="覆盖配置中的场景初始化模式；默认使用 randomized。",
     )
     parser.add_argument("--episodes", type=int, default=50)
     parser.add_argument("--seed", type=int, default=10_000)
@@ -283,13 +291,16 @@ def main() -> None:
     _ = TransformerHistoryExtractor
     model = PPO.load(str(args.model_path))
 
-    config: dict = {}
+    config = load_config(args.config)
+    if args.scenario_mode is not None:
+        config["scenario_mode"] = args.scenario_mode
     if args.domain_randomization:
         config["domain_randomization"] = True
 
     probe_env = MobileWhiskerPuffEnv(config)
     base_dim = int(probe_env.observation_space.shape[0])
     probe_goal_radius = float(probe_env.goal_radius)
+    scenario = probe_env.scenario_metadata()
     probe_env.close()
     stacked_dim = int(model.observation_space.shape[0])
     if stacked_dim % base_dim != 0:
@@ -311,6 +322,7 @@ def main() -> None:
         seed=args.seed,
         deterministic=True,
     )
+    metrics["scenario"] = scenario
 
     selected_episodes = select_visualization_episode_indices(
         trajectories,

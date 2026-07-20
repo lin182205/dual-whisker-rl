@@ -27,6 +27,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from dual_whisker_rl.envs import MobileWhiskerPuffEnv
+from train_whisker_only_ppo import load_config
 from visualize_whisker_only_env import build_plume_colormap
 from visualize_whisker_only_env import draw_robot_heading_marker
 from visualize_whisker_only_env import draw_whisker_artists
@@ -38,6 +39,13 @@ def parse_args() -> argparse.Namespace:
         "--model-path",
         type=Path,
         default=ROOT / "results" / "models" / "mobile_whisker_transformer_ppo.zip",
+    )
+    parser.add_argument("--config", type=Path, default=None)
+    parser.add_argument(
+        "--scenario-mode",
+        choices=("randomized", "fixed"),
+        default=None,
+        help="覆盖配置中的场景初始化模式；默认使用 randomized。",
     )
     parser.add_argument("--no-model", action="store_true", help="忽略模型、用随机动作。")
     parser.add_argument("--seed", type=int, default=3)
@@ -500,7 +508,11 @@ def render_animation_rollouts(rollouts, path, title, stride, fps):
 
 def main() -> None:
     args = parse_args()
-    config = {"domain_randomization": args.domain_randomization} if args.domain_randomization else {}
+    config = load_config(args.config)
+    if args.scenario_mode is not None:
+        config["scenario_mode"] = args.scenario_mode
+    if args.domain_randomization:
+        config["domain_randomization"] = True
     env = MobileWhiskerPuffEnv(config)
 
     model = None

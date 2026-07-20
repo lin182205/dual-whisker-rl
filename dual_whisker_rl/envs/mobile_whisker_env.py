@@ -1,8 +1,8 @@
 """移动机器人 + 双触须气源搜索环境。
 
 在 `WhiskerOnlyPuffEnv`（固定基座、稀疏动态羽流、硬件可部署观测、舵机限速触须）
-之上，把触须装到一个差速驱动的移动机器人上，做气源搜索：气源置于 1m 场地上风侧
-（场内），机器人从下风侧出发，联合控制"移动 + 左右触须扇区"导航到气源。
+之上，把触须装到一个差速驱动的移动机器人上，做气源搜索。默认每个 episode
+联合随机化气源方位、风向、下风侧机器人起点和朝向，同时保留旧固定场景用于诊断。
 
 动作空间 `MultiDiscrete([6, 10, 10])` = [移动动作, 左扇区, 右扇区]，与硬件串口协议
 兼容（移动交给底盘、扇区对应 STEP 命令）。观测在父类 12 维硬件特征上追加机器人自身
@@ -28,10 +28,27 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         cfg = dict(config or {})
-        # 注入 mobile 默认：更大场地（2m，±1.0）以显现追踪；气源置于上风侧场内。
+        # 注入 mobile 默认：更大场地（2m，±1.0）以显现追踪。
         cfg.setdefault("world_half", 1.0)
         wh = float(cfg["world_half"])
-        cfg.setdefault("source_position", (-(wh - 0.2), 0.0))
+        explicit_source = cfg.get("source_position") is not None
+        scenario_mode_explicit = "scenario_mode" in cfg
+        scenario_mode = str(
+            cfg.get("scenario_mode", "fixed" if explicit_source else "randomized")
+        )
+        if scenario_mode not in ("randomized", "fixed"):
+            raise ValueError(
+                "scenario_mode must be 'randomized' or 'fixed', "
+                f"got {scenario_mode!r}"
+            )
+        if scenario_mode == "randomized" and explicit_source:
+            detail = "explicitly " if scenario_mode_explicit else ""
+            raise ValueError(
+                f"{detail}randomized scenario_mode cannot be combined with "
+                "source_position; remove source_position or use scenario_mode='fixed'"
+            )
+        if scenario_mode == "fixed" and not explicit_source:
+            cfg["source_position"] = (-(wh - 0.2), 0.0)
         cfg.setdefault("max_steps", 400)
         # 大场地需要羽流能横跨过去，否则下风侧起点闻不到气味：加大风速、延长 puff 寿命。
         cfg.setdefault("wind_speed_range", (0.12, 0.20))
@@ -43,6 +60,56 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
             raise ValueError("MobileWhiskerPuffEnv 只支持 observation_mode='hardware'")
         cfg["observation_mode"] = "hardware"
         super().__init__(cfg)
+
+        self.scenario_mode = scenario_mode
+        self.scenario_source_distance_range = self._validate_range(
+            "scenario_source_distance_range",
+            cfg.get("scenario_source_distance_range", (0.65 * wh, 0.80 * wh)),
+            positive=True,
+        )
+        self.scenario_source_crosswind_range = self._validate_range(
+            "scenario_source_crosswind_range",
+            cfg.get("scenario_source_crosswind_range", (-0.15 * wh, 0.15 * wh)),
+        )
+        self.scenario_robot_downwind_range = self._validate_range(
+            "scenario_robot_downwind_range",
+            cfg.get("scenario_robot_downwind_range", (0.75 * wh, 1.45 * wh)),
+            positive=True,
+        )
+        self.scenario_robot_crosswind_range = self._validate_range(
+            "scenario_robot_crosswind_range",
+            cfg.get("scenario_robot_crosswind_range", (-0.35 * wh, 0.35 * wh)),
+        )
+        self.scenario_uniform_heading_probability = float(
+            cfg.get("scenario_uniform_heading_probability", 0.75)
+        )
+        if not math.isfinite(self.scenario_uniform_heading_probability) or not (
+            0.0 <= self.scenario_uniform_heading_probability <= 1.0
+        ):
+            raise ValueError(
+                "scenario_uniform_heading_probability must be between 0 and 1"
+            )
+        self.scenario_source_facing_jitter = float(
+            cfg.get("scenario_source_facing_jitter", 0.4)
+        )
+        if (
+            not math.isfinite(self.scenario_source_facing_jitter)
+            or self.scenario_source_facing_jitter < 0.0
+        ):
+            raise ValueError("scenario_source_facing_jitter must be non-negative")
+        self.initial_heading_mode = "source_facing"
+        self._scenario_rng = np.random.default_rng(
+            np.random.SeedSequence([int(cfg.get("seed", 0)), 0x5343454E])
+        )
+
+        if self.scenario_mode == "randomized":
+            self.plume.wind_sampling_mode = "random"
+            self.plume.wind_direction_range = (-math.pi, math.pi)
+            self.plume.source_distance_range = self.scenario_source_distance_range
+            self.plume.far_source_crosswind_range = (
+                self.scenario_source_crosswind_range
+            )
+            self.plume.require_source_in_world = True
 
         # 差速驱动底盘。1m 场 @ dt=0.2：forward=0.03m/步（穿场约 33 步）、
         # turn≈0.30rad/步≈17°/步，机器人比触须舵机慢，贴近现实。
@@ -100,8 +167,33 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
 
     # ---- 位姿与观测 ----
 
+    @staticmethod
+    def _validate_range(
+        name: str,
+        values: Any,
+        *,
+        positive: bool = False,
+    ) -> tuple[float, float]:
+        try:
+            low, high = (float(value) for value in values)
+        except (TypeError, ValueError):
+            raise ValueError(f"{name} must contain exactly two numbers") from None
+        if not math.isfinite(low) or not math.isfinite(high):
+            raise ValueError(f"{name} values must be finite")
+        if low > high:
+            raise ValueError(f"{name} lower bound must not exceed upper bound")
+        if positive and low <= 0.0:
+            raise ValueError(f"{name} values must be positive")
+        return low, high
+
     def sample_initial_robot_pose(self) -> RobotState:
-        """在下风侧（+x 半场）随机起点、大致朝上风（朝向气源）。同步底盘位姿。"""
+        """按场景模式采样机器人起点，并同步到底盘模型。"""
+        if self.scenario_mode == "fixed":
+            return self._sample_fixed_initial_robot_pose()
+        return self._sample_randomized_initial_robot_pose()
+
+    def _sample_fixed_initial_robot_pose(self) -> RobotState:
+        """复现旧场景：+x 半场随机起点，大致朝向固定气源。"""
         wh = self.world_max
         for _ in range(128):
             x = float(self.rng.uniform(0.35 * wh, wh - 0.15))
@@ -111,11 +203,103 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
             if math.hypot(x - self.plume.source_x, y - self.plume.source_y) < 0.15:
                 continue
             heading = math.pi + float(self.rng.uniform(-0.4, 0.4))
+            self.initial_heading_mode = "source_facing"
             self.robot.reset(x, y, heading)
             return self.robot.state
         # 兜底：场地中偏下风处。
+        self.initial_heading_mode = "source_facing"
         self.robot.reset(0.5 * wh, 0.0, math.pi)
         return self.robot.state
+
+    def _sample_randomized_initial_robot_pose(self) -> RobotState:
+        """在当前平均风的下风区域采样有效起点和混合分布朝向。"""
+        rng = self._scenario_rng
+        wind_x = math.cos(self.plume.wind_direction_base)
+        wind_y = math.sin(self.plume.wind_direction_base)
+        cross_x = -wind_y
+        cross_y = wind_x
+
+        for _ in range(256):
+            downwind = float(rng.uniform(*self.scenario_robot_downwind_range))
+            crosswind = float(rng.uniform(*self.scenario_robot_crosswind_range))
+            x = self.plume.source_x + downwind * wind_x + crosswind * cross_x
+            y = self.plume.source_y + downwind * wind_y + crosswind * cross_y
+            if self._is_valid_randomized_start(x, y):
+                return self._reset_robot_with_sampled_heading(x, y)
+
+        downwind_values = np.linspace(*self.scenario_robot_downwind_range, num=33)
+        crosswind_values = sorted(
+            np.linspace(*self.scenario_robot_crosswind_range, num=33),
+            key=abs,
+        )
+        for downwind in downwind_values:
+            for crosswind in crosswind_values:
+                x = self.plume.source_x + float(downwind) * wind_x + float(crosswind) * cross_x
+                y = self.plume.source_y + float(downwind) * wind_y + float(crosswind) * cross_y
+                if self._is_valid_randomized_start(x, y):
+                    return self._reset_robot_with_sampled_heading(x, y)
+
+        raise RuntimeError(
+            "could not place robot in a valid downwind position for randomized scenario"
+        )
+
+    def _is_valid_randomized_start(self, x: float, y: float) -> bool:
+        if not self.plume.is_position_valid(x, y, margin=0.16):
+            return False
+        return math.hypot(x - self.plume.source_x, y - self.plume.source_y) > max(
+            0.15,
+            self.goal_radius,
+        )
+
+    def _reset_robot_with_sampled_heading(self, x: float, y: float) -> RobotState:
+        rng = self._scenario_rng
+        if rng.random() < self.scenario_uniform_heading_probability:
+            heading = float(rng.uniform(-math.pi, math.pi))
+            self.initial_heading_mode = "uniform"
+        else:
+            source_bearing = math.atan2(
+                self.plume.source_y - y,
+                self.plume.source_x - x,
+            )
+            heading = source_bearing + float(
+                rng.uniform(
+                    -self.scenario_source_facing_jitter,
+                    self.scenario_source_facing_jitter,
+                )
+            )
+            self.initial_heading_mode = "source_facing"
+        self.robot.reset(x, y, heading)
+        return self.robot.state
+
+    def scenario_metadata(self) -> dict[str, Any]:
+        """返回可序列化的场景初始化分布。"""
+        if self.scenario_mode == "fixed":
+            return {
+                "mode": "fixed",
+                "source_position": [
+                    float(self.plume.source_x),
+                    float(self.plume.source_y),
+                ],
+                "wind_direction_range_deg": [
+                    math.degrees(self.plume.wind_direction_range[0]),
+                    math.degrees(self.plume.wind_direction_range[1]),
+                ],
+                "robot_start_x_range": [0.35 * self.world_max, self.world_max - 0.15],
+                "robot_start_y_range": [-(self.world_max - 0.15), self.world_max - 0.15],
+                "uniform_heading_probability": 0.0,
+                "source_facing_jitter_rad": 0.4,
+            }
+        return {
+            "mode": "randomized",
+            "source_position": None,
+            "wind_direction_range_deg": [-180.0, 180.0],
+            "source_distance_range": list(self.scenario_source_distance_range),
+            "source_crosswind_range": list(self.scenario_source_crosswind_range),
+            "robot_downwind_range": list(self.scenario_robot_downwind_range),
+            "robot_crosswind_range": list(self.scenario_robot_crosswind_range),
+            "uniform_heading_probability": self.scenario_uniform_heading_probability,
+            "source_facing_jitter_rad": self.scenario_source_facing_jitter,
+        }
 
     def _build_observation(self) -> np.ndarray:
         """父 12 维硬件观测（预处理只推进一次）+ 3 维本体感受 → 15 维。"""
@@ -150,9 +334,26 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         options: dict[str, Any] | None = None,
     ) -> tuple[np.ndarray, dict[str, Any]]:
         self.last_move = self.stop_action
+        if self.scenario_mode == "randomized":
+            if seed is not None:
+                self._scenario_rng = np.random.default_rng(
+                    np.random.SeedSequence([int(seed), 0x5343454E])
+                )
+            else:
+                self._scenario_rng = np.random.default_rng(
+                    int(self.rng.integers(0, 2**63 - 1))
+                )
         obs, info = super().reset(seed=seed, options=options)
         self.prev_distance = self._distance_to_source()
-        info["distance_to_source"] = self.prev_distance
+        info.update(
+            {
+                "distance_to_source": self.prev_distance,
+                "scenario_mode": self.scenario_mode,
+                "initial_heading_mode": self.initial_heading_mode,
+                "wind_direction": self.plume.wind_direction,
+                "source": (self.plume.source_x, self.plume.source_y),
+            }
+        )
         return obs, info
 
     def _decode_action(self, action: Any) -> tuple[int, int, int]:
@@ -256,6 +457,8 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
                 "wind_direction": self.plume.wind_direction,
                 "wind_speed": self.plume.wind_speed,
                 "source": (self.plume.source_x, self.plume.source_y),
+                "scenario_mode": self.scenario_mode,
+                "initial_heading_mode": self.initial_heading_mode,
                 "distance_to_source": distance,
                 "out_of_bounds": oob,
                 "is_success": reached,

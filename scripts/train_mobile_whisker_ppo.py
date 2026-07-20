@@ -36,6 +36,12 @@ from train_whisker_only_ppo import resolve_seed
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, default=None)
+    parser.add_argument(
+        "--scenario-mode",
+        choices=("randomized", "fixed"),
+        default=None,
+        help="覆盖配置中的移动场景初始化模式；默认使用 randomized。",
+    )
     parser.add_argument("--timesteps", type=int, default=300_000)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--n-envs", type=int, default=8)
@@ -245,6 +251,8 @@ def train(args: argparse.Namespace) -> PPO:
     resolve_output_paths(args)
     validate_args(args)
     config = load_config(args.config)
+    if args.scenario_mode is not None:
+        config["scenario_mode"] = args.scenario_mode
     if args.domain_randomization:
         config["domain_randomization"] = True
     args.seed = resolve_seed(args.seed)
@@ -432,6 +440,7 @@ def save_run_metadata(
         "observation_field_names": metadata_env.observation_field_names,
         "sim_sensor_scale": metadata_env.observation_builder.config.scale,
         "init_pose_mode": metadata_env.init_pose_mode,
+        "scenario": metadata_env.scenario_metadata(),
         "action_space": "[move_action, left_sector, right_sector]",
         "goal_radius": metadata_env.goal_radius,
         "reward": {
@@ -444,7 +453,11 @@ def save_run_metadata(
             "mobile_contrast_scale": metadata_env.mobile_contrast_scale,
             "mobile_time_penalty": metadata_env.mobile_time_penalty,
         },
-        "source_position": (metadata_env.plume.source_x, metadata_env.plume.source_y),
+        "source_position": (
+            list(metadata_env.plume.source_position_override)
+            if metadata_env.plume.source_position_override is not None
+            else None
+        ),
         "model_path": str(args.model_path),
         "tensorboard_dir": str(args.tensorboard_dir),
         "run_name": args.run_name,
