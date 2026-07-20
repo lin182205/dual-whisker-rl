@@ -510,7 +510,7 @@ class WhiskerOnlyPuffEnv(gym.Env):
         # 奖励阈值/系数已按改造后羽流的浓度量级重标定（传感器读数典型 0.3~1.3）。
         # hit_threshold 仍保持较低，用于观测 hit-rate 特征和初始位姿采样；
         # strong_threshold 才是“强响应” bonus 的门限，按新量级设置。
-        self.hit_threshold = float(cfg.get("hit_threshold", 0.08))
+        self.hit_threshold = float(cfg.get("hit_threshold", 0.2))
         self.strong_threshold = float(cfg.get("strong_threshold", 0.60))
         # 主要奖励来自连续、依赖动作的项：浓度幅值 + 上升趋势 + 左右对比。
         self.odor_hit_reward = float(cfg.get("odor_hit_reward", 0.08))

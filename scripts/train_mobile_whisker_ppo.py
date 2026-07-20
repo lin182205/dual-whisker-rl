@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from dual_whisker_rl.agents import GRUHistoryExtractor
 from dual_whisker_rl.agents import TransformerHistoryExtractor
 from dual_whisker_rl.envs import MobileWhiskerPuffEnv
 from train_whisker_only_ppo import ObservationHistoryWrapper
@@ -41,9 +42,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--history-length", type=int, default=20)
     parser.add_argument(
         "--temporal-encoder",
-        choices=("transformer", "mlp"),
-        default="transformer",
-        help="历史信息编码方式：Transformer 时序编码或原始扁平 MLP 基线。",
+        choices=("transformer", "gru", "mlp"),
+        default="gru",
+        help="历史信息编码方式：Transformer 时序编码、单层 GRU 时序编码，或原始扁平 MLP 基线。",
     )
     parser.add_argument("--transformer-d-model", type=int, default=64)
     parser.add_argument("--transformer-heads", type=int, default=4)
@@ -51,6 +52,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--transformer-ff-dim", type=int, default=128)
     parser.add_argument("--transformer-dropout", type=float, default=0.1)
     parser.add_argument("--transformer-features-dim", type=int, default=64)
+    parser.add_argument("--gru-hidden-size", type=int, default=64)
+    parser.add_argument("--gru-layers", type=int, default=1)
+    parser.add_argument("--gru-dropout", type=float, default=0.0)
+    parser.add_argument("--gru-features-dim", type=int, default=64)
     parser.add_argument("--learning-rate", type=float, default=1e-4)
     parser.add_argument("--n-steps", type=int, default=512)
     parser.add_argument("--batch-size", type=int, default=256)
@@ -87,7 +92,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--checkpoint-freq",
         type=int,
-        default=50_000,
+        default=10_000,
         help="每隔多少个全局环境步保存一次 checkpoint。",
     )
     parser.add_argument(
@@ -174,9 +179,20 @@ def validate_args(args: argparse.Namespace) -> None:
     if not 0.0 <= args.transformer_dropout < 1.0:
         raise ValueError("--transformer-dropout must satisfy 0 <= dropout < 1")
 
+    positive_gru_args = {
+        "--gru-hidden-size": args.gru_hidden_size,
+        "--gru-layers": args.gru_layers,
+        "--gru-features-dim": args.gru_features_dim,
+    }
+    for name, value in positive_gru_args.items():
+        if value < 1:
+            raise ValueError(f"{name} must be at least 1")
+    if not 0.0 <= args.gru_dropout < 1.0:
+        raise ValueError("--gru-dropout must satisfy 0 <= dropout < 1")
+
 
 def build_policy_kwargs(args: argparse.Namespace, base_observation_dim: int) -> dict:
-    """构造 MLP 基线或 Transformer 历史编码策略参数。"""
+    """构造 MLP 基线、Transformer 或 GRU 历史编码策略参数。"""
     policy_kwargs: dict = {
         "net_arch": [160, 160],
         "share_features_extractor": True,
@@ -194,6 +210,20 @@ def build_policy_kwargs(args: argparse.Namespace, base_observation_dim: int) -> 
                     "dim_feedforward": args.transformer_ff_dim,
                     "dropout": args.transformer_dropout,
                     "features_dim": args.transformer_features_dim,
+                },
+            }
+        )
+    elif args.temporal_encoder == "gru":
+        policy_kwargs.update(
+            {
+                "features_extractor_class": GRUHistoryExtractor,
+                "features_extractor_kwargs": {
+                    "history_length": args.history_length,
+                    "base_observation_dim": base_observation_dim,
+                    "hidden_size": args.gru_hidden_size,
+                    "n_layers": args.gru_layers,
+                    "dropout": args.gru_dropout,
+                    "features_dim": args.gru_features_dim,
                 },
             }
         )
@@ -285,16 +315,22 @@ def train(args: argparse.Namespace) -> PPO:
         )
         starting_num_timesteps = int(model.num_timesteps)
         model.tensorboard_log = str(args.tensorboard_dir)
-        actual_transformer = isinstance(
-            model.policy.features_extractor,
-            TransformerHistoryExtractor,
+        expected_extractor_cls = {
+            "transformer": TransformerHistoryExtractor,
+            "gru": GRUHistoryExtractor,
+        }.get(args.temporal_encoder)
+        checkpoint_extractor = model.policy.features_extractor
+        # mlp 基线用 SB3 默认 flatten 提取器；transformer/gru 各自校验类型是否匹配。
+        matches = (
+            not isinstance(checkpoint_extractor, (TransformerHistoryExtractor, GRUHistoryExtractor))
+            if expected_extractor_cls is None
+            else isinstance(checkpoint_extractor, expected_extractor_cls)
         )
-        requested_transformer = args.temporal_encoder == "transformer"
-        if actual_transformer != requested_transformer:
+        if not matches:
             raise ValueError(
                 "--temporal-encoder does not match checkpoint features extractor: "
                 f"requested={args.temporal_encoder}, "
-                f"checkpoint={type(model.policy.features_extractor).__name__}"
+                f"checkpoint={type(checkpoint_extractor).__name__}"
             )
         print(f"resumed_from={args.resume_from}")
         print(f"starting_num_timesteps={starting_num_timesteps}")
@@ -342,6 +378,7 @@ def save_run_metadata(
     base_obs_dim = int(metadata_env.observation_space.shape[0])
     extractor = model.policy.features_extractor
     transformer_config = None
+    gru_config = None
     if args.temporal_encoder == "transformer":
         transformer_config = {
             "d_model": args.transformer_d_model,
@@ -350,6 +387,13 @@ def save_run_metadata(
             "dim_feedforward": args.transformer_ff_dim,
             "dropout": args.transformer_dropout,
             "features_dim": args.transformer_features_dim,
+        }
+    elif args.temporal_encoder == "gru":
+        gru_config = {
+            "hidden_size": args.gru_hidden_size,
+            "n_layers": args.gru_layers,
+            "dropout": args.gru_dropout,
+            "features_dim": args.gru_features_dim,
         }
     metadata = {
         "seed": args.seed,
@@ -377,6 +421,7 @@ def save_run_metadata(
         "stacked_observation_dim": base_obs_dim * args.history_length,
         "temporal_encoder": args.temporal_encoder,
         "transformer": transformer_config,
+        "gru": gru_config,
         "policy_features_dim": int(extractor.features_dim),
         "features_extractor_class": type(extractor).__name__,
         "features_extractor_parameters": sum(

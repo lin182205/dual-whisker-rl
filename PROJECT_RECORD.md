@@ -1431,3 +1431,27 @@ odor_reach / trend / contrast 三项都依赖触须端读数 → 依赖触须指
 - **验证**：沿 x 轴（y=0）平均浓度/命中率 —— 源区 x=-0.8: 1.10/0.99，下风起点区 x=0.9: 0.077/0.41，全程平滑梯度、间歇性沿程增强，是可追踪羽流。目标导向脚本控制器 20/20 到源、平均 48 步（约 1.5m 旅程，小场仅 ~20 步）。可视化确认 2m 场内 filament 成缕横穿。
 
 注意：真正的"追踪现象"仍需**训练策略**才能显现（随机策略会乱转出界）；本节只是把环境/羽流准备到能显现追踪的 regime。
+
+## 22. 时序编码器可切换：Transformer / GRU / MLP（mobile）
+
+`ObservationHistoryWrapper` 把 20 帧观测堆叠成扁平向量（mobile 15×20=300）后，用哪种网络在**策略内部**恢复时间维并编码，做成 `train_mobile_whisker_ppo.py --temporal-encoder` 三选一：
+
+- **transformer**（`dual_whisker_rl/agents/transformer_history.py`，先前 commit 加入）：CLS token + 可学习位置编码 + 2 层 4 头 encoder，取 CLS 输出。配套注意力可视化脚本 `analyze_mobile_transformer_attention.py`。
+- **gru**（本节新增，`dual_whisker_rl/agents/gru_history.py`）：单层 GRU（默认 hidden=64），取最后一层最后时刻隐状态 `h_n[-1]` → Linear+GELU → features_dim。
+- **mlp**：SB3 默认 flatten 提取器，扁平 300 维直接进 `net_arch=[160,160]`。
+
+### 22.1 为何加 GRU
+
+Transformer 在本任务"低维（每帧 15）+ on-policy 小样本 + 慢响应传感器"场景下归纳偏置弱、额外参数（CLS/位置编码）多、训练不稳。MQ-3 是慢响应、强自相关信号，天然序列递推结构——单层 GRU 顺序内建、无需位置编码、参数少（实测提取器 ~1.97 万参数），PPO 下更稳，作为 transformer 的平级替代/对照。
+
+### 22.2 实现要点
+
+- `GRUHistoryExtractor(BaseFeaturesExtractor)` 与 transformer 提取器接口一致、可直接互换（同样校验扁平维 == history×base、reshape `[B,H,base]`）；不实现注意力接口。
+- 训练脚本：`--temporal-encoder` 增 `gru`；新增 `--gru-hidden-size/layers/dropout/features-dim`；`build_policy_kwargs` 加 gru 分支；resume 类型检查从"是否 transformer"泛化为按 encoder 映射到对应提取器类（mlp=默认 flatten）；`run_metadata` 新增 `gru` 字段。输出路径已按 `mobile_whisker_{encoder}_ppo` 自动隔离（gru 独立模型/日志目录）。
+- **未覆盖**：whisker-only 训练脚本；GRU 无注意力，未做替代可解释性工具。
+
+### 22.3 验证（冒烟，非结论）
+
+三种 encoder 均端到端跑通、各自写独立模型：gru 3000 步（fps~617）、transformer/mlp 各 1200 步均正常收尾；gru 的 `run_metadata.json` 正确记录 `gru={hidden_size:64,n_layers:1,dropout:0.0,features_dim:64}`、`features_extractor_class=GRUHistoryExtractor`。
+
+**待做（真正判断效果）**：相同 seed/timesteps 下 gru / transformer / mlp 三方 A/B，比 `ep_rew_mean` 收敛与稳定性 + evaluate 指标。**特别注意**：观测每帧已含 `norm_trend/norm_smooth/diff` 等手工时序特征，时序编码器未必是瓶颈——务必带上 mlp 基线，避免"换架构其实无差别"。

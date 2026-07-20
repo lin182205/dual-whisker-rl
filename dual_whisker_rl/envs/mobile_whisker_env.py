@@ -68,7 +68,7 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         # odor_reach：奖励触须端采到的气味 max(left,right)（依赖触须指向），主导稠密项。
         self.odor_reach_scale = float(cfg.get("odor_reach_scale", 0.3))
         self.odor_reach_clip = float(cfg.get("odor_reach_clip", 1.0))
-        self.mobile_odor_hit_reward = float(cfg.get("mobile_odor_hit_reward", 0.1))
+        self.mobile_odor_hit_reward = float(cfg.get("mobile_odor_hit_reward", 0.0))
         self.mobile_contrast_scale = float(cfg.get("mobile_contrast_scale", 0.5))
         self.mobile_time_penalty = float(cfg.get("mobile_time_penalty", 0.05))
 
