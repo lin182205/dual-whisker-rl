@@ -181,7 +181,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--log-interval", type=int, default=1)
     parser.add_argument("--eval-freq", type=int, default=2_000)
-    parser.add_argument("--eval-episodes", type=int, default=50)
+    parser.add_argument("--eval-episodes", type=int, default=10)
     parser.add_argument(
         "--checkpoint-freq",
         type=int,
