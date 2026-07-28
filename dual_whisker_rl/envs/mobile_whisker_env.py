@@ -151,15 +151,18 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
             )
 
         # 防刷分奖励：浓度只奖励 episode 历史最佳值增量；距离项为有符号势差。
+        # 默认系数保证朝气源正常前进一步的距离奖励能覆盖单步时间成本，避免
+        # “正确移动也持续亏分”；越界惩罚则在下方按整局最坏成本做安全校验。
         self.goal_radius = float(cfg.get("goal_radius", 0.10))
-        self.progress_reward_scale = float(cfg.get("progress_reward_scale", 1.0))
+        self.progress_reward_scale = float(cfg.get("progress_reward_scale", 3.0))
         configured_goal_bonus = float(cfg.get("goal_bonus", 50.0))
         if not math.isclose(configured_goal_bonus, 50.0, rel_tol=0.0, abs_tol=1e-12):
             raise ValueError("goal_bonus is fixed at 50.0 for mobile source search")
         self.goal_bonus = 50.0
-        self.oob_penalty = float(cfg.get("oob_penalty", 5.0))
+        self.mobile_time_penalty = float(cfg.get("mobile_time_penalty", 0.03))
+        self.oob_penalty = float(cfg.get("oob_penalty", 25.0))
         self.best_concentration_reward_scale = float(
-            cfg.get("best_concentration_reward_scale", 5.0)
+            cfg.get("best_concentration_reward_scale", 3.0)
         )
         self.best_concentration_clip = float(
             cfg.get("best_concentration_clip", 1.0)
@@ -173,12 +176,11 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         self.distance_progress_epsilon = float(
             cfg.get("distance_progress_epsilon", 1e-4)
         )
-        stagnation_window_value = float(cfg.get("stagnation_window", 5))
+        stagnation_window_value = float(cfg.get("stagnation_window", 20))
         if not stagnation_window_value.is_integer():
             raise ValueError("stagnation_window must be an integer")
         self.stagnation_window = int(stagnation_window_value)
-        self.stagnation_penalty = float(cfg.get("stagnation_penalty", 0.10))
-        self.mobile_time_penalty = float(cfg.get("mobile_time_penalty", 0.05))
+        self.stagnation_penalty = float(cfg.get("stagnation_penalty", 0.02))
 
         nonnegative_reward_values = {
             "progress_reward_scale": self.progress_reward_scale,
@@ -208,12 +210,24 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         )
         if (
             self.positive_auxiliary_reward_upper_bound
-            > self.goal_bonus / 5.0 + 1e-12
+            > self.goal_bonus / 4.0 + 1e-12
         ):
             raise ValueError(
                 "positive auxiliary reward upper bound must not exceed "
-                f"goal_bonus / 5 = {self.goal_bonus / 5.0:.6f}; got "
+                f"goal_bonus / 4 = {self.goal_bonus / 4.0:.6f}; got "
                 f"{self.positive_auxiliary_reward_upper_bound:.6f}"
+            )
+        self.max_episode_time_cost = self.mobile_time_penalty * self.max_steps
+        self.minimum_oob_penalty = (
+            self.max_episode_time_cost
+            + self.positive_auxiliary_reward_upper_bound
+        )
+        if self.oob_penalty + 1e-12 < self.minimum_oob_penalty:
+            raise ValueError(
+                "oob_penalty must cover the maximum episode time cost plus all "
+                "positive auxiliary rewards, otherwise early out-of-bounds can be "
+                "more profitable than continuing: "
+                f"need >= {self.minimum_oob_penalty:.6f}, got {self.oob_penalty:.6f}"
             )
 
         # 仅用于评估主动采样比例，不参与奖励计算。

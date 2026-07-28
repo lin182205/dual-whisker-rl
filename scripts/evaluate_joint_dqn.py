@@ -10,13 +10,13 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=Path, default=ROOT / "configs" / "default.yaml")
-    parser.add_argument("--model-path", type=Path, default=ROOT / "results" / "models" / "joint_dqn.zip")
+    parser.add_argument("--config", type=Path, default=Path("configs/default.yaml"))
+    parser.add_argument("--model-path", type=Path, default=Path("results/models/joint_dqn.zip"))
     parser.add_argument("--episodes", type=int, default=50)
     parser.add_argument("--seed", type=int, default=10_000)
-    parser.add_argument("--metrics-path", type=Path, default=ROOT / "results" / "logs" / "joint_dqn" / "eval_metrics.json")
-    parser.add_argument("--figure-path", type=Path, default=ROOT / "results" / "figures" / "joint_dqn_eval_trajectory.png")
-    parser.add_argument("--animation-path", type=Path, default=ROOT / "results" / "figures" / "joint_dqn_eval_animation.gif")
+    parser.add_argument("--metrics-path", type=Path, default=Path("results/logs/joint_dqn/eval_metrics.json"))
+    parser.add_argument("--figure-path", type=Path, default=Path("results/figures/joint_dqn_eval_trajectory.png"))
+    parser.add_argument("--animation-path", type=Path, default=Path("results/figures/joint_dqn_eval_animation.gif"))
     parser.add_argument("--animation-stride", type=int, default=5)
     return parser.parse_args()
 

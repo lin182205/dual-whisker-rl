@@ -37,6 +37,9 @@ if str(ROOT) not in sys.path:
 
 from dual_whisker_rl.hardware.sensor_preprocess import DualGasPreprocessor
 from dual_whisker_rl.hardware.sensor_preprocess import SensorPreprocessConfig
+from dual_whisker_rl.paths import portable_path
+from dual_whisker_rl.paths import project_path
+from dual_whisker_rl.paths import resolve_path_args
 
 
 def parse_args() -> argparse.Namespace:
@@ -44,7 +47,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--csv-path",
         type=Path,
-        default=ROOT / "results" / "hardware" / "live_plot.csv",
+        default=Path("results/hardware/live_plot.csv"),
     )
     # 输出路径默认 None，main() 中根据 --label 生成，避免洁净段/气体段互相覆盖。
     parser.add_argument("--json-path", type=Path, default=None)
@@ -85,7 +88,14 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="冻结基线更新。用于气体刺激段，避免真实响应被 baseline 吃掉。",
     )
-    return parser.parse_args()
+    return resolve_path_args(
+        parser.parse_args(),
+        "csv_path",
+        "json_path",
+        "figure_path",
+        "overlay_path",
+        "summary_path",
+    )
 
 
 def load_csv(path: Path) -> dict[str, np.ndarray]:
@@ -449,7 +459,8 @@ def default_output_paths(args: argparse.Namespace) -> tuple[Path, Path, Path, Pa
 
     figure_path 为分面板图（上一版风格），overlay_path 为双 Y 轴叠加对比图。
     """
-    base = ROOT / "results" / "hardware"
+    base = project_path("results/hardware")
+    assert base is not None
     suffix = f"_{args.label}" if args.label else ""
     json_path = args.json_path or base / f"baseline_analysis{suffix}.json"
     figure_path = args.figure_path or base / f"baseline_preprocess{suffix}.png"
@@ -491,7 +502,7 @@ def main() -> None:
     verdict = make_verdict(left, right, features_win, args.segment_kind)
 
     result = {
-        "csv_path": str(args.csv_path),
+        "csv_path": portable_path(args.csv_path),
         "label": args.label,
         "segment_kind": args.segment_kind,
         "window": {"t_start": t_start, "t_end": t_end},

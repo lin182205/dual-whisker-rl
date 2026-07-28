@@ -16,18 +16,19 @@ if str(ROOT) not in sys.path:
 
 from dual_whisker_rl.hardware.hardware_logger import save_samples_csv
 from dual_whisker_rl.hardware.serial_client import DualWhiskerSerialClient
+from dual_whisker_rl.paths import resolve_path_args
 from dual_whisker_rl.hardware.serial_client import HardwareSample
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=Path, default=ROOT / "configs" / "hardware.yaml")
+    parser.add_argument("--config", type=Path, default=Path("configs/hardware.yaml"))
     parser.add_argument("--port", type=str, default=None)
     parser.add_argument("--cycles", type=int, default=5)
     parser.add_argument("--delay-s", type=float, default=0.2)
-    parser.add_argument("--csv-path", type=Path, default=ROOT / "results" / "hardware" / "sector_scan.csv")
-    parser.add_argument("--figure-path", type=Path, default=ROOT / "results" / "hardware" / "sector_scan.png")
-    return parser.parse_args()
+    parser.add_argument("--csv-path", type=Path, default=Path("results/hardware/sector_scan.csv"))
+    parser.add_argument("--figure-path", type=Path, default=Path("results/hardware/sector_scan.png"))
+    return resolve_path_args(parser.parse_args(), "config", "csv_path", "figure_path")
 
 
 def load_config(path: Path) -> dict:

@@ -50,6 +50,7 @@ if str(ROOT) not in sys.path:
 
 from dual_whisker_rl.hardware.sensor_preprocess import DualGasPreprocessor
 from dual_whisker_rl.hardware.sensor_preprocess import SensorPreprocessConfig
+from dual_whisker_rl.paths import resolve_path_args
 
 
 # 一条采样记录：原始数据 + 时间 + 当前扇区。
@@ -58,7 +59,7 @@ Record = dict[str, float]
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path, default=ROOT / "configs" / "hardware.yaml")
+    parser.add_argument("--config", type=Path, default=Path("configs/hardware.yaml"))
     parser.add_argument("--port", type=str, default=None)
     parser.add_argument(
         "--mode",
@@ -89,9 +90,9 @@ def parse_args() -> argparse.Namespace:
     # 运行方式与输出。
     parser.add_argument("--replay-csv", type=Path, default=None, help="离线回放：从 CSV 读数据，不连硬件。")
     parser.add_argument("--run-id", type=str, default=None, help="输出子目录名，默认按时间+模式生成。")
-    parser.add_argument("--output-dir", type=Path, default=ROOT / "results" / "hardware" / "sampling_modes")
+    parser.add_argument("--output-dir", type=Path, default=Path("results/hardware/sampling_modes"))
     parser.add_argument("--source-note", type=str, default="", help="环境备注，例如气源/风扇/距离。")
-    return parser.parse_args()
+    return resolve_path_args(parser.parse_args(), "config", "replay_csv", "output_dir")
 
 
 def load_config(path: Path) -> dict:

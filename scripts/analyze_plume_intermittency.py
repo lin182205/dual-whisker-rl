@@ -36,6 +36,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from dual_whisker_rl.envs.whisker_only_env import DynamicPuffPlume
+from dual_whisker_rl.paths import resolve_path_args
 
 
 def parse_args() -> argparse.Namespace:
@@ -79,9 +80,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--out-dir",
         type=Path,
-        default=ROOT / "results" / "figures",
+        default=Path("results/figures"),
     )
-    return parser.parse_args()
+    return resolve_path_args(parser.parse_args(), "out_dir")
 
 
 def sample_points(

@@ -39,3 +39,42 @@ Evaluation metrics include whisker information-gathering fields such as raw/sens
 Training scripts write TensorBoard logs to `results/tensorboard/`. Common curves to watch are rollout episode reward, evaluation mean reward, and algorithm losses such as PPO value/policy loss or DQN TD loss.
 
 Training seeds are random by default for better policy diversity. Pass `--seed 42` when you need a reproducible run. Each training run writes `run_metadata.json` under its log directory with the actual seed and config.
+
+## Cloud training (Linux)
+
+All CLI paths are repository-relative by default. The scripts resolve them against the
+repository root, so they work both from the repository directory and when invoked by an
+absolute script path from another working directory. `run_metadata.json` stores repository
+paths such as `results/models/mobile_whisker_gru_ppo.zip`, without a Windows drive letter or
+a cloud-machine home directory. Explicit absolute paths remain supported for mounted data disks.
+
+```bash
+git clone <repository-url> dual-whisker-rl
+cd dual-whisker-rl
+
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python -m pip install -r requirements-rl.txt
+
+mkdir -p results/logs
+nohup python scripts/train_mobile_whisker_ppo.py \
+  --temporal-encoder gru \
+  --timesteps 1000000 \
+  --n-envs 8 \
+  --seed 1 \
+  > results/logs/mobile_cloud_stdout.log 2>&1 &
+```
+
+Inspect the process and logs:
+
+```bash
+tail -f results/logs/mobile_cloud_stdout.log
+tensorboard --logdir results/tensorboard --host 127.0.0.1 --port 6006
+```
+
+To view TensorBoard locally, create an SSH tunnel with
+`ssh -L 6006:127.0.0.1:6006 user@server`, then open `http://127.0.0.1:6006`.
+The `results/` directory is intentionally ignored by Git; copy checkpoints and logs with
+`rsync`, `scp`, or cloud object storage before releasing the server.

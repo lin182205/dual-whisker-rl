@@ -16,16 +16,17 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from dual_whisker_rl.envs import PlumeEnv
+from dual_whisker_rl.paths import resolve_path_args
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=Path, default=ROOT / "configs" / "default.yaml")
+    parser.add_argument("--config", type=Path, default=Path("configs/default.yaml"))
     parser.add_argument("--timesteps", type=int, default=50_000)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--model-path", type=Path, default=ROOT / "results" / "models" / "joint_dqn.zip")
-    parser.add_argument("--log-dir", type=Path, default=ROOT / "results" / "logs" / "joint_dqn")
-    return parser.parse_args()
+    parser.add_argument("--model-path", type=Path, default=Path("results/models/joint_dqn.zip"))
+    parser.add_argument("--log-dir", type=Path, default=Path("results/logs/joint_dqn"))
+    return resolve_path_args(parser.parse_args(), "config", "model_path", "log_dir")
 
 
 def load_config(path: Path) -> dict:

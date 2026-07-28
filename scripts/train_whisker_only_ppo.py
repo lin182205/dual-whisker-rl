@@ -25,6 +25,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from dual_whisker_rl.envs import WhiskerOnlyPuffEnv
+from dual_whisker_rl.paths import portable_path
+from dual_whisker_rl.paths import resolve_path_args
 
 
 class ObservationHistoryWrapper(gym.Wrapper):
@@ -81,9 +83,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--n-envs", type=int, default=8)
     parser.add_argument("--history-length", type=int, default=20)
-    parser.add_argument("--model-path", type=Path, default=ROOT / "results" / "models" / "whisker_only_ppo.zip")
-    parser.add_argument("--log-dir", type=Path, default=ROOT / "results" / "logs" / "whisker_only_ppo")
-    parser.add_argument("--tensorboard-dir", type=Path, default=ROOT / "results" / "tensorboard")
+    parser.add_argument("--model-path", type=Path, default=Path("results/models/whisker_only_ppo.zip"))
+    parser.add_argument("--log-dir", type=Path, default=Path("results/logs/whisker_only_ppo"))
+    parser.add_argument("--tensorboard-dir", type=Path, default=Path("results/tensorboard"))
     parser.add_argument("--run-name", type=str, default="whisker_only_ppo")
     parser.add_argument("--log-interval", type=int, default=1)
     parser.add_argument("--eval-freq", type=int, default=1_000)
@@ -93,7 +95,13 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="开启羽流物理和传感器特性的 episode 级域随机化，提高 sim-to-real 鲁棒性。",
     )
-    return parser.parse_args()
+    return resolve_path_args(
+        parser.parse_args(),
+        "config",
+        "model_path",
+        "log_dir",
+        "tensorboard_dir",
+    )
 
 
 def load_config(path: Path | None) -> dict:
@@ -252,10 +260,10 @@ def save_run_metadata(args: argparse.Namespace, config: dict) -> None:
         "servo_angular_speed_deg_s": float(
             np.degrees(metadata_env.whiskers.angular_speed_rad_s)
         ),
-        "model_path": str(args.model_path),
-        "tensorboard_dir": str(args.tensorboard_dir),
+        "model_path": portable_path(args.model_path),
+        "tensorboard_dir": portable_path(args.tensorboard_dir),
         "run_name": args.run_name,
-        "config_path": str(args.config) if args.config is not None else None,
+        "config_path": portable_path(args.config),
         "config": config,
     }
     metadata_env.close()

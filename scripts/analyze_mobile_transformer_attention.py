@@ -33,6 +33,8 @@ if str(ROOT) not in sys.path:
 
 from dual_whisker_rl.agents import TransformerHistoryExtractor
 from dual_whisker_rl.envs import MobileWhiskerPuffEnv
+from dual_whisker_rl.paths import portable_path
+from dual_whisker_rl.paths import resolve_path_args
 from train_whisker_only_ppo import load_config
 from visualize_whisker_only_env import build_plume_colormap
 from visualize_whisker_only_env import draw_robot_heading_marker
@@ -81,7 +83,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model-path",
         type=Path,
-        default=ROOT / "results" / "models" / "mobile_whisker_transformer_ppo.zip",
+        default=Path("results/models/mobile_whisker_transformer_ppo.zip"),
     )
     parser.add_argument("--config", type=Path, default=None)
     parser.add_argument("--seed", type=int, default=10_000)
@@ -118,8 +120,8 @@ def parse_args() -> argparse.Namespace:
     if args.swing_tolerance_deg < 0.0:
         parser.error("--swing-tolerance-deg must be non-negative")
     if args.output_dir is None:
-        args.output_dir = ROOT / "results" / "attention" / args.model_path.stem
-    return args
+        args.output_dir = Path("results/attention") / args.model_path.stem
+    return resolve_path_args(args, "model_path", "config", "output_dir")
 
 
 def wrap_angle(angle: float) -> float:
@@ -723,8 +725,8 @@ def save_data_outputs(
     }
     payload = {
         "metadata": {
-            "model_path": str(args.model_path),
-            "config_path": str(args.config) if args.config is not None else None,
+            "model_path": portable_path(args.model_path),
+            "config_path": portable_path(args.config),
             "seed": int(args.seed),
             "states": len(data["states"]),
             "history_length": int(extractor.history_length),

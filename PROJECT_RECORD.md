@@ -1455,3 +1455,66 @@ Transformer 在本任务"低维（每帧 15）+ on-policy 小样本 + 慢响应�
 三种 encoder 均端到端跑通、各自写独立模型：gru 3000 步（fps~617）、transformer/mlp 各 1200 步均正常收尾；gru 的 `run_metadata.json` 正确记录 `gru={hidden_size:64,n_layers:1,dropout:0.0,features_dim:64}`、`features_extractor_class=GRUHistoryExtractor`。
 
 **待做（真正判断效果）**：相同 seed/timesteps 下 gru / transformer / mlp 三方 A/B，比 `ep_rew_mean` 收敛与稳定性 + evaluate 指标。**特别注意**：观测每帧已含 `norm_trend/norm_smooth/diff` 等手工时序特征，时序编码器未必是瓶颈——务必带上 mlp 基线，避免"换架构其实无差别"。
+
+## 23. Mobile 奖励稳定性修正 + TensorBoard 奖励拆分
+
+### 23.1 成功率后期下降的奖励侧诊断
+
+已有长训练显示两类现象：GRU 训练窗口的 `rollout/success_rate` 可升到约 0.61，但仅 10 episode 的 eval 成功率在 0.0～0.5 间剧烈波动；Transformer 后期则真实塌缩到连续 0 成功。除评估样本量过小外，旧奖励还存在两个确定的局部激励问题：
+
+- `progress_reward_scale=1.0` 时，朝气源正常前进约 0.03m 只得到约 `+0.03`，低于每步 `time_penalty=-0.05`，即正确的非终止移动仍可能净亏分，学习主要依赖稀疏的 `goal_bonus=50`。
+- `oob_penalty=5`，而 400 步超时累计时间成本为 `20`；尽快越界终止可能比留在场内超时更划算，形成提前结束 episode 的漏洞。
+
+### 23.2 新默认与安全约束
+
+`MobileWhiskerPuffEnv` 默认奖励调整如下：
+
+```text
+progress_reward_scale              1.0  -> 3.0
+best_concentration_reward_scale    5.0  -> 3.0
+mobile_time_penalty                0.05 -> 0.03
+stagnation_window                  5    -> 20
+stagnation_penalty                 0.10 -> 0.02
+oob_penalty                        5.0  -> 25.0
+goal_bonus                         50（不变）
+```
+
+这样，朝气源前进 0.03m 的无气味单步约为 `3×0.03-0.03=+0.06`，提供连续的正确方向反馈；浓度历史最佳增量仍保留，但降低权重，防止气味辅助项盖过导航目标。停滞惩罚延后并减弱，避免正常转向或短暂等待间歇羽流时被过度处罚。
+
+新增两项初始化安全检查：正辅助奖励理论上界不得超过 `goal_bonus/4`；`oob_penalty` 必须不小于“最大 episode 时间成本 + 正辅助奖励上界”。当前分别为 `11.4853`、`12.0`，故越界惩罚至少需 `23.4853`，默认取 25。显式传旧值 5 会直接报错，避免静默恢复奖励漏洞。
+
+### 23.3 TensorBoard 奖励拆分
+
+训练回调从每个 step 的 `info["reward_components"]` 累计并写入 TensorBoard。六个实际奖励分量均有两种曲线：
+
+- `reward_components/<name>_step_mean`：当前 rollout 内逐步均值，观察即时强度与正负号。
+- `reward_components/<name>_episode_sum_mean`：当前 rollout 内完整 episode 的累计均值，观察该项对整局回报的贡献。
+
+奖励项为 `distance_potential_progress`、`best_concentration_improvement`、`time_penalty`、`stagnation_penalty`、`goal_bonus`、`out_of_bounds_penalty`。另加 `reward_components/total_step_mean` 和 `reward_components/total_episode_sum_mean`，用于核对拆分之和；run metadata 同步记录最大时间成本和最小安全越界惩罚。
+
+### 23.4 验证（连通性，不是训练结论）
+
+- 200 step 随机环境检查：每一步环境返回 reward 与六项之和在 `1e-12` 误差内一致。
+- 1024 step、2 env、GRU smoke 跑通；TensorBoard 实际包含 14 条奖励曲线（6×2 + total×2），成功 episode 的拆分总和示例为 51.98。
+- 旧 `oob_penalty=5` 被安全校验拒绝；Python compileall 通过。
+
+下一轮正式训练应使用新 run（奖励语义已变化，不建议从旧 checkpoint 续训），把 eval episode 数从 10 提高到至少 50，并同时观察 `eval/success_rate`、`rollout/success_rate`、`goal_bonus_episode_sum_mean`、`out_of_bounds_penalty_episode_sum_mean` 与 `time_penalty_episode_sum_mean`。脚本跑通不能证明成功率不会再次下降，需要多 seed 曲线确认。
+
+## 24. 本地 / 云端统一的项目相对路径
+
+为避免 Windows 盘符、用户目录或 Linux 云主机工作目录进入 CLI 默认值和运行元数据，新增 `dual_whisker_rl/paths.py`，统一三种语义：
+
+- `project_path(path)`：相对路径始终按仓库根目录解析，不依赖启动时的 current working directory；显式绝对路径保持不变，支持云盘挂载点。
+- `resolve_path_args(args, ...)`：集中解析 argparse 中的输入、模型、日志、图像、checkpoint 等路径字段。
+- `portable_path(path)`：仓库内路径在 JSON metadata 中写成 POSIX 风格相对路径，例如 `results/models/mobile_whisker_gru_ppo.zip`。
+
+所有 Python 入口中的 `default=ROOT / ...` 和 `ROOT / ...` 输出拼接已改为相对默认值，并覆盖训练、评估、环境可视化、注意力分析、羽流诊断、硬件采集/分析及基础 rollout 脚本。`Path(__file__).resolve()` 只保留作运行时定位仓库和注入 Python import path，不包含机器特定的硬编码目录。
+
+验证：
+
+- 全仓扫描没有发现 `C:\\...`、`D:\\...`、`/home/...`、`/Users/...` 等硬编码项目路径（第三方许可证中的 URL 除外）。
+- `compileall` 通过；从仓库外的系统临时目录调用 17 个脚本的 `--help` 全部成功。
+- 从系统临时目录实际启动 256-step mobile GRU smoke，模型仍落到仓库 `results/smoke/cloud_path_model.zip`。
+- smoke 的 `run_metadata.json` 中 model/TensorBoard/checkpoint 路径均为 `results/...`，无盘符、无用户目录。
+
+README 已增加 Linux 云服务器建环境、后台训练、TensorBoard SSH 隧道和训练产物回传示例。`results/` 仍保持 gitignore；释放云实例前必须单独同步模型与日志。

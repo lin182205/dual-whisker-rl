@@ -24,6 +24,7 @@ if str(ROOT) not in sys.path:
 from dual_whisker_rl.envs.whisker_only_env import WhiskerOnlyPuffEnv
 from dual_whisker_rl.envs.whisker_only_env import WORLD_MAX
 from dual_whisker_rl.envs.whisker_only_env import WORLD_MIN
+from dual_whisker_rl.paths import resolve_path_args
 
 
 def build_plume_colormap() -> colors.LinearSegmentedColormap:
@@ -55,8 +56,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=9)
     parser.add_argument("--steps", type=int, default=120)
     parser.add_argument("--resolution", type=int, default=100)
-    parser.add_argument("--png-path", type=Path, default=ROOT / "results" / "figures" / "whisker_only_env.png")
-    parser.add_argument("--gif-path", type=Path, default=ROOT / "results" / "figures" / "whisker_only_env.gif")
+    parser.add_argument("--png-path", type=Path, default=Path("results/figures/whisker_only_env.png"))
+    parser.add_argument("--gif-path", type=Path, default=Path("results/figures/whisker_only_env.gif"))
     parser.add_argument(
         "--fps",
         type=float,
@@ -85,7 +86,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model-path",
         type=Path,
-        default=ROOT / "results" / "models" / "whisker_only_ppo.zip",
+        default=Path("results/models/whisker_only_ppo.zip"),
         help="给定则用训练好的 PPO 策略驱动触须；不给则用随机动作。",
     )
     parser.add_argument(
@@ -98,7 +99,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="可视化环境也开域随机化（与训练一致的分布）。",
     )
-    return parser.parse_args()
+    return resolve_path_args(parser.parse_args(), "png_path", "gif_path", "model_path")
 
 
 def capture_rollout(

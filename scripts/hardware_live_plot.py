@@ -19,25 +19,26 @@ if str(ROOT) not in sys.path:
 
 from dual_whisker_rl.hardware.serial_client import DualWhiskerSerialClient
 from dual_whisker_rl.hardware.serial_client import HardwareSample
+from dual_whisker_rl.paths import resolve_path_args
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=Path, default=ROOT / "configs" / "hardware.yaml")
+    parser.add_argument("--config", type=Path, default=Path("configs/hardware.yaml"))
     parser.add_argument("--port", type=str, default= "COM6")
     parser.add_argument("--left-sector", type=int, default=5)
     parser.add_argument("--right-sector", type=int, default=5)
     parser.add_argument("--interval-s", type=float, default=0.0)
     parser.add_argument("--window-s", type=float, default=60.0)
     parser.add_argument("--max-s", type=float, default=None)
-    parser.add_argument("--csv-path", type=Path, default=ROOT / "results" / "hardware" / "live_plot.csv")
+    parser.add_argument("--csv-path", type=Path, default=Path("results/hardware/live_plot.csv"))
     parser.add_argument("--adc-max", type=float, default=4095.0)
     parser.add_argument("--voltage", action="store_true")
     parser.add_argument("--y-min", type=float, default=None)
     parser.add_argument("--y-max", type=float, default=None)
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--no-save", action="store_true")
-    return parser.parse_args()
+    return resolve_path_args(parser.parse_args(), "config", "csv_path")
 
 
 def load_config(path: Path) -> dict:

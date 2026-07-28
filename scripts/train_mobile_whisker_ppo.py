@@ -2,7 +2,7 @@
 
 动作 `MultiDiscrete([6, 10, 10])` = [移动, 左扇区, 右扇区]。观测为 15 维硬件可部署
 特征（12 维气味特征 + 朝向 cos/sin + 上一步移动）。历史仍由包装器堆叠为扁平向量，
-可选择直接交给 MLP，或先通过 Transformer 编码时间依赖后再交给 PPO。
+可选择直接交给 MLP，或先通过 GRU / Transformer 编码时间依赖后再交给 PPO。
 """
 
 from __future__ import annotations
@@ -29,13 +29,15 @@ if str(ROOT) not in sys.path:
 from dual_whisker_rl.agents import GRUHistoryExtractor
 from dual_whisker_rl.agents import TransformerHistoryExtractor
 from dual_whisker_rl.envs import MobileWhiskerPuffEnv
+from dual_whisker_rl.paths import portable_path
+from dual_whisker_rl.paths import resolve_path_args
 from train_whisker_only_ppo import ObservationHistoryWrapper
 from train_whisker_only_ppo import load_config
 from train_whisker_only_ppo import resolve_seed
 
 
 class RewardComponentsTensorboardCallback(BaseCallback):
-    """按 rollout 均值和完整 episode 累计值记录各奖励分量。"""
+    """按 rollout 均值和完整 episode 累计值记录各奖励分量及其总和。"""
 
     _NON_TENSORBOARD_OUTPUTS = ("stdout", "log", "json", "csv")
 
@@ -44,8 +46,10 @@ class RewardComponentsTensorboardCallback(BaseCallback):
         self.component_names = component_names
         self._episode_sums: list[dict[str, float]] = []
         self._rollout_sums: dict[str, float] = {}
+        self._rollout_total = 0.0
         self._rollout_count = 0
         self._completed_episode_sums: dict[str, list[float]] = {}
+        self._completed_episode_totals: list[float] = []
 
     def _on_training_start(self) -> None:
         self._episode_sums = [
@@ -55,10 +59,12 @@ class RewardComponentsTensorboardCallback(BaseCallback):
 
     def _on_rollout_start(self) -> None:
         self._rollout_sums = {name: 0.0 for name in self.component_names}
+        self._rollout_total = 0.0
         self._rollout_count = 0
         self._completed_episode_sums = {
             name: [] for name in self.component_names
         }
+        self._completed_episode_totals = []
 
     def _on_step(self) -> bool:
         infos = self.locals.get("infos", ())
@@ -68,16 +74,21 @@ class RewardComponentsTensorboardCallback(BaseCallback):
             if not isinstance(components, dict):
                 continue
             self._rollout_count += 1
+            step_total = 0.0
             for name in self.component_names:
                 value = float(components.get(name, 0.0))
                 self._rollout_sums[name] += value
                 self._episode_sums[env_index][name] += value
+                step_total += value
+            self._rollout_total += step_total
             if env_index < dones.size and bool(dones[env_index]):
+                episode_total = 0.0
                 for name in self.component_names:
-                    self._completed_episode_sums[name].append(
-                        self._episode_sums[env_index][name]
-                    )
+                    component_sum = self._episode_sums[env_index][name]
+                    self._completed_episode_sums[name].append(component_sum)
+                    episode_total += component_sum
                     self._episode_sums[env_index][name] = 0.0
+                self._completed_episode_totals.append(episode_total)
         return True
 
     def _on_rollout_end(self) -> None:
@@ -88,6 +99,11 @@ class RewardComponentsTensorboardCallback(BaseCallback):
                     self._rollout_sums[name] / self._rollout_count,
                     exclude=self._NON_TENSORBOARD_OUTPUTS,
                 )
+            self.logger.record(
+                "reward_components/total_step_mean",
+                self._rollout_total / self._rollout_count,
+                exclude=self._NON_TENSORBOARD_OUTPUTS,
+            )
         for name in self.component_names:
             completed_values = self._completed_episode_sums[name]
             if completed_values:
@@ -96,6 +112,12 @@ class RewardComponentsTensorboardCallback(BaseCallback):
                     float(np.mean(completed_values)),
                     exclude=self._NON_TENSORBOARD_OUTPUTS,
                 )
+        if self._completed_episode_totals:
+            self.logger.record(
+                "reward_components/total_episode_sum_mean",
+                float(np.mean(self._completed_episode_totals)),
+                exclude=self._NON_TENSORBOARD_OUTPUTS,
+            )
 
 
 def parse_args() -> argparse.Namespace:
@@ -150,7 +172,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="默认按 temporal encoder 写入独立日志目录。",
     )
-    parser.add_argument("--tensorboard-dir", type=Path, default=ROOT / "results" / "tensorboard")
+    parser.add_argument("--tensorboard-dir", type=Path, default=Path("results/tensorboard"))
     parser.add_argument(
         "--run-name",
         type=str,
@@ -159,7 +181,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--log-interval", type=int, default=1)
     parser.add_argument("--eval-freq", type=int, default=2_000)
-    parser.add_argument("--eval-episodes", type=int, default=10)
+    parser.add_argument("--eval-episodes", type=int, default=50)
     parser.add_argument(
         "--checkpoint-freq",
         type=int,
@@ -189,16 +211,25 @@ def parse_args() -> argparse.Namespace:
 
 
 def resolve_output_paths(args: argparse.Namespace) -> None:
-    """按编码器生成默认输出名，同时保留显式 CLI 路径。"""
+    """按编码器生成默认相对路径，再统一按仓库根目录解析。"""
     experiment_name = f"mobile_whisker_{args.temporal_encoder}_ppo"
     if args.model_path is None:
-        args.model_path = ROOT / "results" / "models" / f"{experiment_name}.zip"
+        args.model_path = Path("results/models") / f"{experiment_name}.zip"
     if args.log_dir is None:
-        args.log_dir = ROOT / "results" / "logs" / experiment_name
+        args.log_dir = Path("results/logs") / experiment_name
     if args.run_name is None:
         args.run_name = experiment_name
     if args.checkpoint_dir is None:
         args.checkpoint_dir = args.log_dir / "checkpoints"
+    resolve_path_args(
+        args,
+        "config",
+        "model_path",
+        "log_dir",
+        "tensorboard_dir",
+        "checkpoint_dir",
+        "resume_from",
+    )
 
 
 def validate_args(args: argparse.Namespace) -> None:
@@ -410,7 +441,7 @@ def train(args: argparse.Namespace) -> PPO:
                 f"requested={args.temporal_encoder}, "
                 f"checkpoint={type(checkpoint_extractor).__name__}"
             )
-        print(f"resumed_from={args.resume_from}")
+        print(f"resumed_from={portable_path(args.resume_from)}")
         print(f"starting_num_timesteps={starting_num_timesteps}")
         print(
             "resume_note=checkpoint PPO/model/optimizer parameters are preserved; "
@@ -481,9 +512,9 @@ def save_run_metadata(
         "timesteps": args.timesteps,
         "starting_num_timesteps": starting_num_timesteps,
         "final_num_timesteps": int(model.num_timesteps),
-        "resume_from": str(args.resume_from) if args.resume_from is not None else None,
+        "resume_from": portable_path(args.resume_from),
         "checkpoint_freq": args.checkpoint_freq,
-        "checkpoint_dir": str(args.checkpoint_dir),
+        "checkpoint_dir": portable_path(args.checkpoint_dir),
         "ppo": {
             "learning_rate": float(model.lr_schedule(1.0)),
             "n_steps": int(model.n_steps),
@@ -532,6 +563,8 @@ def save_run_metadata(
             "positive_auxiliary_reward_upper_bound": (
                 metadata_env.positive_auxiliary_reward_upper_bound
             ),
+            "max_episode_time_cost": metadata_env.max_episode_time_cost,
+            "minimum_oob_penalty": metadata_env.minimum_oob_penalty,
             "component_names": list(metadata_env.REWARD_COMPONENT_NAMES),
         },
         "source_position": (
@@ -539,10 +572,10 @@ def save_run_metadata(
             if metadata_env.plume.source_position_override is not None
             else None
         ),
-        "model_path": str(args.model_path),
-        "tensorboard_dir": str(args.tensorboard_dir),
+        "model_path": portable_path(args.model_path),
+        "tensorboard_dir": portable_path(args.tensorboard_dir),
         "run_name": args.run_name,
-        "config_path": str(args.config) if args.config is not None else None,
+        "config_path": portable_path(args.config),
         "config": config,
     }
     metadata_env.close()
@@ -553,8 +586,8 @@ def save_run_metadata(
 def main() -> None:
     args = parse_args()
     model = train(args)
-    print(f"saved_model={args.model_path}")
-    print(f"checkpoint_dir={args.checkpoint_dir}")
+    print(f"saved_model={portable_path(args.model_path)}")
+    print(f"checkpoint_dir={portable_path(args.checkpoint_dir)}")
     print(f"final_num_timesteps={model.num_timesteps}")
     print(f"seed={args.seed}")
     print(f"temporal_encoder={args.temporal_encoder}")

@@ -14,6 +14,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from dual_whisker_rl.paths import project_path
+
 
 def load_config(path: Path) -> dict:
     with path.open("r", encoding="utf-8") as f:
@@ -21,9 +23,11 @@ def load_config(path: Path) -> dict:
 
 
 def main() -> None:
-    config = load_config(ROOT / "configs" / "default.yaml")
+    config_path = project_path("configs/default.yaml")
+    output_path = project_path("results/figures/whisker_action_space.png")
+    assert config_path is not None and output_path is not None
+    config = load_config(config_path)
     sector_count = int(config.get("whisker_sector_count", 10))
-    output_path = ROOT / "results" / "figures" / "whisker_action_space.png"
     save_whisker_action_space(sector_count, output_path)
     print(f"saved_figure={output_path}")
 
@@ -130,4 +134,3 @@ def save_whisker_action_space(sector_count: int, path: Path) -> None:
 
 if __name__ == "__main__":
     main()
-

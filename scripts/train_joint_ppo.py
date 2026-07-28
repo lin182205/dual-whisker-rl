@@ -20,22 +20,30 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from dual_whisker_rl.envs import PlumeEnv
+from dual_whisker_rl.paths import portable_path
+from dual_whisker_rl.paths import resolve_path_args
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=Path, default=ROOT / "configs" / "default.yaml")
+    parser.add_argument("--config", type=Path, default=Path("configs/default.yaml"))
     parser.add_argument("--timesteps", type=int, default=50_000)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--n-envs", type=int, default=4)
-    parser.add_argument("--model-path", type=Path, default=ROOT / "results" / "models" / "joint_ppo.zip")
-    parser.add_argument("--log-dir", type=Path, default=ROOT / "results" / "logs" / "joint_ppo")
-    parser.add_argument("--tensorboard-dir", type=Path, default=ROOT / "results" / "tensorboard")
+    parser.add_argument("--model-path", type=Path, default=Path("results/models/joint_ppo.zip"))
+    parser.add_argument("--log-dir", type=Path, default=Path("results/logs/joint_ppo"))
+    parser.add_argument("--tensorboard-dir", type=Path, default=Path("results/tensorboard"))
     parser.add_argument("--run-name", type=str, default="joint_ppo")
     parser.add_argument("--log-interval", type=int, default=1)
     parser.add_argument("--eval-freq", type=int, default=1_000)
     parser.add_argument("--eval-episodes", type=int, default=5)
-    return parser.parse_args()
+    return resolve_path_args(
+        parser.parse_args(),
+        "config",
+        "model_path",
+        "log_dir",
+        "tensorboard_dir",
+    )
 
 
 def load_config(path: Path) -> dict:
@@ -140,9 +148,9 @@ def save_run_metadata(args: argparse.Namespace, config: dict) -> None:
         "eval_seed": args.seed + 100_000,
         "n_envs": args.n_envs,
         "timesteps": args.timesteps,
-        "config_path": str(args.config),
-        "model_path": str(args.model_path),
-        "tensorboard_dir": str(args.tensorboard_dir),
+        "config_path": portable_path(args.config),
+        "model_path": portable_path(args.model_path),
+        "tensorboard_dir": portable_path(args.tensorboard_dir),
         "run_name": args.run_name,
         "config": config,
     }

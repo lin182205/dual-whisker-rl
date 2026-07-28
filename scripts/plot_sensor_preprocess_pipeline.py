@@ -9,7 +9,8 @@
 
 from __future__ import annotations
 
-import os
+from pathlib import Path
+import sys
 
 import matplotlib
 
@@ -17,6 +18,12 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
 from matplotlib.font_manager import FontProperties
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from dual_whisker_rl.paths import project_path
 
 # ---- 中文字体 ----
 plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei"]
@@ -208,10 +215,11 @@ ax.text(50, 33, "左/右特征旁路直连观测", ha="center", fontsize=8.5, co
 
 fig.tight_layout(pad=1.2)
 
-out_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "figures")
-os.makedirs(out_dir, exist_ok=True)
-pdf = os.path.join(out_dir, "sensor_preprocess_pipeline.pdf")
-png = os.path.join(out_dir, "sensor_preprocess_pipeline.png")
+out_dir = project_path("figures")
+assert out_dir is not None
+out_dir.mkdir(parents=True, exist_ok=True)
+pdf = out_dir / "sensor_preprocess_pipeline.pdf"
+png = out_dir / "sensor_preprocess_pipeline.png"
 fig.savefig(pdf, bbox_inches="tight")
 fig.savefig(png, dpi=300, bbox_inches="tight")
 print("saved:", pdf)

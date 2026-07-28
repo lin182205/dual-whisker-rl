@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from dual_whisker_rl.envs import PlumeEnv
+from dual_whisker_rl.paths import project_path
 from dual_whisker_rl.plotting import draw_odor_field
 
 
@@ -23,7 +24,10 @@ def load_config(path: Path) -> dict:
 
 
 def main() -> None:
-    config = load_config(ROOT / "configs" / "default.yaml")
+    config_path = project_path("configs/default.yaml")
+    out_dir = project_path("results/figures")
+    assert config_path is not None and out_dir is not None
+    config = load_config(config_path)
     env = PlumeEnv(config)
     obs, info = env.reset(seed=7)
 
@@ -35,7 +39,6 @@ def main() -> None:
         obs, reward, terminated, truncated, info = env.step(action)
         total_reward += reward
 
-    out_dir = ROOT / "results" / "figures"
     out_dir.mkdir(parents=True, exist_ok=True)
     save_plume(env, out_dir / "plume_field.png")
     save_trajectory(env, out_dir / "random_trajectory.png")

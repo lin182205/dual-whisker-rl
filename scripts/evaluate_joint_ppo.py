@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from dual_whisker_rl.envs import PlumeEnv
+from dual_whisker_rl.paths import resolve_path_args
 from dual_whisker_rl.evaluation import evaluate_policy
 from dual_whisker_rl.plotting import draw_odor_field
 from dual_whisker_rl.plotting import save_sensor_response
@@ -25,18 +26,27 @@ from dual_whisker_rl.visualization import save_trajectory_animation
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=Path, default=ROOT / "configs" / "default.yaml")
-    parser.add_argument("--model-path", type=Path, default=ROOT / "results" / "models" / "joint_ppo.zip")
+    parser.add_argument("--config", type=Path, default=Path("configs/default.yaml"))
+    parser.add_argument("--model-path", type=Path, default=Path("results/models/joint_ppo.zip"))
     parser.add_argument("--episodes", type=int, default=50)
     parser.add_argument("--seed", type=int, default=10_000)
-    parser.add_argument("--metrics-path", type=Path, default=ROOT / "results" / "logs" / "joint_ppo" / "eval_metrics.json")
-    parser.add_argument("--figure-path", type=Path, default=ROOT / "results" / "figures" / "joint_ppo_eval_trajectory.png")
-    parser.add_argument("--sensor-response-path", type=Path, default=ROOT / "results" / "figures" / "joint_ppo_sensor_response.png")
-    parser.add_argument("--whisker-sector-path", type=Path, default=ROOT / "results" / "figures" / "joint_ppo_whisker_sectors.png")
-    parser.add_argument("--animation-path", type=Path, default=ROOT / "results" / "figures" / "joint_ppo_eval_animation.gif")
+    parser.add_argument("--metrics-path", type=Path, default=Path("results/logs/joint_ppo/eval_metrics.json"))
+    parser.add_argument("--figure-path", type=Path, default=Path("results/figures/joint_ppo_eval_trajectory.png"))
+    parser.add_argument("--sensor-response-path", type=Path, default=Path("results/figures/joint_ppo_sensor_response.png"))
+    parser.add_argument("--whisker-sector-path", type=Path, default=Path("results/figures/joint_ppo_whisker_sectors.png"))
+    parser.add_argument("--animation-path", type=Path, default=Path("results/figures/joint_ppo_eval_animation.gif"))
     parser.add_argument("--animation-stride", type=int, default=1)
     parser.add_argument("--animation-fps", type=int, default=4)
-    return parser.parse_args()
+    return resolve_path_args(
+        parser.parse_args(),
+        "config",
+        "model_path",
+        "metrics_path",
+        "figure_path",
+        "sensor_response_path",
+        "whisker_sector_path",
+        "animation_path",
+    )
 
 
 def load_config(path: Path) -> dict:

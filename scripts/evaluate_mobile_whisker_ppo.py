@@ -23,6 +23,7 @@ if str(ROOT) not in sys.path:
 from dual_whisker_rl.agents import TransformerHistoryExtractor
 from dual_whisker_rl.envs import MobileWhiskerPuffEnv
 from dual_whisker_rl.evaluation import evaluate_policy
+from dual_whisker_rl.paths import resolve_path_args
 from train_whisker_only_ppo import ObservationHistoryWrapper
 from train_whisker_only_ppo import load_config
 from visualize_mobile_whisker_env import capture_rollout
@@ -35,7 +36,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model-path",
         type=Path,
-        default=ROOT / "results" / "models" / "mobile_whisker_transformer_ppo.zip",
+        default=Path("results/models/mobile_whisker_transformer_ppo.zip"),
     )
     parser.add_argument("--config", type=Path, default=None)
     parser.add_argument(
@@ -93,22 +94,24 @@ def parse_args() -> argparse.Namespace:
         parser.error("--animation-fps must be at least 1")
 
     if args.json_path is None:
-        args.json_path = (
-            ROOT / "results" / "logs" / args.model_path.stem / "eval_metrics.json"
-        )
+        args.json_path = Path("results/logs") / args.model_path.stem / "eval_metrics.json"
     if args.png_path is None:
-        args.png_path = (
-            ROOT / "results" / "figures" / f"{args.model_path.stem}_eval.png"
-        )
+        args.png_path = Path("results/figures") / f"{args.model_path.stem}_eval.png"
     if args.gif_path is None:
-        args.gif_path = (
-            ROOT / "results" / "figures" / f"{args.model_path.stem}_eval.gif"
-        )
+        args.gif_path = Path("results/figures") / f"{args.model_path.stem}_eval.gif"
     if args.reward_breakdown_path is None:
         args.reward_breakdown_path = (
             args.json_path.parent / "visualized_reward_breakdown.csv"
         )
-    return args
+    return resolve_path_args(
+        args,
+        "model_path",
+        "config",
+        "json_path",
+        "png_path",
+        "gif_path",
+        "reward_breakdown_path",
+    )
 
 
 def select_visualization_episode_indices(

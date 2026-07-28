@@ -38,6 +38,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from dual_whisker_rl.envs.whisker_only_env import WhiskerOnlyPuffEnv
+from dual_whisker_rl.paths import portable_path
+from dual_whisker_rl.paths import resolve_path_args
 
 # 复用硬件脚本的指标与动作序列定义，保证 sim / 硬件评估口径一致。
 from compare_hardware_sampling_modes import compute_metrics
@@ -70,7 +72,7 @@ HEADLINE_METRICS = [
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model-path", type=Path, default=ROOT / "results" / "models" / "whisker_only_ppo.zip")
+    parser.add_argument("--model-path", type=Path, default=Path("results/models/whisker_only_ppo.zip"))
     parser.add_argument("--policies", type=str, default=DEFAULT_POLICIES)
     parser.add_argument("--episodes", type=int, default=20, help="评估回合数（= plume seed 数）。")
     parser.add_argument("--steps", type=int, default=300, help="每回合步数。")
@@ -83,8 +85,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hit-threshold", type=float, default=0.2)
     parser.add_argument("--diff-threshold", type=float, default=0.2)
     parser.add_argument("--trend-threshold", type=float, default=0.05)
-    parser.add_argument("--output-dir", type=Path, default=ROOT / "results" / "figures" / "whisker_policy_eval")
-    return parser.parse_args()
+    parser.add_argument("--output-dir", type=Path, default=Path("results/figures/whisker_policy_eval"))
+    return resolve_path_args(parser.parse_args(), "model_path", "output_dir")
 
 
 def resolve_policy(name: str) -> dict:
@@ -313,7 +315,7 @@ def main() -> None:
             "init_pose_mode": args.init_pose_mode,
             "domain_randomization": args.domain_randomization,
             "thresholds": {"hit": args.hit_threshold, "diff": args.diff_threshold, "trend": args.trend_threshold},
-            "model_path": str(args.model_path),
+            "model_path": portable_path(args.model_path),
             "history_length": history_length,
         },
         "results": results,

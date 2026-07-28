@@ -27,6 +27,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from dual_whisker_rl.envs import MobileWhiskerPuffEnv
+from dual_whisker_rl.paths import resolve_path_args
 from train_whisker_only_ppo import load_config
 from visualize_whisker_only_env import build_plume_colormap
 from visualize_whisker_only_env import draw_robot_heading_marker
@@ -38,7 +39,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model-path",
         type=Path,
-        default=ROOT / "results" / "models" / "mobile_whisker_transformer_ppo.zip",
+        default=Path("results/models/mobile_whisker_transformer_ppo.zip"),
     )
     parser.add_argument("--config", type=Path, default=None)
     parser.add_argument(
@@ -54,10 +55,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stride", type=int, default=1, help="GIF 每隔多少步取一帧。")
     parser.add_argument("--stochastic", action="store_true")
     parser.add_argument("--domain-randomization", action="store_true")
-    parser.add_argument("--png-path", type=Path, default=ROOT / "results" / "figures" / "mobile_whisker_env.png")
-    parser.add_argument("--gif-path", type=Path, default=ROOT / "results" / "figures" / "mobile_whisker_env.gif")
+    parser.add_argument("--png-path", type=Path, default=Path("results/figures/mobile_whisker_env.png"))
+    parser.add_argument("--gif-path", type=Path, default=Path("results/figures/mobile_whisker_env.gif"))
     parser.add_argument("--title", type=str, default="Mobile Whisker Source Search")
-    return parser.parse_args()
+    return resolve_path_args(
+        parser.parse_args(),
+        "model_path",
+        "config",
+        "png_path",
+        "gif_path",
+    )
 
 
 def capture_rollout(env, model, history_length, steps, resolution, seed, deterministic):
