@@ -1,71 +1,73 @@
-python scripts\evaluate_mobile_whisker_ppo.py
+cd ~/dual-whisker-rl
+source .venv/bin/activate
 
-python scripts\train_mobile_whisker_ppo.py
+python scripts/evaluate_mobile_whisker_ppo.py
 
-python scripts\train_mobile_whisker_ppo.py
---temporal-encoder transformer
---resume-from results\logs\
-mobile_whisker_transformer_ppo\checkpoints\mobile_whisker_transformer_ppo_300000_steps.zip
---timesteps 200000
+python scripts/train_mobile_whisker_ppo.py
 
-python scripts\train_mobile_whisker_ppo.py --scenario-mode randomized --temporal-encoder gru --timesteps 300000 --seed 42
+python scripts/train_mobile_whisker_ppo.py \
+  --temporal-encoder transformer \
+  --resume-from results/logs/mobile_whisker_transformer_ppo/checkpoints/mobile_whisker_transformer_ppo_300000_steps.zip \
+  --timesteps 200000
 
-python scripts\train_mobile_whisker_ppo.py --scenario-mode fixed --temporal-encoder gru --timesteps 300000 --seed 42
+python scripts/train_mobile_whisker_ppo.py --scenario-mode randomized --temporal-encoder gru --timesteps 300000 --seed 42
 
-tensorboard --logdir results\tensorboard
+python scripts/train_mobile_whisker_ppo.py --scenario-mode fixed --temporal-encoder gru --timesteps 300000 --seed 42
 
-python scripts\evaluate_mobile_whisker_ppo.py --model-path results\models\mobile_whisker_gru_ppo.zip --episodes 50
+tensorboard --logdir results/tensorboard --host 127.0.0.1 --port 6006
 
-python scripts\train_mobile_whisker_ppo.py --temporal-encoder transformer --resume-from results\logs\mobile_whisker_transformer_ppo\checkpoints\mobile_whisker_transformer_ppo_30000_steps.zip --timesteps 100000
+python scripts/evaluate_mobile_whisker_ppo.py --model-path results/models/mobile_whisker_gru_ppo.zip --episodes 50
 
-python scripts\train_mobile_whisker_ppo.py --temporal-encoder gru --timesteps 300000 --seed 42
+python scripts/train_mobile_whisker_ppo.py --temporal-encoder transformer --resume-from results/logs/mobile_whisker_transformer_ppo/checkpoints/mobile_whisker_transformer_ppo_30000_steps.zip --timesteps 100000
 
-python scripts\train_mobile_whisker_ppo.py --temporal-encoder transformer --timesteps 300000 --seed 42
+python scripts/train_mobile_whisker_ppo.py --temporal-encoder gru --timesteps 300000 --seed 42
 
-python scripts\train_mobile_whisker_ppo.py --temporal-encoder mlp --timesteps 300000 --seed 42
+python scripts/train_mobile_whisker_ppo.py --temporal-encoder transformer --timesteps 300000 --seed 42
 
-python scripts\train_mobile_whisker_ppo.py --temporal-encoder gru --timesteps 2048 --n-envs 2 --eval-freq 1024 --checkpoint-freq 1024 --model-path results\models\smoke_mobile_gru.zip --log-dir results\logs\smoke_mobile_gru
+python scripts/train_mobile_whisker_ppo.py --temporal-encoder mlp --timesteps 300000 --seed 42
 
-python scripts\train_mobile_whisker_ppo.py --temporal-encoder gru --timesteps 300000 --domain-randomization
+python scripts/train_mobile_whisker_ppo.py --temporal-encoder gru --timesteps 2048 --n-envs 2 --eval-freq 1024 --checkpoint-freq 1024 --model-path results/models/smoke_mobile_gru.zip --log-dir results/logs/smoke_mobile_gru
 
-python scripts\train_mobile_whisker_ppo.py --temporal-encoder gru --gru-hidden-size 64 --gru-layers 1 --gru-features-dim 64 --history-length 20 --learning-rate 0.0001 --n-steps 512 --batch-size 256 --n-epochs 5 --ent-coef 0.003 --target-kl 0.02 --timesteps 300000
+python scripts/train_mobile_whisker_ppo.py --temporal-encoder gru --timesteps 300000 --domain-randomization
 
-python scripts\train_mobile_whisker_ppo.py --temporal-encoder transformer --transformer-d-model 64 --transformer-heads 4 --transformer-layers 2 --transformer-ff-dim 128 --transformer-dropout 0.1 --transformer-features-dim 64 --history-length 20 --timesteps 300000
+python scripts/train_mobile_whisker_ppo.py --temporal-encoder gru --gru-hidden-size 64 --gru-layers 1 --gru-features-dim 64 --history-length 20 --learning-rate 0.0001 --n-steps 512 --batch-size 256 --n-epochs 5 --ent-coef 0.003 --target-kl 0.02 --timesteps 300000
 
-python scripts\train_mobile_whisker_ppo.py --temporal-encoder gru --resume-from results\logs\mobile_whisker_gru_ppo\checkpoints\mobile_whisker_gru_ppo_100000_steps.zip --timesteps 200000
+python scripts/train_mobile_whisker_ppo.py --temporal-encoder transformer --transformer-d-model 64 --transformer-heads 4 --transformer-layers 2 --transformer-ff-dim 128 --transformer-dropout 0.1 --transformer-features-dim 64 --history-length 20 --timesteps 300000
 
-python scripts\train_mobile_whisker_ppo.py --temporal-encoder transformer --resume-from results\logs\mobile_whisker_transformer_ppo\checkpoints\mobile_whisker_transformer_ppo_30000_steps.zip --timesteps 100000
+python scripts/train_mobile_whisker_ppo.py --temporal-encoder gru --resume-from results/logs/mobile_whisker_gru_ppo/checkpoints/mobile_whisker_gru_ppo_100000_steps.zip --timesteps 200000
 
-python scripts\evaluate_mobile_whisker_ppo.py --model-path results\models\mobile_whisker_gru_ppo.zip --episodes 50
+python scripts/train_mobile_whisker_ppo.py --temporal-encoder transformer --resume-from results/logs/mobile_whisker_transformer_ppo/checkpoints/mobile_whisker_transformer_ppo_30000_steps.zip --timesteps 100000
 
-python scripts\evaluate_mobile_whisker_ppo.py --model-path results\models\mobile_whisker_transformer_ppo.zip --episodes 50
+python scripts/evaluate_mobile_whisker_ppo.py --model-path results/models/mobile_whisker_gru_ppo.zip --episodes 50
 
-python scripts\evaluate_mobile_whisker_ppo.py --model-path results\models\mobile_whisker_mlp_ppo.zip --episodes 50
+python scripts/evaluate_mobile_whisker_ppo.py --model-path results/models/mobile_whisker_transformer_ppo.zip --episodes 50
 
-python scripts\evaluate_mobile_whisker_ppo.py --model-path results\logs\mobile_whisker_gru_ppo\best_model\best_model.zip --episodes 50
+python scripts/evaluate_mobile_whisker_ppo.py --model-path results/models/mobile_whisker_mlp_ppo.zip --episodes 50
 
-python scripts\evaluate_mobile_whisker_ppo.py --model-path results\logs\mobile_whisker_gru_ppo\checkpoints\mobile_whisker_gru_ppo_100000_steps.zip --episodes 50
+python scripts/evaluate_mobile_whisker_ppo.py --model-path results/logs/mobile_whisker_gru_ppo/best_model/best_model.zip --episodes 50
 
-python scripts\evaluate_mobile_whisker_ppo.py --model-path results\models\mobile_whisker_gru_ppo.zip --episodes 100 --no-visualization
+python scripts/evaluate_mobile_whisker_ppo.py --model-path results/logs/mobile_whisker_gru_ppo/checkpoints/mobile_whisker_gru_ppo_100000_steps.zip --episodes 50
 
-python scripts\evaluate_mobile_whisker_ppo.py --model-path results\models\mobile_whisker_gru_ppo.zip --episodes 100 --seed 10000 --no-visualization
+python scripts/evaluate_mobile_whisker_ppo.py --model-path results/models/mobile_whisker_gru_ppo.zip --episodes 100 --no-visualization
 
-python scripts\evaluate_mobile_whisker_ppo.py --model-path results\models\mobile_whisker_gru_ppo.zip --episodes 100 --domain-randomization --no-visualization
+python scripts/evaluate_mobile_whisker_ppo.py --model-path results/models/mobile_whisker_gru_ppo.zip --episodes 100 --seed 10000 --no-visualization
 
-python scripts\evaluate_mobile_whisker_ppo.py --model-path results\models\mobile_whisker_gru_ppo.zip --json-path results\logs\custom_eval\metrics.json --png-path results\figures\custom_eval.png --gif-path results\figures\custom_eval.gif --reward-breakdown-path results\logs\custom_eval\reward_breakdown.csv
+python scripts/evaluate_mobile_whisker_ppo.py --model-path results/models/mobile_whisker_gru_ppo.zip --episodes 100 --domain-randomization --no-visualization
 
-python scripts\visualize_mobile_whisker_env.py --model-path results\models\mobile_whisker_gru_ppo.zip --seed 10000 --steps 200
+python scripts/evaluate_mobile_whisker_ppo.py --model-path results/models/mobile_whisker_gru_ppo.zip --json-path results/logs/custom_eval/metrics.json --png-path results/figures/custom_eval.png --gif-path results/figures/custom_eval.gif --reward-breakdown-path results/logs/custom_eval/reward_breakdown.csv
 
-python scripts\visualize_mobile_whisker_env.py --model-path results\models\mobile_whisker_gru_ppo.zip --seed 10000 --steps 200 --png-path results\figures\mobile_gru_rollout.png --gif-path results\figures\mobile_gru_rollout.gif
+python scripts/visualize_mobile_whisker_env.py --model-path results/models/mobile_whisker_gru_ppo.zip --seed 10000 --steps 200
 
-python scripts\visualize_mobile_whisker_env.py --no-model --seed 10000 --steps 200
+python scripts/visualize_mobile_whisker_env.py --model-path results/models/mobile_whisker_gru_ppo.zip --seed 10000 --steps 200 --png-path results/figures/mobile_gru_rollout.png --gif-path results/figures/mobile_gru_rollout.gif
 
-python scripts\visualize_mobile_whisker_env.py --model-path results\models\mobile_whisker_gru_ppo.zip --stochastic --seed 10000 --steps 200
+python scripts/visualize_mobile_whisker_env.py --no-model --seed 10000 --steps 200
 
-python -m tensorboard --logdir results\tensorboard
+python scripts/visualize_mobile_whisker_env.py --model-path results/models/mobile_whisker_gru_ppo.zip --stochastic --seed 10000 --steps 200
 
-Get-ChildItem results\models -Filter *.zip
+python -m tensorboard --logdir results/tensorboard --host 127.0.0.1 --port 6006
 
-Get-ChildItem results\logs -Recurse -Filter *.zip
+find results/models -maxdepth 1 -type f -name '*.zip'
 
-Get-Content -Encoding UTF8 results\logs\mobile_whisker_gru_ppo\eval_metrics.json
+find results/logs -type f -name '*.zip'
+
+cat results/logs/mobile_whisker_gru_ppo/eval_metrics.json
