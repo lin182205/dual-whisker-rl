@@ -42,6 +42,18 @@ def evaluate_policy(
     sector_pair_counts: dict[str, int] = {}
     move_action_counts: dict[str, int] = {}
     termination_counts: dict[str, int] = {}
+    diagnostic_step_count = 0
+    diagnostic_blank_step_count = 0
+    diagnostic_blank_body_spin_count = 0
+    diagnostic_blank_body_motion_count = 0
+    diagnostic_blank_whisker_motion_count = 0
+    diagnostic_blank_age_sum = 0.0
+    diagnostic_blank_age_max = 0
+    qualified_reacquisition_events = 0
+    whisker_only_reacquisition_events = 0
+    body_assisted_reacquisition_events = 0
+    passive_reacquisition_events = 0
+    whisker_reacquisition_reward_events = 0
     trajectories: list[list[dict[str, Any]]] = []
 
     for idx in range(episodes):
@@ -80,6 +92,7 @@ def evaluate_policy(
         path_lengths.append(path_length)
         hit_count, episode_reacquisitions = _odor_hit_stats(trajectory, env.unwrapped.hit_threshold)
         whisker_stats = _whisker_info_stats(trajectory, env.unwrapped.hit_threshold)
+        search_diagnostics = _mobile_search_diagnostic_stats(trajectory)
         odor_hits.append(float(hit_count))
         reacquisition_times.extend(episode_reacquisitions)
         mean_raw_concentrations.append(whisker_stats["mean_raw_concentration"])
@@ -98,6 +111,37 @@ def evaluate_policy(
         _merge_counts(right_sector_counts, whisker_stats["right_sector_counts"])
         _merge_counts(sector_pair_counts, whisker_stats["sector_pair_counts"])
         _merge_counts(move_action_counts, whisker_stats["move_action_counts"])
+        diagnostic_step_count += search_diagnostics["step_count"]
+        diagnostic_blank_step_count += search_diagnostics["blank_step_count"]
+        diagnostic_blank_body_spin_count += search_diagnostics[
+            "blank_body_spin_count"
+        ]
+        diagnostic_blank_body_motion_count += search_diagnostics[
+            "blank_body_motion_count"
+        ]
+        diagnostic_blank_whisker_motion_count += search_diagnostics[
+            "blank_whisker_motion_count"
+        ]
+        diagnostic_blank_age_sum += search_diagnostics["blank_age_sum"]
+        diagnostic_blank_age_max = max(
+            diagnostic_blank_age_max,
+            search_diagnostics["blank_age_max"],
+        )
+        qualified_reacquisition_events += search_diagnostics[
+            "qualified_reacquisition_events"
+        ]
+        whisker_only_reacquisition_events += search_diagnostics[
+            "whisker_only_reacquisition_events"
+        ]
+        body_assisted_reacquisition_events += search_diagnostics[
+            "body_assisted_reacquisition_events"
+        ]
+        passive_reacquisition_events += search_diagnostics[
+            "passive_reacquisition_events"
+        ]
+        whisker_reacquisition_reward_events += search_diagnostics[
+            "whisker_reacquisition_reward_events"
+        ]
         if final_distance <= env.unwrapped.goal_radius:
             termination = "success"
         elif bool(info.get("out_of_bounds", False)):
@@ -149,6 +193,51 @@ def evaluate_policy(
             "sector_pair_counts": sector_pair_counts,
             "move_action_counts": move_action_counts,
             "stationary_action_ratio": _stationary_action_ratio(move_action_counts),
+            "blank_body_spin_ratio": _safe_ratio(
+                diagnostic_blank_body_spin_count,
+                diagnostic_blank_step_count,
+            ),
+            "blank_body_motion_ratio": _safe_ratio(
+                diagnostic_blank_body_motion_count,
+                diagnostic_blank_step_count,
+            ),
+            "blank_whisker_motion_ratio": _safe_ratio(
+                diagnostic_blank_whisker_motion_count,
+                diagnostic_blank_step_count,
+            ),
+            "mean_blank_age_steps": _safe_ratio(
+                diagnostic_blank_age_sum,
+                diagnostic_step_count,
+            ),
+            "max_blank_age_steps": diagnostic_blank_age_max,
+            "qualified_reacquisition_events": qualified_reacquisition_events,
+            "whisker_only_reacquisition_events": (
+                whisker_only_reacquisition_events
+            ),
+            "body_assisted_reacquisition_events": (
+                body_assisted_reacquisition_events
+            ),
+            "passive_reacquisition_events": passive_reacquisition_events,
+            "whisker_only_reacquisition_rate": _safe_ratio(
+                whisker_only_reacquisition_events,
+                qualified_reacquisition_events,
+            ),
+            "body_assisted_reacquisition_rate": _safe_ratio(
+                body_assisted_reacquisition_events,
+                qualified_reacquisition_events,
+            ),
+            "passive_reacquisition_rate": _safe_ratio(
+                passive_reacquisition_events,
+                qualified_reacquisition_events,
+            ),
+            "qualified_reacquisition_events_per_1000_steps": 1000.0
+            * _safe_ratio(
+                qualified_reacquisition_events,
+                diagnostic_step_count,
+            ),
+            "whisker_reacquisition_reward_events": (
+                whisker_reacquisition_reward_events
+            ),
             "termination_counts": termination_counts,
         },
         trajectories,
@@ -287,6 +376,57 @@ def _odor_loss_durations(hits: list[bool]) -> list[int]:
     if current > 0:
         durations.append(current)
     return durations
+
+
+def _mobile_search_diagnostic_stats(
+    trajectory: list[dict[str, Any]],
+) -> dict[str, int | float]:
+    """汇总 mobile 环境写入 trajectory 的 blank 与重捕获诊断字段。"""
+    rows = [row for row in trajectory if "odor_hit" in row]
+    blank_rows = [row for row in rows if not bool(row["odor_hit"])]
+    body_spin_actions = {"spin_left", "spin_right"}
+
+    return {
+        "step_count": len(rows),
+        "blank_step_count": len(blank_rows),
+        "blank_body_spin_count": sum(
+            str(row.get("move_action", "")) in body_spin_actions
+            for row in blank_rows
+        ),
+        "blank_body_motion_count": sum(
+            bool(row.get("body_moved", False)) for row in blank_rows
+        ),
+        "blank_whisker_motion_count": sum(
+            bool(row.get("whisker_moved", False)) for row in blank_rows
+        ),
+        "blank_age_sum": sum(float(row.get("blank_age_steps", 0)) for row in rows),
+        "blank_age_max": max(
+            (int(row.get("blank_age_steps", 0)) for row in rows),
+            default=0,
+        ),
+        "qualified_reacquisition_events": sum(
+            bool(row.get("reacquisition_event", False)) for row in rows
+        ),
+        "whisker_only_reacquisition_events": sum(
+            bool(row.get("whisker_only_reacquisition", False)) for row in rows
+        ),
+        "body_assisted_reacquisition_events": sum(
+            bool(row.get("body_assisted_reacquisition", False)) for row in rows
+        ),
+        "passive_reacquisition_events": sum(
+            bool(row.get("passive_reacquisition", False)) for row in rows
+        ),
+        "whisker_reacquisition_reward_events": sum(
+            bool(row.get("whisker_reacquisition_rewarded", False)) for row in rows
+        ),
+    }
+
+
+def _safe_ratio(numerator: int | float, denominator: int | float) -> float:
+    """分母为零时返回 0，便于无 blank/重捕获的 episode 正常评估。"""
+    if denominator == 0:
+        return 0.0
+    return float(numerator / denominator)
 
 
 def _merge_counts(target: dict[Any, int], source: dict[Any, int]) -> None:

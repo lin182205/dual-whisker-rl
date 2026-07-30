@@ -1518,3 +1518,40 @@ goal_bonus                         50（不变）
 - smoke 的 `run_metadata.json` 中 model/TensorBoard/checkpoint 路径均为 `results/...`，无盘符、无用户目录。
 
 README 已增加 Linux 云服务器建环境、后台训练、TensorBoard SSH 隧道和训练产物回传示例。`results/` 仍保持 gitignore；释放云实例前必须单独同步模型与日志。
+
+## 25. Mobile 主动触须诊断 + blank_age + 可归因重捕获奖励
+
+针对 mobile 策略在无气味时倾向旋转底盘、没有优先利用可动触须扫描的问题，先加入可观测、可量化且有上限的主动触须信号，不在本阶段强制限制底盘动作。目标是区分“触须扫描找到气味”和“底盘旋转或羽流自然扫过”，避免只看总成功率时误判触须贡献。
+
+### 25.1 blank_age 观测与旧模型兼容
+
+`MobileWhiskerPuffEnv` 默认在原 15 维硬件可部署观测末尾追加 `blank_age_norm`，单帧变为 16 维。`blank_age` 从未命中气味的第一步开始累计，任一传感器达到 `hit_threshold` 时归零；归一化形式为 `min(blank_age_s / 10.0, 1.0)`。该量仅依赖传感器读数和本地计时，真机可重建，不是仿真特权状态。
+
+配置 `include_blank_age_observation=false` 可恢复旧 15 维接口，用于复评已有 checkpoint。默认 16 维下，history=20 的堆叠维度由 300 变为 320，不能直接续训旧模型；奖励语义也已变化，正式训练应新开 run。
+
+### 25.2 严格重捕获与奖励归因
+
+有效重捕获要求：本 episode 先前已有 odor hit，随后连续 blank 至少 `reacquisition_min_blank_s=1.0`，再重新达到 hit 阈值。初次发现气味不算重捕获，短于 1 秒的阈值抖动也不计入严格事件。
+
+重捕获前 `reacquisition_credit_window_s=1.0` 内的动作分为三类，且互斥：
+
+- `whisker_only`：触须动过，底盘所有动作均为 `stop`；
+- `body_assisted`：底盘出现任意非 `stop` 动作，包含前进、转弯和原地旋转；
+- `passive`：底盘与触须均未运动。
+
+只有 `whisker_only` 获得 `whisker_reacquisition_bonus=0.25`。单局最多奖励 `max_whisker_reacquisition_rewards=4` 次，故理论总上限为 1.0，防止策略主动反复丢失/重捕获刷分。严格重捕获事件会清零 stagnation，但底盘辅助或被动重捕获不获得触须专属 bonus。
+
+新奖励上限计入原安全约束：默认正辅助奖励理论上界由 11.4853 增至 12.4853，仍小于 `goal_bonus/4=12.5`；最大时间成本 12.0，因此最小安全越界惩罚为 24.4853，默认 `oob_penalty=25` 仍满足要求。
+
+### 25.3 诊断输出
+
+环境在每步 `info` 和 trajectory 中记录 odor hit、blank 时长、近期底盘/触须运动、严格重捕获类别和实际奖励事件。训练 TensorBoard 的 `diagnostics/` 与离线评估 JSON 同时输出：blank 期间底盘旋转/任意运动/触须运动比例、blank_age 均值和最大值、严格重捕获数量及每千步频率、三种归因的数量和占比、实际获得触须奖励的次数。旧 `reacquisition_events` 和 `mean_reacquisition_time` 保留原口径，便于历史结果比较。
+
+### 25.4 连通性验证（不是策略效果结论）
+
+- 确定性状态序列覆盖首次命中、短 blank、触须独立重捕获、底盘辅助、被动重捕获和奖励封顶；三种归因严格互斥，仅触须独立事件获奖，6 次合格尝试中只有前 4 次获奖，总计 1.0。
+- 默认/兼容观测分别为 16/15 维且均满足 Gymnasium Box；随机环境 300 step 中每步 reward 与 7 个分量之和误差小于 `1e-12`。
+- 256 step、2 env、GRU smoke 训练完成；base/stacked 维度为 16/32，TensorBoard 包含奖励分量与 `diagnostics/` 标签，固定种子评估 JSON 正常输出全部新指标。
+- 旧 `mobile_whisker_gru_ppo_9300000_steps.zip` 的堆叠维度为 300；默认 16 维环境明确不兼容，关闭 blank_age 后可按 15×20 正常恢复并产生动作。
+
+这些检查只证明状态机、奖励核算和日志链路正确。下一步应从新模型开始做同 seed 消融：`whisker_reacquisition_bonus=0.25` 对比 0，同时比较成功率、blank 底盘旋转比例、触须独立重捕获率和样本效率，不能用总回报单独判断奖励有效性。

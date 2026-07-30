@@ -36,7 +36,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model-path",
         type=Path,
-        default=Path("results/models/mobile_whisker_transformer_ppo.zip"),
+        default=Path("results/models/mobile_whisker_gru_ppo_9300000_steps.zip"),
     )
     parser.add_argument("--config", type=Path, default=None)
     parser.add_argument(
@@ -296,10 +296,33 @@ def main() -> None:
     base_dim = int(probe_env.observation_space.shape[0])
     probe_goal_radius = float(probe_env.goal_radius)
     scenario = probe_env.scenario_metadata()
+    observation_config = {
+        "base_observation_dim": base_dim,
+        "include_blank_age_observation": (
+            probe_env.include_blank_age_observation
+        ),
+        "blank_age_clip_s": probe_env.blank_age_clip_s,
+        "observation_field_names": probe_env.observation_field_names,
+    }
+    reacquisition_config = {
+        "min_blank_s": probe_env.reacquisition_min_blank_s,
+        "min_blank_steps": probe_env.reacquisition_min_blank_steps,
+        "credit_window_s": probe_env.reacquisition_credit_window_s,
+        "credit_window_steps": probe_env.reacquisition_credit_window_steps,
+        "whisker_reacquisition_bonus": probe_env.whisker_reacquisition_bonus,
+        "max_whisker_reacquisition_rewards": (
+            probe_env.max_whisker_reacquisition_rewards
+        ),
+    }
     probe_env.close()
     stacked_dim = int(model.observation_space.shape[0])
     if stacked_dim % base_dim != 0:
-        raise ValueError(f"模型观测维度 {stacked_dim} 不是环境维度 {base_dim} 的整数倍")
+        raise ValueError(
+            f"模型观测维度 {stacked_dim} 不是环境维度 {base_dim} 的整数倍。"
+            "新 mobile 环境默认加入 blank_age（单帧 16 维）；评估旧 15 维模型时，"
+            "请在 --config 指向的 YAML 中设置 "
+            "include_blank_age_observation: false。"
+        )
     history_length = stacked_dim // base_dim
     print(f"history_length={history_length} (base={base_dim}, stacked={stacked_dim})")
     print(
@@ -318,6 +341,8 @@ def main() -> None:
         deterministic=True,
     )
     metrics["scenario"] = scenario
+    metrics["observation"] = observation_config
+    metrics["reacquisition"] = reacquisition_config
 
     selected_episodes = select_visualization_episode_indices(
         trajectories,

@@ -6,12 +6,13 @@
 
 动作空间 `MultiDiscrete([6, 10, 10])` = [移动动作, 左扇区, 右扇区]，与硬件串口协议
 兼容（移动交给底盘、扇区对应 STEP 命令）。观测在父类 12 维硬件特征上追加机器人自身
-可得的本体感受（朝向 cos/sin、上一步移动动作），不含真实风向/气源方向等特权信息；
+可得的本体感受（朝向 cos/sin、上一步移动动作）和可选 blank_age，不含真实风向/气源方向等特权信息；
 奖励可用真实气源距离（仅训练期）。
 """
 
 from __future__ import annotations
 
+from collections import deque
 import math
 from typing import Any
 
@@ -29,6 +30,7 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
     REWARD_COMPONENT_NAMES = (
         "distance_potential_progress",
         "best_concentration_improvement",
+        "whisker_reacquisition_bonus",
         "time_penalty",
         "stagnation_penalty",
         "goal_bonus",
@@ -182,6 +184,58 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         self.stagnation_window = int(stagnation_window_value)
         self.stagnation_penalty = float(cfg.get("stagnation_penalty", 0.02))
 
+        include_blank_age_value = cfg.get("include_blank_age_observation", True)
+        if not isinstance(include_blank_age_value, (bool, np.bool_)):
+            raise ValueError("include_blank_age_observation must be a boolean")
+        self.include_blank_age_observation = bool(include_blank_age_value)
+        self.blank_age_clip_s = float(cfg.get("blank_age_clip_s", 10.0))
+        self.reacquisition_min_blank_s = float(
+            cfg.get("reacquisition_min_blank_s", 1.0)
+        )
+        self.reacquisition_credit_window_s = float(
+            cfg.get("reacquisition_credit_window_s", 1.0)
+        )
+        self.whisker_reacquisition_bonus = float(
+            cfg.get("whisker_reacquisition_bonus", 0.25)
+        )
+        max_reacquisition_rewards_value = float(
+            cfg.get("max_whisker_reacquisition_rewards", 4)
+        )
+        if not max_reacquisition_rewards_value.is_integer():
+            raise ValueError("max_whisker_reacquisition_rewards must be an integer")
+        self.max_whisker_reacquisition_rewards = int(
+            max_reacquisition_rewards_value
+        )
+
+        positive_time_values = {
+            "blank_age_clip_s": self.blank_age_clip_s,
+            "reacquisition_min_blank_s": self.reacquisition_min_blank_s,
+            "reacquisition_credit_window_s": self.reacquisition_credit_window_s,
+        }
+        for name, value in positive_time_values.items():
+            if not math.isfinite(value) or value <= 0.0:
+                raise ValueError(f"{name} must be finite and positive")
+        if (
+            not math.isfinite(self.whisker_reacquisition_bonus)
+            or self.whisker_reacquisition_bonus < 0.0
+        ):
+            raise ValueError(
+                "whisker_reacquisition_bonus must be finite and non-negative"
+            )
+        if self.max_whisker_reacquisition_rewards < 0:
+            raise ValueError(
+                "max_whisker_reacquisition_rewards must be non-negative"
+            )
+
+        self.reacquisition_min_blank_steps = max(
+            1,
+            int(math.ceil(self.reacquisition_min_blank_s / self.dt)),
+        )
+        self.reacquisition_credit_window_steps = max(
+            1,
+            int(math.ceil(self.reacquisition_credit_window_s / self.dt)),
+        )
+
         nonnegative_reward_values = {
             "progress_reward_scale": self.progress_reward_scale,
             "oob_penalty": self.oob_penalty,
@@ -207,6 +261,8 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         self.positive_auxiliary_reward_upper_bound = (
             self.best_concentration_reward_scale * self.best_concentration_clip
             + self.progress_reward_scale * world_diameter
+            + self.whisker_reacquisition_bonus
+            * self.max_whisker_reacquisition_rewards
         )
         if (
             self.positive_auxiliary_reward_upper_bound
@@ -241,22 +297,37 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         self.width = float(self.world_max - self.world_min)
         self.height = float(self.world_max - self.world_min)
 
-        # 观测 = 父 12 维硬件 + 3 维本体感受（朝向 cos/sin、上一步移动动作）。
+        # 观测 = 父 12 维硬件 + 3 维本体感受；新策略默认再看到归一化 blank_age。
         base_low = self.observation_builder.low
         base_high = self.observation_builder.high
         low = np.concatenate([base_low, np.array([-1.0, -1.0, 0.0], dtype=np.float32)])
         high = np.concatenate([base_high, np.array([1.0, 1.0, 1.0], dtype=np.float32)])
+        if self.include_blank_age_observation:
+            low = np.concatenate([low, np.array([0.0], dtype=np.float32)])
+            high = np.concatenate([high, np.array([1.0], dtype=np.float32)])
         self.observation_space = spaces.Box(low=low, high=high, dtype=np.float32)
         self.observation_field_names = self.observation_builder.field_names + [
             "heading_cos",
             "heading_sin",
             "last_move_norm",
         ]
+        if self.include_blank_age_observation:
+            self.observation_field_names.append("blank_age_norm")
 
         self.last_move = self.stop_action
         self.prev_distance = 0.0
         self.best_concentration = 0.0
         self.stagnation_steps = 0
+        self.has_seen_odor = False
+        self.blank_age_steps = 0
+        self.whisker_reacquisition_reward_count = 0
+        self._recent_whisker_motion: deque[bool] = deque(
+            # 当前动作也占一个样本，因此额外保留前 N 个完整 step。
+            maxlen=self.reacquisition_credit_window_steps + 1
+        )
+        self._recent_body_motion: deque[bool] = deque(
+            maxlen=self.reacquisition_credit_window_steps + 1
+        )
 
     # ---- 位姿与观测 ----
 
@@ -395,7 +466,7 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         }
 
     def _build_observation(self) -> np.ndarray:
-        """父 12 维硬件观测（预处理只推进一次）+ 3 维本体感受 → 15 维。"""
+        """构造硬件特征、本体感受和可选 blank_age 观测。"""
         base = super()._build_observation()
         heading = self.robot_state.heading
         proprio = np.array(
@@ -406,9 +477,117 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
             ],
             dtype=np.float32,
         )
-        obs = np.concatenate([base, proprio]).astype(np.float32)
+        parts = [base, proprio]
+        if self.include_blank_age_observation:
+            blank_age_s = self.blank_age_steps * self.dt
+            blank_age_norm = min(blank_age_s / self.blank_age_clip_s, 1.0)
+            parts.append(np.array([blank_age_norm], dtype=np.float32))
+        obs = np.concatenate(parts).astype(np.float32)
         self._last_obs = obs
         return obs
+
+    def _reset_odor_search_state(self) -> None:
+        """重置 blank 计时、近期动作窗口和单局重捕获奖励计数。"""
+        self.has_seen_odor = False
+        self.blank_age_steps = 0
+        self.whisker_reacquisition_reward_count = 0
+        self._recent_whisker_motion.clear()
+        self._recent_body_motion.clear()
+
+    def _update_odor_search_state(
+        self,
+        *,
+        odor_hit: bool,
+        whisker_moved: bool,
+        body_moved: bool,
+    ) -> dict[str, Any]:
+        """推进气味丢失/重捕获状态，并给出互斥的重捕获归因。"""
+        self._recent_whisker_motion.append(bool(whisker_moved))
+        self._recent_body_motion.append(bool(body_moved))
+        recent_whisker_motion = any(self._recent_whisker_motion)
+        recent_body_motion = any(self._recent_body_motion)
+
+        reacquisition_blank_steps = self.blank_age_steps if odor_hit else 0
+        reacquisition_event = bool(
+            odor_hit
+            and self.has_seen_odor
+            and reacquisition_blank_steps >= self.reacquisition_min_blank_steps
+        )
+        body_assisted_reacquisition = bool(
+            reacquisition_event and recent_body_motion
+        )
+        whisker_only_reacquisition = bool(
+            reacquisition_event
+            and not recent_body_motion
+            and recent_whisker_motion
+        )
+        passive_reacquisition = bool(
+            reacquisition_event
+            and not recent_body_motion
+            and not recent_whisker_motion
+        )
+        whisker_reacquisition_rewarded = bool(
+            whisker_only_reacquisition
+            and self.whisker_reacquisition_reward_count
+            < self.max_whisker_reacquisition_rewards
+        )
+        if whisker_reacquisition_rewarded:
+            self.whisker_reacquisition_reward_count += 1
+
+        if odor_hit:
+            self.has_seen_odor = True
+            self.blank_age_steps = 0
+        else:
+            self.blank_age_steps += 1
+
+        if whisker_only_reacquisition:
+            reacquisition_type = "whisker_only"
+        elif body_assisted_reacquisition:
+            reacquisition_type = "body_assisted"
+        elif passive_reacquisition:
+            reacquisition_type = "passive"
+        else:
+            reacquisition_type = "none"
+
+        return {
+            "odor_hit": bool(odor_hit),
+            "blank_age_steps": int(self.blank_age_steps),
+            "blank_age_s": float(self.blank_age_steps * self.dt),
+            "reacquisition_blank_steps": int(reacquisition_blank_steps),
+            "reacquisition_blank_s": float(reacquisition_blank_steps * self.dt),
+            "recent_whisker_motion": bool(recent_whisker_motion),
+            "recent_body_motion": bool(recent_body_motion),
+            "body_moved": bool(body_moved),
+            "reacquisition_event": reacquisition_event,
+            "reacquisition_type": reacquisition_type,
+            "whisker_only_reacquisition": whisker_only_reacquisition,
+            "body_assisted_reacquisition": body_assisted_reacquisition,
+            "passive_reacquisition": passive_reacquisition,
+            "whisker_reacquisition_rewarded": whisker_reacquisition_rewarded,
+            "whisker_reacquisition_reward_count": int(
+                self.whisker_reacquisition_reward_count
+            ),
+        }
+
+    def _reset_odor_search_info(self) -> dict[str, Any]:
+        """返回 reset 时与 step 同形的诊断字段。"""
+        return {
+            "odor_hit": False,
+            "blank_age_steps": 0,
+            "blank_age_s": 0.0,
+            "reacquisition_blank_steps": 0,
+            "reacquisition_blank_s": 0.0,
+            "recent_whisker_motion": False,
+            "recent_body_motion": False,
+            "body_moved": False,
+            "reacquisition_event": False,
+            "reacquisition_type": "none",
+            "whisker_only_reacquisition": False,
+            "body_assisted_reacquisition": False,
+            "passive_reacquisition": False,
+            "whisker_reacquisition_rewarded": False,
+            "whisker_reacquisition_reward_count": 0,
+        }
 
     def _distance_to_source(self) -> float:
         return float(
@@ -429,6 +608,7 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         self.last_move = self.stop_action
         self.best_concentration = 0.0
         self.stagnation_steps = 0
+        self._reset_odor_search_state()
         if self.scenario_mode == "randomized":
             if seed is not None:
                 self._scenario_rng = np.random.default_rng(
@@ -447,6 +627,7 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
                 "initial_heading_mode": self.initial_heading_mode,
                 "wind_direction": self.plume.wind_direction,
                 "source": (self.plume.source_x, self.plume.source_y),
+                **self._reset_odor_search_info(),
             }
         )
         return obs, info
@@ -502,6 +683,11 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         self.right_hits.append(hit_right)
         self.left_hits = self.left_hits[-20:]
         self.right_hits = self.right_hits[-20:]
+        odor_search_info = self._update_odor_search_state(
+            odor_hit=bool(hit_left or hit_right),
+            whisker_moved=whisker_moved,
+            body_moved=move != self.stop_action,
+        )
 
         distance = self._distance_to_source()
         reached = distance <= self.goal_radius
@@ -513,6 +699,10 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
             left,
             right,
             position_displacement,
+            reacquisition_event=bool(odor_search_info["reacquisition_event"]),
+            whisker_reacquisition_rewarded=bool(
+                odor_search_info["whisker_reacquisition_rewarded"]
+            ),
         )
         reward = float(sum(reward_components.values()))
 
@@ -538,6 +728,7 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
                 "best_concentration": self.best_concentration,
                 "position_displacement": position_displacement,
                 "stagnation_steps": self.stagnation_steps,
+                **odor_search_info,
                 "reward": reward,
                 "reward_components": reward_components,
             }
@@ -570,6 +761,7 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
                 "best_concentration": self.best_concentration,
                 "position_displacement": position_displacement,
                 "stagnation_steps": self.stagnation_steps,
+                **odor_search_info,
                 "out_of_bounds": oob,
                 "is_success": reached,
                 "reward_components": reward_components,
@@ -587,6 +779,9 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         left: float,
         right: float,
         position_displacement: float = 0.0,
+        *,
+        reacquisition_event: bool = False,
+        whisker_reacquisition_rewarded: bool = False,
     ) -> float:
         return float(
             sum(
@@ -597,6 +792,10 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
                     left,
                     right,
                     position_displacement,
+                    reacquisition_event=reacquisition_event,
+                    whisker_reacquisition_rewarded=(
+                        whisker_reacquisition_rewarded
+                    ),
                 ).values()
             )
         )
@@ -609,6 +808,9 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         left: float,
         right: float,
         position_displacement: float = 0.0,
+        *,
+        reacquisition_event: bool = False,
+        whisker_reacquisition_rewarded: bool = False,
     ) -> dict[str, float]:
         """计算可望远镜求和、不能靠原地保持高浓度重复刷取的奖励。"""
         clipped_concentration = float(
@@ -639,6 +841,7 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
             or position_progressed
             or concentration_progressed
             or distance_progressed
+            or reacquisition_event
         ):
             self.stagnation_steps = 0
         else:
@@ -653,6 +856,11 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
             ),
             "best_concentration_improvement": float(
                 self.best_concentration_reward_scale * concentration_improvement
+            ),
+            "whisker_reacquisition_bonus": float(
+                self.whisker_reacquisition_bonus
+                if whisker_reacquisition_rewarded
+                else 0.0
             ),
             "time_penalty": float(-self.mobile_time_penalty),
             "stagnation_penalty": float(

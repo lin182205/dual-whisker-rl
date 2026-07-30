@@ -1,7 +1,7 @@
 """训练移动机器人 + 双触须气源搜索 PPO。
 
-动作 `MultiDiscrete([6, 10, 10])` = [移动, 左扇区, 右扇区]。观测为 15 维硬件可部署
-特征（12 维气味特征 + 朝向 cos/sin + 上一步移动）。历史仍由包装器堆叠为扁平向量，
+动作 `MultiDiscrete([6, 10, 10])` = [移动, 左扇区, 右扇区]。默认观测为 16 维硬件可部署
+特征（12 维气味特征 + 朝向 cos/sin + 上一步移动 + blank_age）。历史仍由包装器堆叠为扁平向量，
 可选择直接交给 MLP，或先通过 GRU / Transformer 编码时间依赖后再交给 PPO。
 """
 
@@ -37,7 +37,7 @@ from train_whisker_only_ppo import resolve_seed
 
 
 class RewardComponentsTensorboardCallback(BaseCallback):
-    """按 rollout 均值和完整 episode 累计值记录各奖励分量及其总和。"""
+    """记录奖励分量以及 blank/重捕获行为诊断。"""
 
     _NON_TENSORBOARD_OUTPUTS = ("stdout", "log", "json", "csv")
 
@@ -50,6 +50,18 @@ class RewardComponentsTensorboardCallback(BaseCallback):
         self._rollout_count = 0
         self._completed_episode_sums: dict[str, list[float]] = {}
         self._completed_episode_totals: list[float] = []
+        self._diagnostic_step_count = 0
+        self._blank_step_count = 0
+        self._blank_body_spin_count = 0
+        self._blank_body_motion_count = 0
+        self._blank_whisker_motion_count = 0
+        self._blank_age_sum = 0.0
+        self._blank_age_max = 0
+        self._qualified_reacquisition_events = 0
+        self._whisker_only_reacquisition_events = 0
+        self._body_assisted_reacquisition_events = 0
+        self._passive_reacquisition_events = 0
+        self._whisker_reacquisition_reward_events = 0
 
     def _on_training_start(self) -> None:
         self._episode_sums = [
@@ -65,11 +77,56 @@ class RewardComponentsTensorboardCallback(BaseCallback):
             name: [] for name in self.component_names
         }
         self._completed_episode_totals = []
+        self._diagnostic_step_count = 0
+        self._blank_step_count = 0
+        self._blank_body_spin_count = 0
+        self._blank_body_motion_count = 0
+        self._blank_whisker_motion_count = 0
+        self._blank_age_sum = 0.0
+        self._blank_age_max = 0
+        self._qualified_reacquisition_events = 0
+        self._whisker_only_reacquisition_events = 0
+        self._body_assisted_reacquisition_events = 0
+        self._passive_reacquisition_events = 0
+        self._whisker_reacquisition_reward_events = 0
 
     def _on_step(self) -> bool:
         infos = self.locals.get("infos", ())
         dones = np.asarray(self.locals.get("dones", ()), dtype=bool).reshape(-1)
         for env_index, info in enumerate(infos):
+            if "odor_hit" in info:
+                self._diagnostic_step_count += 1
+                blank_age_steps = int(info.get("blank_age_steps", 0))
+                self._blank_age_sum += blank_age_steps
+                self._blank_age_max = max(self._blank_age_max, blank_age_steps)
+                if not bool(info["odor_hit"]):
+                    self._blank_step_count += 1
+                    if str(info.get("move_action", "")) in {
+                        "spin_left",
+                        "spin_right",
+                    }:
+                        self._blank_body_spin_count += 1
+                    self._blank_body_motion_count += int(
+                        bool(info.get("body_moved", False))
+                    )
+                    self._blank_whisker_motion_count += int(
+                        bool(info.get("whisker_moved", False))
+                    )
+                self._qualified_reacquisition_events += int(
+                    bool(info.get("reacquisition_event", False))
+                )
+                self._whisker_only_reacquisition_events += int(
+                    bool(info.get("whisker_only_reacquisition", False))
+                )
+                self._body_assisted_reacquisition_events += int(
+                    bool(info.get("body_assisted_reacquisition", False))
+                )
+                self._passive_reacquisition_events += int(
+                    bool(info.get("passive_reacquisition", False))
+                )
+                self._whisker_reacquisition_reward_events += int(
+                    bool(info.get("whisker_reacquisition_rewarded", False))
+                )
             components = info.get("reward_components")
             if not isinstance(components, dict):
                 continue
@@ -118,6 +175,65 @@ class RewardComponentsTensorboardCallback(BaseCallback):
                 float(np.mean(self._completed_episode_totals)),
                 exclude=self._NON_TENSORBOARD_OUTPUTS,
             )
+        if self._diagnostic_step_count > 0:
+            blank_denominator = max(self._blank_step_count, 1)
+            reacquisition_denominator = max(
+                self._qualified_reacquisition_events,
+                1,
+            )
+            diagnostics = {
+                "blank_body_spin_ratio": (
+                    self._blank_body_spin_count / blank_denominator
+                ),
+                "blank_body_motion_ratio": (
+                    self._blank_body_motion_count / blank_denominator
+                ),
+                "blank_whisker_motion_ratio": (
+                    self._blank_whisker_motion_count / blank_denominator
+                ),
+                "mean_blank_age_steps": (
+                    self._blank_age_sum / self._diagnostic_step_count
+                ),
+                "max_blank_age_steps": float(self._blank_age_max),
+                "qualified_reacquisition_events_per_1000_steps": (
+                    1000.0
+                    * self._qualified_reacquisition_events
+                    / self._diagnostic_step_count
+                ),
+                "qualified_reacquisition_events": float(
+                    self._qualified_reacquisition_events
+                ),
+                "whisker_only_reacquisition_events": float(
+                    self._whisker_only_reacquisition_events
+                ),
+                "body_assisted_reacquisition_events": float(
+                    self._body_assisted_reacquisition_events
+                ),
+                "passive_reacquisition_events": float(
+                    self._passive_reacquisition_events
+                ),
+                "whisker_only_reacquisition_rate": (
+                    self._whisker_only_reacquisition_events
+                    / reacquisition_denominator
+                ),
+                "body_assisted_reacquisition_rate": (
+                    self._body_assisted_reacquisition_events
+                    / reacquisition_denominator
+                ),
+                "passive_reacquisition_rate": (
+                    self._passive_reacquisition_events
+                    / reacquisition_denominator
+                ),
+                "whisker_reacquisition_reward_events": float(
+                    self._whisker_reacquisition_reward_events
+                ),
+            }
+            for name, value in diagnostics.items():
+                self.logger.record(
+                    f"diagnostics/{name}",
+                    value,
+                    exclude=self._NON_TENSORBOARD_OUTPUTS,
+                )
 
 
 def parse_args() -> argparse.Namespace:
@@ -416,12 +532,21 @@ def train(args: argparse.Namespace) -> PPO:
         )
         starting_num_timesteps = 0
     else:
-        model = PPO.load(
-            str(args.resume_from),
-            env=env,
-            device="auto",
-            force_reset=True,
-        )
+        model = PPO.load(str(args.resume_from), device="auto")
+        checkpoint_shape = tuple(model.observation_space.shape)
+        environment_shape = tuple(env.observation_space.shape)
+        if checkpoint_shape != environment_shape:
+            env.close()
+            eval_env.close()
+            raise ValueError(
+                "checkpoint observation shape does not match the current mobile "
+                f"environment: checkpoint={checkpoint_shape}, "
+                f"environment={environment_shape}. blank_age makes the default "
+                "base observation 16-dimensional; start a new run, or set "
+                "include_blank_age_observation=false only when evaluating/resuming "
+                "a legacy 15-dimensional model."
+            )
+        model.set_env(env, force_reset=True)
         starting_num_timesteps = int(model.num_timesteps)
         model.tensorboard_log = str(args.tensorboard_dir)
         expected_extractor_cls = {
@@ -538,6 +663,10 @@ def save_run_metadata(
         ),
         "whisker_motion_epsilon_rad": metadata_env.whisker_motion_epsilon_rad,
         "observation_mode": metadata_env.observation_mode,
+        "include_blank_age_observation": (
+            metadata_env.include_blank_age_observation
+        ),
+        "blank_age_clip_s": metadata_env.blank_age_clip_s,
         "observation_field_names": metadata_env.observation_field_names,
         "sim_sensor_scale": metadata_env.observation_builder.config.scale,
         "init_pose_mode": metadata_env.init_pose_mode,
@@ -552,6 +681,24 @@ def save_run_metadata(
                 metadata_env.best_concentration_reward_scale
             ),
             "best_concentration_clip": metadata_env.best_concentration_clip,
+            "reacquisition_min_blank_s": (
+                metadata_env.reacquisition_min_blank_s
+            ),
+            "reacquisition_min_blank_steps": (
+                metadata_env.reacquisition_min_blank_steps
+            ),
+            "reacquisition_credit_window_s": (
+                metadata_env.reacquisition_credit_window_s
+            ),
+            "reacquisition_credit_window_steps": (
+                metadata_env.reacquisition_credit_window_steps
+            ),
+            "whisker_reacquisition_bonus": (
+                metadata_env.whisker_reacquisition_bonus
+            ),
+            "max_whisker_reacquisition_rewards": (
+                metadata_env.max_whisker_reacquisition_rewards
+            ),
             "concentration_progress_epsilon": (
                 metadata_env.concentration_progress_epsilon
             ),
