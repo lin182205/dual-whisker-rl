@@ -39,6 +39,7 @@ python scripts\train_mobile_whisker_ppo.py --config configs\mobile_obstacles.yam
 ```
 
 障碍配置会把12维雷达距离加入策略观测，需从新模型开始训练；不传该配置时，现有无障碍观测维度保持不变。
+移动环境默认场地为4m × 4m，机器人圆形碰撞半径为0.20m。
 
 VS Code workspace settings point Python to `.venv` and enable automatic virtual environment activation for new integrated terminals.
 

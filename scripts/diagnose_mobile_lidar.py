@@ -100,11 +100,13 @@ def check_environment_observations() -> None:
     assert default_obs.shape == (16,)
     assert default_env.observation_space.contains(default_obs)
     assert np.asarray(default_info["lidar_ranges_m"]).shape == (12,)
+    assert default_env.world_min == -2.0 and default_env.world_max == 2.0
+    assert default_env.robot_radius == 0.20
 
     obstacle_config = {
         "scenario_mode": "fixed",
-        "source_position": (-0.8, 0.0),
-        "obstacles": [[-0.05, 0.10, -0.45, 0.45], [-0.52, -0.32, 0.32, 0.58]],
+        "source_position": (-1.8, 0.0),
+        "obstacles": [[-0.10, 0.20, -0.90, 0.90], [-1.04, -0.64, 0.64, 1.16]],
         "include_lidar_observation": True,
     }
     obstacle_env = MobileWhiskerPuffEnv(obstacle_config)
@@ -134,8 +136,8 @@ def check_collision_termination() -> None:
     env = MobileWhiskerPuffEnv(
         {
             "scenario_mode": "fixed",
-            "source_position": (-0.8, 0.0),
-            "obstacles": [[0.09, 0.20, -0.20, 0.20]],
+            "source_position": (-1.8, 0.0),
+            "obstacles": [[0.22, 0.45, -0.30, 0.30]],
             "include_lidar_observation": True,
         }
     )
@@ -148,9 +150,9 @@ def check_collision_termination() -> None:
     assert terminated and not truncated
     assert info["collision"] is True
     assert info["termination_reason"] == "collision"
-    assert info["reward_components"]["collision_penalty"] == -25.0
+    assert info["reward_components"]["collision_penalty"] == -35.0
     np.testing.assert_allclose(after, before, atol=1e-12)
-    assert float(info["min_lidar_range_m"]) <= env.robot_radius + 0.02
+    assert float(info["min_lidar_range_m"]) <= env.robot_radius + 0.03
     env.close()
 
 

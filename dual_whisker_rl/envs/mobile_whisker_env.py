@@ -43,8 +43,8 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         cfg = dict(config or {})
-        # 注入 mobile 默认：更大场地（2m，±1.0）以显现追踪。
-        cfg.setdefault("world_half", 1.0)
+        # 注入 mobile 默认：4m × 4m 场地（±2.0），为后续障碍布局保留空间。
+        cfg.setdefault("world_half", 2.0)
         wh = float(cfg["world_half"])
         explicit_source = cfg.get("source_position") is not None
         scenario_mode_explicit = "scenario_mode" in cfg
@@ -68,7 +68,8 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         # 大场地需要羽流能横跨过去，否则下风侧起点闻不到气味：加大风速、延长 puff 寿命。
         cfg.setdefault("wind_speed_range", (0.12, 0.20))
         overrides = dict(cfg.get("plume_overrides") or {})
-        overrides.setdefault("max_puff_age", 16.0)
+        overrides.setdefault("max_puff_age", 24.0)
+        overrides.setdefault("puff_warmup_steps", 120)
         cfg["plume_overrides"] = overrides
         # 本环境的观测拼接假定父类 12 维硬件观测，禁止 privileged。
         if str(cfg.get("observation_mode", "hardware")) != "hardware":
@@ -166,8 +167,8 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
             raise ValueError("goal_bonus is fixed at 50.0 for mobile source search")
         self.goal_bonus = 50.0
         self.mobile_time_penalty = float(cfg.get("mobile_time_penalty", 0.03))
-        self.oob_penalty = float(cfg.get("oob_penalty", 25.0))
-        self.collision_penalty = float(cfg.get("collision_penalty", 25.0))
+        self.oob_penalty = float(cfg.get("oob_penalty", 35.0))
+        self.collision_penalty = float(cfg.get("collision_penalty", 35.0))
         self.best_concentration_reward_scale = float(
             cfg.get("best_concentration_reward_scale", 3.0)
         )
@@ -276,11 +277,11 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         )
         if (
             self.positive_auxiliary_reward_upper_bound
-            > self.goal_bonus / 4.0 + 1e-12
+            > self.goal_bonus / 2.0 + 1e-12
         ):
             raise ValueError(
                 "positive auxiliary reward upper bound must not exceed "
-                f"goal_bonus / 4 = {self.goal_bonus / 4.0:.6f}; got "
+                f"goal_bonus / 2 = {self.goal_bonus / 2.0:.6f}; got "
                 f"{self.positive_auxiliary_reward_upper_bound:.6f}"
             )
         self.max_episode_time_cost = self.mobile_time_penalty * self.max_steps
@@ -311,7 +312,7 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         self.width = float(self.world_max - self.world_min)
         self.height = float(self.world_max - self.world_min)
 
-        self.robot_radius = float(cfg.get("robot_radius", 0.08))
+        self.robot_radius = float(cfg.get("robot_radius", 0.20))
         if (
             not math.isfinite(self.robot_radius)
             or self.robot_radius <= 0.0

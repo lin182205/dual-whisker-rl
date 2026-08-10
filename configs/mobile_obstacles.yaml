@@ -1,14 +1,14 @@
 # 移动触须 + 二维雷达的最小障碍闭环示例。
 # 使用此配置会把 12 维雷达拼入策略观测，因此应从新模型开始训练。
 scenario_mode: fixed
-source_position: [-0.8, 0.0]
-world_half: 1.0
+source_position: [-1.8, 0.0]
+world_half: 2.0
 
 obstacles:
   # 中央竖墙：阻断直线路径，但上下均留有可绕行空间。
-  - [-0.05, 0.10, -0.45, 0.45]
+  - [-0.10, 0.20, -0.90, 0.90]
   # 上风侧附加障碍：用于验证侧向雷达束和二次绕行。
-  - [-0.52, -0.32, 0.32, 0.58]
+  - [-1.04, -0.64, 0.64, 1.16]
 
 lidar_num_beams: 12
 lidar_fov_deg: 180.0
@@ -16,5 +16,6 @@ lidar_max_range: 0.6
 lidar_noise_std: 0.0
 include_lidar_observation: true
 
-robot_radius: 0.08
-collision_penalty: 25.0
+robot_radius: 0.20
+oob_penalty: 35.0
+collision_penalty: 35.0
