@@ -19,8 +19,6 @@ import matplotlib
 matplotlib.use("Agg")
 
 import matplotlib.animation as animation
-from matplotlib.collections import LineCollection
-from matplotlib.patches import Circle
 from matplotlib.patches import Rectangle
 from matplotlib import pyplot as plt
 import numpy as np
@@ -54,7 +52,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-model", action="store_true", help="忽略模型、用随机动作。")
     parser.add_argument("--seed", type=int, default=3)
     parser.add_argument("--steps", type=int, default=200)
-    parser.add_argument("--resolution", type=int, default=100)
+    parser.add_argument(
+        "--resolution",
+        type=int,
+        default=200,
+        help="气味热图分辨率；与物理 LBM 风场网格相互独立。",
+    )
     parser.add_argument("--stride", type=int, default=1, help="GIF 每隔多少步取一帧。")
     parser.add_argument("--stochastic", action="store_true")
     parser.add_argument("--domain-randomization", action="store_true")
@@ -158,7 +161,7 @@ def _setup_axes(ax, data, cmap, frame_idx, title):
         origin="lower",
         cmap=cmap,
         alpha=0.9,
-        interpolation="bilinear",
+        interpolation="bicubic",
         aspect="equal",
         vmin=0.0,
         vmax=vmax,
@@ -197,51 +200,6 @@ def _setup_axes(ax, data, cmap, frame_idx, title):
     return heatmap, vmax
 
 
-def _lidar_segments(data, frame_idx):
-    """把当前帧雷达距离转换为世界坐标线段。"""
-    origin = data["trajectory"][frame_idx]
-    heading = float(data["headings"][frame_idx])
-    relative_angles = np.asarray(
-        data["map_metadata"]["lidar"]["relative_angles_rad"],
-        dtype=np.float32,
-    )
-    ranges = data["lidar_ranges_m"][frame_idx]
-    segments = []
-    for relative_angle, distance in zip(relative_angles, ranges):
-        angle = heading + float(relative_angle)
-        endpoint = (
-            float(origin[0]) + float(distance) * math.cos(angle),
-            float(origin[1]) + float(distance) * math.sin(angle),
-        )
-        segments.append([(float(origin[0]), float(origin[1])), endpoint])
-    return segments
-
-
-def draw_lidar_and_footprint(ax, data, frame_idx):
-    lidar = LineCollection(
-        _lidar_segments(data, frame_idx),
-        colors="#32a6a8",
-        linewidths=0.9,
-        alpha=0.48,
-        zorder=4.5,
-        label="Lidar",
-    )
-    ax.add_collection(lidar)
-    center = data["trajectory"][frame_idx]
-    footprint = Circle(
-        (float(center[0]), float(center[1])),
-        radius=float(data["map_metadata"]["robot_radius"]),
-        fill=False,
-        edgecolor="#111111",
-        linewidth=1.2,
-        alpha=0.9,
-        zorder=5.5,
-        label="Robot footprint",
-    )
-    ax.add_patch(footprint)
-    return lidar, footprint
-
-
 def render_static(data, path, title):
     path.parent.mkdir(parents=True, exist_ok=True)
     cmap = build_plume_colormap()
@@ -255,7 +213,6 @@ def render_static(data, path, title):
     ax.scatter(traj[idx, 0], traj[idx, 1], s=95, color="#2b2b2b", edgecolor="white", linewidth=1.3, zorder=6, label="Robot")
     draw_whisker_artists(ax, traj, data["left_points"], data["right_points"], idx)
     draw_robot_heading_marker(ax, traj[idx], float(data["headings"][idx]))
-    draw_lidar_and_footprint(ax, data, idx)
     left_v, right_v = data["sensor_values"][idx]
     difference = float(data["sensor_differences"][idx])
     mean_difference, mean_abs_difference = summarize_sensor_differences(
@@ -299,7 +256,6 @@ def render_animation(data, path, title, stride, fps):
     robot = ax.scatter([traj[0, 0]], [traj[0, 1]], s=95, color="#2b2b2b", edgecolor="white", linewidth=1.3, zorder=6, label="Robot")
     left_line, right_line, left_tip, right_tip = draw_whisker_artists(ax, traj, data["left_points"], data["right_points"], 0)
     hs, ha = draw_robot_heading_marker(ax, traj[0], float(data["headings"][0]))
-    lidar, footprint = draw_lidar_and_footprint(ax, data, 0)
     txt = ax.text(0.02, 0.98, "", transform=ax.transAxes, ha="left", va="top", fontsize=9.5,
                   family="monospace", bbox=dict(boxstyle="round,pad=0.5", facecolor="white", alpha=0.72, edgecolor="#d8d2c7"), zorder=8)
     ax.legend(loc="lower right", fontsize=8, framealpha=0.85)
@@ -309,8 +265,6 @@ def render_animation(data, path, title, stride, fps):
         heatmap.set_data(frames[fi])
         line.set_data(traj[: fi + 1, 0], traj[: fi + 1, 1])
         robot.set_offsets(traj[fi])
-        lidar.set_segments(_lidar_segments(data, fi))
-        footprint.center = (float(traj[fi, 0]), float(traj[fi, 1]))
         end = (traj[fi, 0] + 0.07 * math.cos(data["headings"][fi]), traj[fi, 1] + 0.07 * math.sin(data["headings"][fi]))
         hs.set_positions((float(traj[fi, 0]), float(traj[fi, 1])), end)
         ha.set_positions((float(traj[fi, 0]), float(traj[fi, 1])), end)
@@ -331,7 +285,7 @@ def render_animation(data, path, title, stride, fps):
             f"delta(L-R) {difference:+.3f}   "
             f"mean|delta| {running_mean_abs_difference:.3f}"
         )
-        return heatmap, line, robot, lidar, footprint, hs, ha, left_line, right_line, left_tip, right_tip, txt
+        return heatmap, line, robot, hs, ha, left_line, right_line, left_tip, right_tip, txt
 
     anim = animation.FuncAnimation(fig, update, frames=frame_ids, interval=int(1000 / fps), blit=False)
     anim.save(path, writer=animation.PillowWriter(fps=fps), dpi=120)
@@ -392,7 +346,6 @@ def render_static_rollouts(rollouts, path, title):
             idx,
         )
         draw_robot_heading_marker(ax, traj[idx], float(data["headings"][idx]))
-        draw_lidar_and_footprint(ax, data, idx)
         left_v, right_v = data["sensor_values"][idx]
         difference = float(data["sensor_differences"][idx])
         mean_difference, mean_abs_difference = summarize_sensor_differences(
@@ -481,7 +434,6 @@ def render_animation_rollouts(rollouts, path, title, stride, fps):
         hs, ha = draw_robot_heading_marker(
             ax, traj[0], float(data["headings"][0])
         )
-        lidar, footprint = draw_lidar_and_footprint(ax, data, 0)
         txt = ax.text(
             0.02,
             0.98,
@@ -509,8 +461,6 @@ def render_animation_rollouts(rollouts, path, title, stride, fps):
                 "heatmap": heatmap,
                 "line": line,
                 "robot": robot,
-                "lidar": lidar,
-                "footprint": footprint,
                 "heading_shadow": hs,
                 "heading_arrow": ha,
                 "left_line": left_line,
@@ -533,11 +483,6 @@ def render_animation_rollouts(rollouts, path, title, stride, fps):
             state["heatmap"].set_data(data["frames"][fi])
             state["line"].set_data(traj[: fi + 1, 0], traj[: fi + 1, 1])
             state["robot"].set_offsets([traj[fi]])
-            state["lidar"].set_segments(_lidar_segments(data, fi))
-            state["footprint"].center = (
-                float(traj[fi, 0]),
-                float(traj[fi, 1]),
-            )
             end = (
                 traj[fi, 0] + 0.07 * math.cos(data["headings"][fi]),
                 traj[fi, 1] + 0.07 * math.sin(data["headings"][fi]),
@@ -572,8 +517,6 @@ def render_animation_rollouts(rollouts, path, title, stride, fps):
                     state["heatmap"],
                     state["line"],
                     state["robot"],
-                    state["lidar"],
-                    state["footprint"],
                     state["heading_shadow"],
                     state["heading_arrow"],
                     state["left_line"],

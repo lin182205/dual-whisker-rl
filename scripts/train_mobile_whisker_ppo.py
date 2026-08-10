@@ -611,6 +611,9 @@ def save_run_metadata(
 ) -> None:
     args.log_dir.mkdir(parents=True, exist_ok=True)
     metadata_env = MobileWhiskerPuffEnv(config)
+    # 训练环境已按相同 seed 建立过对应风场；这里 reset 通常直接命中进程内缓存，
+    # 同时让 run_metadata 记录实际求解方向、残差和时间平均状态。
+    metadata_env.reset(seed=args.seed)
     base_obs_dim = int(metadata_env.observation_space.shape[0])
     extractor = model.policy.features_extractor
     transformer_config = None
@@ -659,6 +662,7 @@ def save_run_metadata(
         "world_bounds": [metadata_env.world_min, metadata_env.world_max],
         "plume_max_puff_age": metadata_env.plume.max_puff_age,
         "plume_warmup_steps": metadata_env.plume.puff_warmup_steps,
+        "obstacle_flow": metadata_env.plume.obstacle_flow.metadata(),
         "temporal_encoder": args.temporal_encoder,
         "transformer": transformer_config,
         "gru": gru_config,

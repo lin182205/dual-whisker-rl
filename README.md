@@ -34,12 +34,15 @@ tensorboard --logdir results\tensorboard
 
 ```powershell
 python scripts\diagnose_mobile_lidar.py
+python scripts\diagnose_obstacle_plume.py
 python scripts\visualize_mobile_whisker_env.py --config configs\mobile_obstacles.yaml --no-model
 python scripts\train_mobile_whisker_ppo.py --config configs\mobile_obstacles.yaml --timesteps 50000 --n-envs 4
 ```
 
 障碍配置会把12维雷达距离加入策略观测，需从新模型开始训练；不传该配置时，现有无障碍观测维度保持不变。
 移动环境默认场地为4m × 4m，机器人圆形碰撞半径为0.20m。
+障碍场景使用缓存的二维 D2Q9 LBM 稳态风场推进 Puff：气流和气味会绕开矩形障碍，
+墙后形成低速尾流和浓度阴影。该模型用于定性训练，不等同于高 Reynolds 数 CFD。
 
 VS Code workspace settings point Python to `.venv` and enable automatic virtual environment activation for new integrated terminals.
 

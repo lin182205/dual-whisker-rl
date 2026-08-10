@@ -10,6 +10,10 @@ from gymnasium import spaces
 import numpy as np
 
 from dual_whisker_rl.envs.lidar_model import validate_obstacles
+from dual_whisker_rl.envs.lbm_wind_field import segment_aabb_first_hit
+from dual_whisker_rl.envs.lbm_wind_field import segment_aabb_first_hit_many
+from dual_whisker_rl.envs.lbm_wind_field import segment_block_mask
+from dual_whisker_rl.envs.lbm_wind_field import SteadyLBMWindField2D
 from dual_whisker_rl.envs.robot_model import RobotState
 from dual_whisker_rl.envs.sensor_model import AsymmetricGasSensor
 from dual_whisker_rl.envs.sensor_model import FirstOrderGasSensor
@@ -42,6 +46,7 @@ class DynamicPuffPlume:
         wind_speed_range: tuple[float, float] = (0.06, 0.11),
         wind_sampling_mode: str = "random",
         obstacles: np.ndarray | None = None,
+        obstacle_flow: dict[str, Any] | None = None,
         plume_overrides: dict[str, Any] | None = None,
         world_half: float = WORLD_MAX,
     ) -> None:
@@ -165,6 +170,12 @@ class DynamicPuffPlume:
             "wind_dir_meander_sigma": self.wind_dir_meander_sigma,
             "max_puff_age": self.max_puff_age,
         }
+        self.obstacle_flow = SteadyLBMWindField2D(
+            world_min=self.world_min,
+            world_max=self.world_max,
+            obstacles=self.obstacles,
+            config=obstacle_flow,
+        )
 
     def metadata(self) -> dict[str, Any]:
         """返回绘图和调试所需的气味场元信息。"""
@@ -179,6 +190,7 @@ class DynamicPuffPlume:
             "wind_speed": float(self.wind_speed),
             "wind_sampling_mode": self.wind_sampling_mode,
             "puff_count": int(len(self.puffs)),
+            "obstacle_flow": self.obstacle_flow.metadata(),
         }
 
     @staticmethod
@@ -378,6 +390,10 @@ class DynamicPuffPlume:
 
     def _advance_puffs(self) -> None:
         """推进所有 puff：随风移动、湍流扰动、扩散并逐渐衰减。"""
+        if self.obstacle_flow.active:
+            self._advance_puffs_with_obstacle_flow()
+            return
+
         wind_x = self.wind_speed * math.cos(self.wind_direction)
         wind_y = self.wind_speed * math.sin(self.wind_direction)
         active_puffs = []
@@ -422,6 +438,306 @@ class DynamicPuffPlume:
             active_puffs.append(puff)
         self.puffs = active_puffs[-self.max_puffs :]
 
+    def _local_puff_velocity_many(
+        self,
+        x: np.ndarray,
+        y: np.ndarray,
+        velocity_downwind: np.ndarray,
+        velocity_crosswind: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """向量化合成一批 puff 的局部速度。"""
+        mean_x, mean_y, turbulence = self.obstacle_flow.sample_many(
+            x,
+            y,
+            wind_speed=self.wind_speed,
+            direction_offset_rad=self.wind_dir_offset,
+        )
+        mean_speed = np.hypot(mean_x, mean_y)
+        fallback_direction = (
+            self.obstacle_flow.result.direction_rad + self.wind_dir_offset
+        )
+        downwind_x = np.divide(
+            mean_x,
+            mean_speed,
+            out=np.full_like(mean_x, math.cos(fallback_direction)),
+            where=mean_speed > 1e-10,
+        )
+        downwind_y = np.divide(
+            mean_y,
+            mean_speed,
+            out=np.full_like(mean_y, math.sin(fallback_direction)),
+            where=mean_speed > 1e-10,
+        )
+        return (
+            mean_x + velocity_downwind * downwind_x - velocity_crosswind * downwind_y,
+            mean_y + velocity_downwind * downwind_y + velocity_crosswind * downwind_x,
+            turbulence,
+            np.arctan2(downwind_y, downwind_x),
+        )
+
+    def _move_puff_without_crossing_obstacles(
+        self,
+        x: float,
+        y: float,
+        delta_x: float,
+        delta_y: float,
+    ) -> tuple[float, float]:
+        """推进一个子步；发生数值穿墙时截断法向位移并保留切向位移。"""
+        current_x = float(x)
+        current_y = float(y)
+        remaining_x = float(delta_x)
+        remaining_y = float(delta_y)
+        epsilon = min(1e-5, 0.01 * self.obstacle_flow.cell_size)
+        for _ in range(3):
+            end_x = current_x + remaining_x
+            end_y = current_y + remaining_y
+            nearest: tuple[float, float, float] | None = None
+            for obstacle in self.obstacles:
+                hit = segment_aabb_first_hit(
+                    current_x,
+                    current_y,
+                    end_x,
+                    end_y,
+                    obstacle,
+                )
+                if hit is not None and (nearest is None or hit[0] < nearest[0]):
+                    nearest = hit
+            if nearest is None:
+                return end_x, end_y
+
+            hit_t, normal_x, normal_y = nearest
+            safe_t = max(0.0, hit_t - epsilon / max(math.hypot(remaining_x, remaining_y), epsilon))
+            current_x += safe_t * remaining_x + epsilon * normal_x
+            current_y += safe_t * remaining_y + epsilon * normal_y
+            untraveled = max(0.0, 1.0 - hit_t)
+            remaining_x *= untraveled
+            remaining_y *= untraveled
+            inward = remaining_x * normal_x + remaining_y * normal_y
+            if inward < 0.0:
+                remaining_x -= inward * normal_x
+                remaining_y -= inward * normal_y
+            if math.hypot(remaining_x, remaining_y) <= epsilon:
+                return current_x, current_y
+        return current_x, current_y
+
+    def _advance_puffs_with_obstacle_flow(self) -> None:
+        """按稳态 LBM 局部速度推进 puff，并保证中心不会穿过矩形墙体。"""
+        if self.obstacle_flow.result is None:
+            raise RuntimeError("obstacle-aware puff advance requires a prepared LBM field")
+        if not self.puffs:
+            return
+        puffs = self.puffs
+        count = len(puffs)
+        x = np.fromiter((float(puff["x"]) for puff in puffs), dtype=np.float64, count=count)
+        y = np.fromiter((float(puff["y"]) for puff in puffs), dtype=np.float64, count=count)
+        velocity_downwind = np.fromiter(
+            (float(puff.get("vd", 0.0)) for puff in puffs),
+            dtype=np.float64,
+            count=count,
+        )
+        velocity_crosswind = np.fromiter(
+            (float(puff.get("vc", 0.0)) for puff in puffs),
+            dtype=np.float64,
+            count=count,
+        )
+        relax = self.turbulence_vel_relax
+        max_substep_distance = (
+            self.obstacle_flow.max_cfl_fraction * self.obstacle_flow.cell_size
+        )
+        _, _, local_turbulence, _ = self._local_puff_velocity_many(
+            x,
+            y,
+            velocity_downwind,
+            velocity_crosswind,
+        )
+        noise_scale = np.sqrt(local_turbulence)
+        velocity_downwind = (
+            relax * velocity_downwind
+            + self.turbulence_vel_std_downwind
+            * noise_scale
+            * self.rng.normal(size=count)
+        )
+        velocity_crosswind = (
+            relax * velocity_crosswind
+            + self.turbulence_vel_std_crosswind
+            * noise_scale
+            * self.rng.normal(size=count)
+        )
+        velocity_x, velocity_y, _, direction = self._local_puff_velocity_many(
+            x,
+            y,
+            velocity_downwind,
+            velocity_crosswind,
+        )
+        # CFL 约束针对空间变化的 LBM 平均场；OU 阵风在一个环境步内视为常速度，
+        # 可直接由 swept-AABB 处理，不让少数随机速度离群值拖慢所有 puff。
+        mean_x, mean_y, _ = self.obstacle_flow.sample_many(
+            x,
+            y,
+            wind_speed=self.wind_speed,
+            direction_offset_rad=self.wind_dir_offset,
+        )
+        substep_counts = np.clip(
+            np.ceil(np.hypot(mean_x, mean_y) * self.dt / max_substep_distance),
+            1,
+            16,
+        ).astype(np.int32)
+        max_substeps = int(np.max(substep_counts))
+        accumulated_turbulence = np.zeros(count, dtype=np.float64)
+        for substep_index in range(max_substeps):
+            active = substep_counts > substep_index
+            active_dt = self.dt / substep_counts[active]
+            velocity_x, velocity_y, turbulence, _ = self._local_puff_velocity_many(
+                x[active],
+                y[active],
+                velocity_downwind[active],
+                velocity_crosswind[active],
+            )
+            midpoint_x = x[active] + 0.5 * active_dt * velocity_x
+            midpoint_y = y[active] + 0.5 * active_dt * velocity_y
+            mid_x, mid_y, mid_turbulence, mid_direction = self._local_puff_velocity_many(
+                midpoint_x,
+                midpoint_y,
+                velocity_downwind[active],
+                velocity_crosswind[active],
+            )
+            delta_x = active_dt * mid_x
+            delta_y = active_dt * mid_y
+            moved_x, moved_y = self._move_puffs_without_crossing_obstacles(
+                x[active],
+                y[active],
+                delta_x,
+                delta_y,
+            )
+            x[active] = moved_x
+            y[active] = moved_y
+            accumulated_turbulence[active] += 0.5 * (
+                turbulence + mid_turbulence
+            )
+            direction[active] = mid_direction
+
+        active_puffs = []
+        mean_turbulence = accumulated_turbulence / substep_counts
+        for index, puff in enumerate(puffs):
+            puff["x"] = float(x[index])
+            puff["y"] = float(y[index])
+            puff["vd"] = float(velocity_downwind[index])
+            puff["vc"] = float(velocity_crosswind[index])
+            puff["direction"] = float(direction[index])
+            puff["age"] += self.dt
+            puff["sigma_downwind"] += self.diffusion_downwind_rate * self.dt
+            puff["sigma_crosswind"] += (
+                self.diffusion_crosswind_rate * mean_turbulence[index] * self.dt
+            )
+            puff["mass"] *= math.exp(-self.decay_rate * self.dt)
+            if puff["age"] > self.max_puff_age or puff["mass"] < self.min_puff_mass:
+                continue
+            if (
+                puff["x"] < self.world_min - self.puff_bounds_margin
+                or puff["x"] > self.world_max + self.puff_bounds_margin
+                or puff["y"] < self.world_min - self.puff_bounds_margin
+                or puff["y"] > self.world_max + self.puff_bounds_margin
+            ):
+                continue
+            active_puffs.append(puff)
+        self.puffs = active_puffs[-self.max_puffs :]
+
+    def _move_puffs_without_crossing_obstacles(
+        self,
+        x: np.ndarray,
+        y: np.ndarray,
+        delta_x: np.ndarray,
+        delta_y: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """批量执行 swept AABB 墙面修正，正常情况下完全走 NumPy 路径。"""
+        current_x = np.asarray(x, dtype=np.float64).copy()
+        current_y = np.asarray(y, dtype=np.float64).copy()
+        remaining_x = np.asarray(delta_x, dtype=np.float64).copy()
+        remaining_y = np.asarray(delta_y, dtype=np.float64).copy()
+        first_end_x = current_x + remaining_x
+        first_end_y = current_y + remaining_y
+        active = np.zeros(current_x.shape, dtype=bool)
+        for xmin, xmax, ymin, ymax in self.obstacles:
+            active |= (
+                (np.minimum(current_x, first_end_x) <= xmax)
+                & (np.maximum(current_x, first_end_x) >= xmin)
+                & (np.minimum(current_y, first_end_y) <= ymax)
+                & (np.maximum(current_y, first_end_y) >= ymin)
+            )
+        no_possible_hit = ~active
+        current_x[no_possible_hit] = first_end_x[no_possible_hit]
+        current_y[no_possible_hit] = first_end_y[no_possible_hit]
+        epsilon = min(1e-5, 0.01 * self.obstacle_flow.cell_size)
+        for _ in range(3):
+            indices = np.flatnonzero(active)
+            if indices.size == 0:
+                break
+            start_x = current_x[indices]
+            start_y = current_y[indices]
+            end_x = start_x + remaining_x[indices]
+            end_y = start_y + remaining_y[indices]
+            best_t = np.full(indices.size, np.inf, dtype=np.float64)
+            best_normal_x = np.zeros(indices.size, dtype=np.float64)
+            best_normal_y = np.zeros(indices.size, dtype=np.float64)
+            for obstacle in self.obstacles:
+                hit, hit_t, normal_x, normal_y = segment_aabb_first_hit_many(
+                    start_x,
+                    start_y,
+                    end_x,
+                    end_y,
+                    obstacle,
+                )
+                nearer = hit & (hit_t < best_t)
+                best_t[nearer] = hit_t[nearer]
+                best_normal_x[nearer] = normal_x[nearer]
+                best_normal_y[nearer] = normal_y[nearer]
+
+            no_hit = ~np.isfinite(best_t)
+            if np.any(no_hit):
+                no_hit_indices = indices[no_hit]
+                current_x[no_hit_indices] = end_x[no_hit]
+                current_y[no_hit_indices] = end_y[no_hit]
+                active[no_hit_indices] = False
+
+            hit_local = ~no_hit
+            if not np.any(hit_local):
+                continue
+            hit_indices = indices[hit_local]
+            hit_t = best_t[hit_local]
+            normal_x = best_normal_x[hit_local]
+            normal_y = best_normal_y[hit_local]
+            distance = np.hypot(
+                remaining_x[hit_indices], remaining_y[hit_indices]
+            )
+            safe_t = np.maximum(
+                0.0,
+                hit_t - epsilon / np.maximum(distance, epsilon),
+            )
+            current_x[hit_indices] += (
+                safe_t * remaining_x[hit_indices] + epsilon * normal_x
+            )
+            current_y[hit_indices] += (
+                safe_t * remaining_y[hit_indices] + epsilon * normal_y
+            )
+            untraveled = np.maximum(0.0, 1.0 - hit_t)
+            remaining_x[hit_indices] *= untraveled
+            remaining_y[hit_indices] *= untraveled
+            inward = (
+                remaining_x[hit_indices] * normal_x
+                + remaining_y[hit_indices] * normal_y
+            )
+            inward_mask = inward < 0.0
+            if np.any(inward_mask):
+                inward_indices = hit_indices[inward_mask]
+                remaining_x[inward_indices] -= inward[inward_mask] * normal_x[inward_mask]
+                remaining_y[inward_indices] -= inward[inward_mask] * normal_y[inward_mask]
+            stopped = (
+                np.hypot(remaining_x[hit_indices], remaining_y[hit_indices])
+                <= epsilon
+            )
+            active[hit_indices[stopped]] = False
+        return current_x, current_y
+
     def advance(self) -> None:
         """推进一次动态气味场。"""
         self._update_wind()
@@ -430,6 +746,79 @@ class DynamicPuffPlume:
 
     def _puff_concentration(self, x: float, y: float) -> float:
         """计算所有 puff 在指定点叠加得到的瞬时浓度。"""
+        if self.obstacle_flow.active and self.puffs:
+            count = len(self.puffs)
+            puff_x = np.fromiter(
+                (float(puff["x"]) for puff in self.puffs),
+                dtype=np.float64,
+                count=count,
+            )
+            puff_y = np.fromiter(
+                (float(puff["y"]) for puff in self.puffs),
+                dtype=np.float64,
+                count=count,
+            )
+            direction = np.fromiter(
+                (
+                    float(puff.get("direction", self.wind_direction))
+                    for puff in self.puffs
+                ),
+                dtype=np.float64,
+                count=count,
+            )
+            mass = np.fromiter(
+                (float(puff["mass"]) for puff in self.puffs),
+                dtype=np.float64,
+                count=count,
+            )
+            sigma_downwind = np.fromiter(
+                (
+                    float(puff.get("sigma_downwind", puff.get("sigma", 0.08)))
+                    for puff in self.puffs
+                ),
+                dtype=np.float64,
+                count=count,
+            )
+            sigma_crosswind = np.fromiter(
+                (
+                    float(puff.get("sigma_crosswind", puff.get("sigma", 0.04)))
+                    for puff in self.puffs
+                ),
+                dtype=np.float64,
+                count=count,
+            )
+            dx = float(x) - puff_x
+            dy = float(y) - puff_y
+            cosine = np.cos(direction)
+            sine = np.sin(direction)
+            downwind = dx * cosine + dy * sine
+            crosswind = -dx * sine + dy * cosine
+            contributions = (
+                mass
+                * np.exp(
+                    -(
+                        downwind * downwind / (2.0 * sigma_downwind**2)
+                        + crosswind * crosswind / (2.0 * sigma_crosswind**2)
+                    )
+                )
+                / (2.0 * math.pi * sigma_downwind * sigma_crosswind)
+            )
+            if self.obstacle_flow.wall_transmission < 1.0:
+                blocked = np.zeros(count, dtype=bool)
+                end_x = np.full(count, float(x), dtype=np.float64)
+                end_y = np.full(count, float(y), dtype=np.float64)
+                for obstacle in self.obstacles:
+                    hit, _, _, _ = segment_aabb_first_hit_many(
+                        puff_x,
+                        puff_y,
+                        end_x,
+                        end_y,
+                        obstacle,
+                    )
+                    blocked |= hit
+                contributions[blocked] *= self.obstacle_flow.wall_transmission
+            return float(np.sum(contributions))
+
         total = 0.0
         for puff in self.puffs:
             dx = x - puff["x"]
@@ -439,17 +828,36 @@ class DynamicPuffPlume:
             crosswind = -dx * math.sin(direction) + dy * math.cos(direction)
             sigma_downwind = float(puff.get("sigma_downwind", puff.get("sigma", 0.08)))
             sigma_crosswind = float(puff.get("sigma_crosswind", puff.get("sigma", 0.04)))
-            total += puff["mass"] * math.exp(
+            contribution = puff["mass"] * math.exp(
                 -(
                     downwind * downwind / (2.0 * sigma_downwind * sigma_downwind)
                     + crosswind * crosswind / (2.0 * sigma_crosswind * sigma_crosswind)
                 )
             ) / (2.0 * math.pi * sigma_downwind * sigma_crosswind)
+            total += contribution
         return total
 
     def concentration(self, x: float, y: float, add_noise: bool = True) -> float:
         """返回指定坐标处的气味浓度。"""
-        concentration = float(self._source_core_concentration(x, y))
+        if self.obstacle_flow.active:
+            for xmin, xmax, ymin, ymax in self.obstacles:
+                if xmin <= x <= xmax and ymin <= y <= ymax:
+                    return float(self.gas_background)
+        source_core = float(self._source_core_concentration(x, y))
+        if self.obstacle_flow.active and self.obstacle_flow.wall_transmission < 1.0:
+            if any(
+                segment_aabb_first_hit(
+                    self.source_x,
+                    self.source_y,
+                    float(x),
+                    float(y),
+                    obstacle,
+                )
+                is not None
+                for obstacle in self.obstacles
+            ):
+                source_core *= self.obstacle_flow.wall_transmission
+        concentration = source_core
         concentration += float(self._puff_concentration(x, y))
         concentration += self.gas_background
         if add_noise:
@@ -465,9 +873,19 @@ class DynamicPuffPlume:
         xs = np.linspace(self.world_min, self.world_max, resolution, dtype=np.float32)
         ys = np.linspace(self.world_min, self.world_max, resolution, dtype=np.float32)
         grid_x, grid_y = np.meshgrid(xs, ys)
-        concentration = self._source_core_concentration(grid_x, grid_y).astype(
-            np.float32
-        )
+        source_core = self._source_core_concentration(grid_x, grid_y).astype(np.float32)
+        if self.obstacle_flow.active and self.obstacle_flow.wall_transmission < 1.0:
+            blocked = np.zeros(grid_x.shape, dtype=bool)
+            for obstacle in self.obstacles:
+                blocked |= segment_block_mask(
+                    self.source_x,
+                    self.source_y,
+                    grid_x,
+                    grid_y,
+                    obstacle,
+                )
+            source_core[blocked] *= self.obstacle_flow.wall_transmission
+        concentration = source_core
         concentration += self.gas_background
         for puff in self.puffs:
             dx = grid_x - puff["x"]
@@ -477,7 +895,7 @@ class DynamicPuffPlume:
             crosswind = -dx * math.sin(direction) + dy * math.cos(direction)
             sigma_downwind = float(puff.get("sigma_downwind", puff.get("sigma", 0.08)))
             sigma_crosswind = float(puff.get("sigma_crosswind", puff.get("sigma", 0.04)))
-            concentration += (
+            contribution = (
                 puff["mass"]
                 * np.exp(
                     -(
@@ -487,10 +905,37 @@ class DynamicPuffPlume:
                 )
                 / (2.0 * np.pi * sigma_downwind * sigma_crosswind)
             ).astype(np.float32)
+            if (
+                self.obstacle_flow.active
+                and self.obstacle_flow.wall_transmission < 1.0
+            ):
+                blocked = np.zeros(grid_x.shape, dtype=bool)
+                for obstacle in self.obstacles:
+                    blocked |= segment_block_mask(
+                        float(puff["x"]),
+                        float(puff["y"]),
+                        grid_x,
+                        grid_y,
+                        obstacle,
+                    )
+                if self.obstacle_flow.wall_transmission == 0.0:
+                    contribution[blocked] = 0.0
+                else:
+                    contribution[blocked] *= self.obstacle_flow.wall_transmission
+            concentration += contribution
         if add_noise:
             concentration += self.rng.normal(
                 0.0, self.gas_noise_std, size=concentration.shape
             ).astype(np.float32)
+        if self.obstacle_flow.active:
+            for xmin, xmax, ymin, ymax in self.obstacles:
+                inside = (
+                    (grid_x >= xmin)
+                    & (grid_x <= xmax)
+                    & (grid_y >= ymin)
+                    & (grid_y <= ymax)
+                )
+                concentration[inside] = self.gas_background
         concentration = np.maximum(concentration, 0.0)
         return xs, ys, concentration.astype(np.float32, copy=False)
 
@@ -528,6 +973,7 @@ class DynamicPuffPlume:
             self._randomize_params()
         self._sample_wind()
         self._place_source_upwind()
+        self.obstacle_flow.prepare(self.wind_direction_base)
         self._warmup_puffs()
 
     # 兼容旧可视化/调试命名，后续新代码优先使用 metadata/concentration/grid/advance。
@@ -589,6 +1035,7 @@ class WhiskerOnlyPuffEnv(gym.Env):
             wind_speed_range=tuple(cfg.get("wind_speed_range", (0.06, 0.11))),
             wind_sampling_mode=str(cfg.get("wind_sampling_mode", "random")),
             obstacles=cfg.get("obstacles"),
+            obstacle_flow=cfg.get("obstacle_flow"),
             plume_overrides=cfg.get("plume_overrides"),
             world_half=self.world_half,
         )

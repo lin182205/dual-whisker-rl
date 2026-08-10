@@ -18,6 +18,15 @@ from dual_whisker_rl.envs.mobile_whisker_env import MobileWhiskerPuffEnv
 from train_whisker_only_ppo import ObservationHistoryWrapper
 
 
+FAST_OBSTACLE_FLOW = {
+    "resolution": 33,
+    "padding_cells": 2,
+    "max_iterations": 50,
+    "averaging_iterations": 10,
+    "convergence_tolerance": 1e-3,
+}
+
+
 def _expect_value_error(callback, description: str) -> None:
     try:
         callback()
@@ -107,6 +116,7 @@ def check_environment_observations() -> None:
         "scenario_mode": "fixed",
         "source_position": (-1.8, 0.0),
         "obstacles": [[-0.10, 0.20, -0.90, 0.90], [-1.04, -0.64, 0.64, 1.16]],
+        "obstacle_flow": FAST_OBSTACLE_FLOW,
         "include_lidar_observation": True,
     }
     obstacle_env = MobileWhiskerPuffEnv(obstacle_config)
@@ -138,6 +148,7 @@ def check_collision_termination() -> None:
             "scenario_mode": "fixed",
             "source_position": (-1.8, 0.0),
             "obstacles": [[0.22, 0.45, -0.30, 0.30]],
+            "obstacle_flow": FAST_OBSTACLE_FLOW,
             "include_lidar_observation": True,
         }
     )

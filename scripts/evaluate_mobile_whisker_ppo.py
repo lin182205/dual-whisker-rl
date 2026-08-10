@@ -73,7 +73,7 @@ def parse_args() -> argparse.Namespace:
         help="可视化 episode 的奖励分解 CSV；默认写入对应日志目录。",
     )
     parser.add_argument("--visualization-steps", type=int, default=200)
-    parser.add_argument("--visualization-resolution", type=int, default=100)
+    parser.add_argument("--visualization-resolution", type=int, default=200)
     parser.add_argument("--animation-stride", type=int, default=1)
     parser.add_argument("--animation-fps", type=int, default=6)
     parser.add_argument(
