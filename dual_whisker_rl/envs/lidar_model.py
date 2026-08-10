@@ -197,4 +197,3 @@ class SimulatedLidar2D:
         """把米制距离裁剪并归一化到 ``[0, 1]``。"""
         ranges = np.asarray(ranges_m, dtype=np.float32)
         return np.clip(ranges / self.max_range, 0.0, 1.0).astype(np.float32)
-
