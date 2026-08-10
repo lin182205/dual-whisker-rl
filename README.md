@@ -30,6 +30,16 @@ python scripts\evaluate_joint_ppo.py --episodes 50
 tensorboard --logdir results\tensorboard
 ```
 
+移动机器人二维雷达与障碍闭环示例：
+
+```powershell
+python scripts\diagnose_mobile_lidar.py
+python scripts\visualize_mobile_whisker_env.py --config configs\mobile_obstacles.yaml --no-model
+python scripts\train_mobile_whisker_ppo.py --config configs\mobile_obstacles.yaml --timesteps 50000 --n-envs 4
+```
+
+障碍配置会把12维雷达距离加入策略观测，需从新模型开始训练；不传该配置时，现有无障碍观测维度保持不变。
+
 VS Code workspace settings point Python to `.venv` and enable automatic virtual environment activation for new integrated terminals.
 
 Generated figures are saved to `results/figures/`.

@@ -9,6 +9,7 @@ import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
 
+from dual_whisker_rl.envs.lidar_model import validate_obstacles
 from dual_whisker_rl.envs.robot_model import RobotState
 from dual_whisker_rl.envs.sensor_model import AsymmetricGasSensor
 from dual_whisker_rl.envs.sensor_model import FirstOrderGasSensor
@@ -58,10 +59,10 @@ class DynamicPuffPlume:
             self.source_y = float(source_position[1])
         self.source_clearance = float(SOURCE_CLEARANCE)
         self.dt = float(dt)
-        self.obstacles = (
-            np.asarray(obstacles, dtype=np.float32).copy()
-            if obstacles is not None
-            else DEFAULT_OBSTACLES.copy()
+        self.obstacles = validate_obstacles(
+            DEFAULT_OBSTACLES if obstacles is None else obstacles,
+            world_min=self.world_min,
+            world_max=self.world_max,
         )
 
         self.gas_peak = 1.0
@@ -587,6 +588,7 @@ class WhiskerOnlyPuffEnv(gym.Env):
             gas_field_mode=str(cfg.get("gas_field_mode", "puff")),
             wind_speed_range=tuple(cfg.get("wind_speed_range", (0.06, 0.11))),
             wind_sampling_mode=str(cfg.get("wind_sampling_mode", "random")),
+            obstacles=cfg.get("obstacles"),
             plume_overrides=cfg.get("plume_overrides"),
             world_half=self.world_half,
         )

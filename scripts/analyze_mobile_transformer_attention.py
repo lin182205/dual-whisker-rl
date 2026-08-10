@@ -799,7 +799,8 @@ def main() -> None:
         env.close()
         raise ValueError(
             f"model observation shape {model.observation_space.shape} does not match "
-            f"history {extractor.history_length} * base dim {base_dim}"
+            f"history {extractor.history_length} * base dim {base_dim}; check "
+            "include_blank_age_observation and include_lidar_observation in --config"
         )
 
     thresholds = EventThresholds(

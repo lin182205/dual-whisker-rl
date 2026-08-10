@@ -1,7 +1,7 @@
 """移动机器人 + 双触须气源搜索可视化（静态 PNG + GIF）。
 
 复用 `visualize_whisker_only_env` 的羽流配色与触须/机器人绘制助手；本脚本负责
-3 元动作 rollout（[移动, 左扇区, 右扇区]）、到达/出界即停，并在信息框显示左右
+3 元动作 rollout（[移动, 左扇区, 右扇区]）、到达/出界/碰撞即停，并在信息框显示左右
 传感器浓度、L-R 差值及 mean|L-R|。给定 --model-path 时用 PPO 策略驱动（历史堆叠
 长度从模型反推），否则随机动作。
 """
@@ -19,6 +19,9 @@ import matplotlib
 matplotlib.use("Agg")
 
 import matplotlib.animation as animation
+from matplotlib.collections import LineCollection
+from matplotlib.patches import Circle
+from matplotlib.patches import Rectangle
 from matplotlib import pyplot as plt
 import numpy as np
 
@@ -83,6 +86,7 @@ def capture_rollout(env, model, history_length, steps, resolution, seed, determi
     left_pts = [ws0.left_point]
     right_pts = [ws0.right_point]
     sensors = [(0.0, 0.0)]
+    lidar_ranges = [np.asarray(info["lidar_ranges_m"], dtype=np.float32)]
     frames = [grid0.copy()]
     dists = [float(info["distance_to_source"])]
     total_reward = 0.0
@@ -104,12 +108,12 @@ def capture_rollout(env, model, history_length, steps, resolution, seed, determi
         left_pts.append(ws.left_point)
         right_pts.append(ws.right_point)
         sensors.append((float(info["left"]), float(info["right"])))
+        lidar_ranges.append(np.asarray(info["lidar_ranges_m"], dtype=np.float32))
         _, _, g = env.concentration_grid(resolution=resolution)
         frames.append(g.copy())
         dists.append(float(info["distance_to_source"]))
         if terminated or truncated:
-            reached = info["distance_to_source"] <= env.goal_radius
-            termination = "reached_goal" if reached else ("out_of_bounds" if info.get("out_of_bounds") else "timeout")
+            termination = str(info.get("termination_reason") or "timeout")
             break
 
     sensor_values = np.asarray(sensors, dtype=np.float32)
@@ -124,6 +128,7 @@ def capture_rollout(env, model, history_length, steps, resolution, seed, determi
         "right_points": np.asarray(right_pts, dtype=np.float32),
         "sensor_values": sensor_values,
         "sensor_differences": sensor_differences,
+        "lidar_ranges_m": np.asarray(lidar_ranges, dtype=np.float32),
         "distances": np.asarray(dists, dtype=np.float32),
         "reward": total_reward,
         "termination": termination,
@@ -166,6 +171,21 @@ def _setup_axes(ax, data, cmap, frame_idx, title):
         s=200, marker="*", color="#f2c53d", edgecolor="#2b2b2b",
         linewidth=1.0, zorder=7, label="Source",
     )
+    obstacles = np.asarray(data["map_metadata"]["obstacles"], dtype=np.float32)
+    for obstacle_index, (xmin, xmax, ymin, ymax) in enumerate(obstacles):
+        ax.add_patch(
+            Rectangle(
+                (float(xmin), float(ymin)),
+                float(xmax - xmin),
+                float(ymax - ymin),
+                facecolor="#656565",
+                edgecolor="#252525",
+                linewidth=1.2,
+                alpha=0.82,
+                zorder=4,
+                label="Obstacle" if obstacle_index == 0 else None,
+            )
+        )
     wmin = float(data["map_metadata"]["world_min"])
     wmax = float(data["map_metadata"]["world_max"])
     ax.set_xlim(wmin, wmax)
@@ -175,6 +195,51 @@ def _setup_axes(ax, data, cmap, frame_idx, title):
     ax.set_ylabel("y (m)")
     ax.set_title(title, fontsize=15, pad=10)
     return heatmap, vmax
+
+
+def _lidar_segments(data, frame_idx):
+    """把当前帧雷达距离转换为世界坐标线段。"""
+    origin = data["trajectory"][frame_idx]
+    heading = float(data["headings"][frame_idx])
+    relative_angles = np.asarray(
+        data["map_metadata"]["lidar"]["relative_angles_rad"],
+        dtype=np.float32,
+    )
+    ranges = data["lidar_ranges_m"][frame_idx]
+    segments = []
+    for relative_angle, distance in zip(relative_angles, ranges):
+        angle = heading + float(relative_angle)
+        endpoint = (
+            float(origin[0]) + float(distance) * math.cos(angle),
+            float(origin[1]) + float(distance) * math.sin(angle),
+        )
+        segments.append([(float(origin[0]), float(origin[1])), endpoint])
+    return segments
+
+
+def draw_lidar_and_footprint(ax, data, frame_idx):
+    lidar = LineCollection(
+        _lidar_segments(data, frame_idx),
+        colors="#32a6a8",
+        linewidths=0.9,
+        alpha=0.48,
+        zorder=4.5,
+        label="Lidar",
+    )
+    ax.add_collection(lidar)
+    center = data["trajectory"][frame_idx]
+    footprint = Circle(
+        (float(center[0]), float(center[1])),
+        radius=float(data["map_metadata"]["robot_radius"]),
+        fill=False,
+        edgecolor="#111111",
+        linewidth=1.2,
+        alpha=0.9,
+        zorder=5.5,
+        label="Robot footprint",
+    )
+    ax.add_patch(footprint)
+    return lidar, footprint
 
 
 def render_static(data, path, title):
@@ -190,6 +255,7 @@ def render_static(data, path, title):
     ax.scatter(traj[idx, 0], traj[idx, 1], s=95, color="#2b2b2b", edgecolor="white", linewidth=1.3, zorder=6, label="Robot")
     draw_whisker_artists(ax, traj, data["left_points"], data["right_points"], idx)
     draw_robot_heading_marker(ax, traj[idx], float(data["headings"][idx]))
+    draw_lidar_and_footprint(ax, data, idx)
     left_v, right_v = data["sensor_values"][idx]
     difference = float(data["sensor_differences"][idx])
     mean_difference, mean_abs_difference = summarize_sensor_differences(
@@ -200,6 +266,7 @@ def render_static(data, path, title):
         "\n".join([
             f"termination = {data['termination']}",
             f"steps = {idx}   dist = {data['distances'][idx]:.3f} m",
+            f"min lidar = {float(np.min(data['lidar_ranges_m'][idx])):.3f} m",
             f"sensor  L {left_v:.3f}   R {right_v:.3f}",
             f"delta(L-R) = {difference:+.3f}",
             f"mean delta = {mean_difference:+.3f}   mean|delta| = {mean_abs_difference:.3f}",
@@ -232,6 +299,7 @@ def render_animation(data, path, title, stride, fps):
     robot = ax.scatter([traj[0, 0]], [traj[0, 1]], s=95, color="#2b2b2b", edgecolor="white", linewidth=1.3, zorder=6, label="Robot")
     left_line, right_line, left_tip, right_tip = draw_whisker_artists(ax, traj, data["left_points"], data["right_points"], 0)
     hs, ha = draw_robot_heading_marker(ax, traj[0], float(data["headings"][0]))
+    lidar, footprint = draw_lidar_and_footprint(ax, data, 0)
     txt = ax.text(0.02, 0.98, "", transform=ax.transAxes, ha="left", va="top", fontsize=9.5,
                   family="monospace", bbox=dict(boxstyle="round,pad=0.5", facecolor="white", alpha=0.72, edgecolor="#d8d2c7"), zorder=8)
     ax.legend(loc="lower right", fontsize=8, framealpha=0.85)
@@ -241,6 +309,8 @@ def render_animation(data, path, title, stride, fps):
         heatmap.set_data(frames[fi])
         line.set_data(traj[: fi + 1, 0], traj[: fi + 1, 1])
         robot.set_offsets(traj[fi])
+        lidar.set_segments(_lidar_segments(data, fi))
+        footprint.center = (float(traj[fi, 0]), float(traj[fi, 1]))
         end = (traj[fi, 0] + 0.07 * math.cos(data["headings"][fi]), traj[fi, 1] + 0.07 * math.sin(data["headings"][fi]))
         hs.set_positions((float(traj[fi, 0]), float(traj[fi, 1])), end)
         ha.set_positions((float(traj[fi, 0]), float(traj[fi, 1])), end)
@@ -256,11 +326,12 @@ def render_animation(data, path, title, stride, fps):
         )
         txt.set_text(
             f"step {fi}   dist {data['distances'][fi]:.3f}\n"
+            f"min lidar {float(np.min(data['lidar_ranges_m'][fi])):.3f} m\n"
             f"sensor L {lv:.3f} R {rv:.3f}\n"
             f"delta(L-R) {difference:+.3f}   "
             f"mean|delta| {running_mean_abs_difference:.3f}"
         )
-        return heatmap, line, robot, hs, ha, left_line, right_line, left_tip, right_tip, txt
+        return heatmap, line, robot, lidar, footprint, hs, ha, left_line, right_line, left_tip, right_tip, txt
 
     anim = animation.FuncAnimation(fig, update, frames=frame_ids, interval=int(1000 / fps), blit=False)
     anim.save(path, writer=animation.PillowWriter(fps=fps), dpi=120)
@@ -321,6 +392,7 @@ def render_static_rollouts(rollouts, path, title):
             idx,
         )
         draw_robot_heading_marker(ax, traj[idx], float(data["headings"][idx]))
+        draw_lidar_and_footprint(ax, data, idx)
         left_v, right_v = data["sensor_values"][idx]
         difference = float(data["sensor_differences"][idx])
         mean_difference, mean_abs_difference = summarize_sensor_differences(
@@ -333,6 +405,7 @@ def render_static_rollouts(rollouts, path, title):
                 [
                     f"termination = {data['termination']}",
                     f"steps = {idx}   dist = {data['distances'][idx]:.3f} m",
+                    f"min lidar = {float(np.min(data['lidar_ranges_m'][idx])):.3f} m",
                     f"sensor  L {left_v:.3f}   R {right_v:.3f}",
                     f"delta(L-R) = {difference:+.3f}",
                     f"mean delta = {mean_difference:+.3f}",
@@ -408,6 +481,7 @@ def render_animation_rollouts(rollouts, path, title, stride, fps):
         hs, ha = draw_robot_heading_marker(
             ax, traj[0], float(data["headings"][0])
         )
+        lidar, footprint = draw_lidar_and_footprint(ax, data, 0)
         txt = ax.text(
             0.02,
             0.98,
@@ -435,6 +509,8 @@ def render_animation_rollouts(rollouts, path, title, stride, fps):
                 "heatmap": heatmap,
                 "line": line,
                 "robot": robot,
+                "lidar": lidar,
+                "footprint": footprint,
                 "heading_shadow": hs,
                 "heading_arrow": ha,
                 "left_line": left_line,
@@ -457,6 +533,11 @@ def render_animation_rollouts(rollouts, path, title, stride, fps):
             state["heatmap"].set_data(data["frames"][fi])
             state["line"].set_data(traj[: fi + 1, 0], traj[: fi + 1, 1])
             state["robot"].set_offsets([traj[fi]])
+            state["lidar"].set_segments(_lidar_segments(data, fi))
+            state["footprint"].center = (
+                float(traj[fi, 0]),
+                float(traj[fi, 1]),
+            )
             end = (
                 traj[fi, 0] + 0.07 * math.cos(data["headings"][fi]),
                 traj[fi, 1] + 0.07 * math.sin(data["headings"][fi]),
@@ -481,6 +562,7 @@ def render_animation_rollouts(rollouts, path, title, stride, fps):
             )
             state["text"].set_text(
                 f"step {fi}   dist {data['distances'][fi]:.3f}\n"
+                f"min lidar {float(np.min(data['lidar_ranges_m'][fi])):.3f} m\n"
                 f"sensor L {left_value:.3f} R {right_value:.3f}\n"
                 f"delta(L-R) {difference:+.3f}\n"
                 f"mean|delta| {mean_abs_difference:.3f}"
@@ -490,6 +572,8 @@ def render_animation_rollouts(rollouts, path, title, stride, fps):
                     state["heatmap"],
                     state["line"],
                     state["robot"],
+                    state["lidar"],
+                    state["footprint"],
                     state["heading_shadow"],
                     state["heading_arrow"],
                     state["left_line"],
@@ -531,7 +615,14 @@ def main() -> None:
         _ = TransformerHistoryExtractor
         model = PPO.load(str(args.model_path))
         base = int(env.observation_space.shape[0])
-        history_length = int(model.observation_space.shape[0]) // base
+        stacked = int(model.observation_space.shape[0])
+        if stacked % base != 0:
+            raise ValueError(
+                f"model observation dim {stacked} is not divisible by environment "
+                f"base dim {base}; check include_blank_age_observation and "
+                "include_lidar_observation in --config"
+            )
+        history_length = stacked // base
         print(f"loaded_model={args.model_path} history_length={history_length}")
     else:
         print("no model -> random actions")

@@ -169,6 +169,8 @@ def write_reward_breakdown(
         final_components = trajectory[-1]["reward_components"]
         if result == "success":
             termination = "success"
+        elif bool(trajectory[-1].get("collision", False)):
+            termination = "collision"
         elif float(final_components.get("out_of_bounds_penalty", 0.0)) < 0.0:
             termination = "out_of_bounds"
         else:
@@ -301,6 +303,7 @@ def main() -> None:
         "include_blank_age_observation": (
             probe_env.include_blank_age_observation
         ),
+        "include_lidar_observation": probe_env.include_lidar_observation,
         "blank_age_clip_s": probe_env.blank_age_clip_s,
         "observation_field_names": probe_env.observation_field_names,
     }
@@ -319,9 +322,10 @@ def main() -> None:
     if stacked_dim % base_dim != 0:
         raise ValueError(
             f"模型观测维度 {stacked_dim} 不是环境维度 {base_dim} 的整数倍。"
-            "新 mobile 环境默认加入 blank_age（单帧 16 维）；评估旧 15 维模型时，"
-            "请在 --config 指向的 YAML 中设置 "
-            "include_blank_age_observation: false。"
+            "请确认 --config 与训练时的 include_blank_age_observation 和 "
+            "include_lidar_observation 设置一致。当前配置："
+            f"blank_age={probe_env.include_blank_age_observation}, "
+            f"lidar={probe_env.include_lidar_observation}。"
         )
     history_length = stacked_dim // base_dim
     print(f"history_length={history_length} (base={base_dim}, stacked={stacked_dim})")

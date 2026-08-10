@@ -144,6 +144,8 @@ def evaluate_policy(
         ]
         if final_distance <= env.unwrapped.goal_radius:
             termination = "success"
+        elif bool(info.get("collision", False)):
+            termination = "collision"
         elif bool(info.get("out_of_bounds", False)):
             termination = "out_of_bounds"
         else:

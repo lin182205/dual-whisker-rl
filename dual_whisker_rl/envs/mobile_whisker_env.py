@@ -6,7 +6,8 @@
 
 动作空间 `MultiDiscrete([6, 10, 10])` = [移动动作, 左扇区, 右扇区]，与硬件串口协议
 兼容（移动交给底盘、扇区对应 STEP 命令）。观测在父类 12 维硬件特征上追加机器人自身
-可得的本体感受（朝向 cos/sin、上一步移动动作）和可选 blank_age，不含真实风向/气源方向等特权信息；
+可得的本体感受（朝向 cos/sin、上一步移动动作）、可选 blank_age 和可选二维雷达，
+不含真实风向/气源方向等特权信息；
 奖励可用真实气源距离（仅训练期）。
 """
 
@@ -19,6 +20,8 @@ from typing import Any
 import numpy as np
 from gymnasium import spaces
 
+from dual_whisker_rl.envs.lidar_model import circle_intersects_obstacles
+from dual_whisker_rl.envs.lidar_model import SimulatedLidar2D
 from dual_whisker_rl.envs.robot_model import DifferentialDriveRobot
 from dual_whisker_rl.envs.robot_model import RobotState
 from dual_whisker_rl.envs.whisker_only_env import WhiskerOnlyPuffEnv
@@ -35,6 +38,7 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         "stagnation_penalty",
         "goal_bonus",
         "out_of_bounds_penalty",
+        "collision_penalty",
     )
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
@@ -163,6 +167,7 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         self.goal_bonus = 50.0
         self.mobile_time_penalty = float(cfg.get("mobile_time_penalty", 0.03))
         self.oob_penalty = float(cfg.get("oob_penalty", 25.0))
+        self.collision_penalty = float(cfg.get("collision_penalty", 25.0))
         self.best_concentration_reward_scale = float(
             cfg.get("best_concentration_reward_scale", 3.0)
         )
@@ -188,6 +193,10 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         if not isinstance(include_blank_age_value, (bool, np.bool_)):
             raise ValueError("include_blank_age_observation must be a boolean")
         self.include_blank_age_observation = bool(include_blank_age_value)
+        include_lidar_value = cfg.get("include_lidar_observation", False)
+        if not isinstance(include_lidar_value, (bool, np.bool_)):
+            raise ValueError("include_lidar_observation must be a boolean")
+        self.include_lidar_observation = bool(include_lidar_value)
         self.blank_age_clip_s = float(cfg.get("blank_age_clip_s", 10.0))
         self.reacquisition_min_blank_s = float(
             cfg.get("reacquisition_min_blank_s", 1.0)
@@ -239,6 +248,7 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         nonnegative_reward_values = {
             "progress_reward_scale": self.progress_reward_scale,
             "oob_penalty": self.oob_penalty,
+            "collision_penalty": self.collision_penalty,
             "best_concentration_reward_scale": self.best_concentration_reward_scale,
             "concentration_progress_epsilon": self.concentration_progress_epsilon,
             "position_progress_epsilon": self.position_progress_epsilon,
@@ -278,13 +288,17 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
             self.max_episode_time_cost
             + self.positive_auxiliary_reward_upper_bound
         )
-        if self.oob_penalty + 1e-12 < self.minimum_oob_penalty:
-            raise ValueError(
-                "oob_penalty must cover the maximum episode time cost plus all "
-                "positive auxiliary rewards, otherwise early out-of-bounds can be "
-                "more profitable than continuing: "
-                f"need >= {self.minimum_oob_penalty:.6f}, got {self.oob_penalty:.6f}"
-            )
+        for name, value in (
+            ("oob_penalty", self.oob_penalty),
+            ("collision_penalty", self.collision_penalty),
+        ):
+            if value + 1e-12 < self.minimum_oob_penalty:
+                raise ValueError(
+                    f"{name} must cover the maximum episode time cost plus all "
+                    "positive auxiliary rewards, otherwise early termination can be "
+                    "more profitable than continuing: "
+                    f"need >= {self.minimum_oob_penalty:.6f}, got {value:.6f}"
+                )
 
         # 仅用于评估主动采样比例，不参与奖励计算。
         self.whisker_motion_epsilon_rad = float(
@@ -297,7 +311,32 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         self.width = float(self.world_max - self.world_min)
         self.height = float(self.world_max - self.world_min)
 
-        # 观测 = 父 12 维硬件 + 3 维本体感受；新策略默认再看到归一化 blank_age。
+        self.robot_radius = float(cfg.get("robot_radius", 0.08))
+        if (
+            not math.isfinite(self.robot_radius)
+            or self.robot_radius <= 0.0
+            or self.robot_radius >= self.world_half
+        ):
+            raise ValueError("robot_radius must be positive and smaller than world_half")
+        if self.scenario_mode == "fixed" and not self.plume.is_position_valid(
+            self.plume.source_x,
+            self.plume.source_y,
+            margin=self.plume.source_clearance,
+        ):
+            raise ValueError("fixed source_position must not overlap an obstacle")
+        self.lidar = SimulatedLidar2D(
+            num_beams=cfg.get("lidar_num_beams", 12),
+            fov_deg=cfg.get("lidar_fov_deg", 180.0),
+            max_range=cfg.get("lidar_max_range", 0.6),
+            noise_std=cfg.get("lidar_noise_std", 0.0),
+        )
+        self._last_lidar_ranges_m = np.full(
+            self.lidar.num_beams,
+            self.lidar.max_range,
+            dtype=np.float32,
+        )
+
+        # 观测 = 父 12 维硬件 + 3 维本体感受 + 可选 blank_age/二维雷达。
         base_low = self.observation_builder.low
         base_high = self.observation_builder.high
         low = np.concatenate([base_low, np.array([-1.0, -1.0, 0.0], dtype=np.float32)])
@@ -305,6 +344,13 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         if self.include_blank_age_observation:
             low = np.concatenate([low, np.array([0.0], dtype=np.float32)])
             high = np.concatenate([high, np.array([1.0], dtype=np.float32)])
+        if self.include_lidar_observation:
+            low = np.concatenate(
+                [low, np.zeros(self.lidar.num_beams, dtype=np.float32)]
+            )
+            high = np.concatenate(
+                [high, np.ones(self.lidar.num_beams, dtype=np.float32)]
+            )
         self.observation_space = spaces.Box(low=low, high=high, dtype=np.float32)
         self.observation_field_names = self.observation_builder.field_names + [
             "heading_cos",
@@ -313,6 +359,10 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         ]
         if self.include_blank_age_observation:
             self.observation_field_names.append("blank_age_norm")
+        if self.include_lidar_observation:
+            self.observation_field_names.extend(
+                f"lidar_{index:02d}_norm" for index in range(self.lidar.num_beams)
+            )
 
         self.last_move = self.stop_action
         self.prev_distance = 0.0
@@ -362,7 +412,11 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         for _ in range(128):
             x = float(self.rng.uniform(0.35 * wh, wh - 0.15))
             y = float(self.rng.uniform(-(wh - 0.15), wh - 0.15))
-            if not self.plume.is_position_valid(x, y, margin=0.16):
+            if not self.plume.is_position_valid(
+                x,
+                y,
+                margin=max(0.16, self.robot_radius),
+            ):
                 continue
             if math.hypot(x - self.plume.source_x, y - self.plume.source_y) < 0.15:
                 continue
@@ -371,9 +425,16 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
             self.robot.reset(x, y, heading)
             return self.robot.state
         # 兜底：场地中偏下风处。
-        self.initial_heading_mode = "source_facing"
-        self.robot.reset(0.5 * wh, 0.0, math.pi)
-        return self.robot.state
+        fallback_x = 0.5 * wh
+        if self.plume.is_position_valid(
+            fallback_x,
+            0.0,
+            margin=max(0.16, self.robot_radius),
+        ):
+            self.initial_heading_mode = "source_facing"
+            self.robot.reset(fallback_x, 0.0, math.pi)
+            return self.robot.state
+        raise RuntimeError("could not place robot in a valid fixed-scenario position")
 
     def _sample_randomized_initial_robot_pose(self) -> RobotState:
         """在当前平均风的下风区域采样有效起点和混合分布朝向。"""
@@ -408,7 +469,11 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         )
 
     def _is_valid_randomized_start(self, x: float, y: float) -> bool:
-        if not self.plume.is_position_valid(x, y, margin=0.16):
+        if not self.plume.is_position_valid(
+            x,
+            y,
+            margin=max(0.16, self.robot_radius),
+        ):
             return False
         return math.hypot(x - self.plume.source_x, y - self.plume.source_y) > max(
             0.15,
@@ -465,8 +530,52 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
             "source_facing_jitter_rad": self.scenario_source_facing_jitter,
         }
 
+    def _scan_lidar(self) -> np.ndarray:
+        """按当前机器人位姿更新并返回米制雷达距离。"""
+        self._last_lidar_ranges_m = self.lidar.scan(
+            x=self.robot_state.x,
+            y=self.robot_state.y,
+            heading=self.robot_state.heading,
+            obstacles=self.plume.obstacles,
+            world_min=self.world_min,
+            world_max=self.world_max,
+            rng=self.rng,
+        )
+        return self._last_lidar_ranges_m.copy()
+
+    def get_lidar_scan(self, *, normalized: bool = False) -> np.ndarray:
+        """公开当前雷达扫描；用于诊断和可视化，不依赖策略观测开关。"""
+        ranges_m = self._scan_lidar()
+        if normalized:
+            return self.lidar.normalize(ranges_m)
+        return ranges_m
+
+    def _lidar_info(self) -> dict[str, Any]:
+        ranges_m = self._last_lidar_ranges_m.copy()
+        return {
+            "lidar_ranges_m": ranges_m,
+            "lidar_ranges_normalized": self.lidar.normalize(ranges_m),
+            "min_lidar_range_m": float(np.min(ranges_m)),
+        }
+
+    def get_map_metadata(self) -> dict[str, Any]:
+        metadata = super().get_map_metadata()
+        metadata.update(
+            {
+                "robot_radius": self.robot_radius,
+                "lidar": {
+                    "num_beams": self.lidar.num_beams,
+                    "fov_deg": self.lidar.fov_deg,
+                    "max_range": self.lidar.max_range,
+                    "noise_std": self.lidar.noise_std,
+                    "relative_angles_rad": self.lidar.relative_angles.copy(),
+                },
+            }
+        )
+        return metadata
+
     def _build_observation(self) -> np.ndarray:
-        """构造硬件特征、本体感受和可选 blank_age 观测。"""
+        """构造硬件特征、本体感受、blank_age 和可选雷达观测。"""
         base = super()._build_observation()
         heading = self.robot_state.heading
         proprio = np.array(
@@ -482,6 +591,9 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
             blank_age_s = self.blank_age_steps * self.dt
             blank_age_norm = min(blank_age_s / self.blank_age_clip_s, 1.0)
             parts.append(np.array([blank_age_norm], dtype=np.float32))
+        lidar_ranges_m = self._scan_lidar()
+        if self.include_lidar_observation:
+            parts.append(self.lidar.normalize(lidar_ranges_m))
         obs = np.concatenate(parts).astype(np.float32)
         self._last_obs = obs
         return obs
@@ -627,6 +739,9 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
                 "initial_heading_mode": self.initial_heading_mode,
                 "wind_direction": self.plume.wind_direction,
                 "source": (self.plume.source_x, self.plume.source_y),
+                "collision": False,
+                "termination_reason": None,
+                **self._lidar_info(),
                 **self._reset_odor_search_info(),
             }
         )
@@ -647,13 +762,28 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         self.last_right_sector = right_sector
 
         # 先推进机器人位姿，再采样触须（触须点由 whisker_model 依位姿自动计算）。
-        previous_x = self.robot_state.x
-        previous_y = self.robot_state.y
+        previous_state = RobotState(
+            self.robot_state.x,
+            self.robot_state.y,
+            self.robot_state.heading,
+        )
         self.robot_state = self.robot.step(move)
+        collision = circle_intersects_obstacles(
+            self.robot_state.x,
+            self.robot_state.y,
+            self.robot_radius,
+            self.plume.obstacles,
+        )
+        if collision:
+            self.robot_state = self.robot.reset(
+                previous_state.x,
+                previous_state.y,
+                previous_state.heading,
+            )
         position_displacement = float(
             math.hypot(
-                self.robot_state.x - previous_x,
-                self.robot_state.y - previous_y,
+                self.robot_state.x - previous_state.x,
+                self.robot_state.y - previous_state.y,
             )
         )
         self.plume.advance()
@@ -703,10 +833,28 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
             whisker_reacquisition_rewarded=bool(
                 odor_search_info["whisker_reacquisition_rewarded"]
             ),
+            collision=collision,
         )
         reward = float(sum(reward_components.values()))
 
         self.step_count += 1
+        self.prev_distance = distance
+        self.prev_left = left
+        self.prev_right = right
+        obs = self._build_observation()
+        terminated = bool(reached or oob or collision)
+        truncated = self.step_count >= self.max_steps
+        if reached:
+            termination_reason = "reached_goal"
+        elif collision:
+            termination_reason = "collision"
+        elif oob:
+            termination_reason = "out_of_bounds"
+        elif truncated:
+            termination_reason = "timeout"
+        else:
+            termination_reason = None
+        lidar_info = self._lidar_info()
         self.trajectory.append(
             {
                 "x": self.robot_state.x,
@@ -728,17 +876,15 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
                 "best_concentration": self.best_concentration,
                 "position_displacement": position_displacement,
                 "stagnation_steps": self.stagnation_steps,
+                **lidar_info,
+                "collision": collision,
+                "termination_reason": termination_reason,
                 **odor_search_info,
                 "reward": reward,
                 "reward_components": reward_components,
             }
         )
 
-        self.prev_distance = distance
-        self.prev_left = left
-        self.prev_right = right
-
-        obs = self._build_observation()
         info = self._current_info()
         info.update(
             {
@@ -763,12 +909,13 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
                 "stagnation_steps": self.stagnation_steps,
                 **odor_search_info,
                 "out_of_bounds": oob,
+                "collision": collision,
+                "termination_reason": termination_reason,
                 "is_success": reached,
+                **lidar_info,
                 "reward_components": reward_components,
             }
         )
-        terminated = bool(reached or oob)
-        truncated = self.step_count >= self.max_steps
         return obs, reward, terminated, truncated, info
 
     def _source_search_reward(
@@ -782,6 +929,7 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         *,
         reacquisition_event: bool = False,
         whisker_reacquisition_rewarded: bool = False,
+        collision: bool = False,
     ) -> float:
         return float(
             sum(
@@ -796,6 +944,7 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
                     whisker_reacquisition_rewarded=(
                         whisker_reacquisition_rewarded
                     ),
+                    collision=collision,
                 ).values()
             )
         )
@@ -811,6 +960,7 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         *,
         reacquisition_event: bool = False,
         whisker_reacquisition_rewarded: bool = False,
+        collision: bool = False,
     ) -> dict[str, float]:
         """计算可望远镜求和、不能靠原地保持高浓度重复刷取的奖励。"""
         clipped_concentration = float(
@@ -835,7 +985,7 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         distance_progressed = (
             distance_improvement > self.distance_progress_epsilon
         )
-        terminal = reached or oob
+        terminal = reached or oob or collision
         if (
             terminal
             or position_progressed
@@ -868,4 +1018,7 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
             ),
             "goal_bonus": float(self.goal_bonus if reached else 0.0),
             "out_of_bounds_penalty": float(-self.oob_penalty if oob else 0.0),
+            "collision_penalty": float(
+                -self.collision_penalty if collision else 0.0
+            ),
         }

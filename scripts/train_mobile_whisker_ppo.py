@@ -541,10 +541,12 @@ def train(args: argparse.Namespace) -> PPO:
             raise ValueError(
                 "checkpoint observation shape does not match the current mobile "
                 f"environment: checkpoint={checkpoint_shape}, "
-                f"environment={environment_shape}. blank_age makes the default "
-                "base observation 16-dimensional; start a new run, or set "
-                "include_blank_age_observation=false only when evaluating/resuming "
-                "a legacy 15-dimensional model."
+                f"environment={environment_shape}, base_observation_dim="
+                f"{base_observation_dim}, include_blank_age_observation="
+                f"{env.envs[0].unwrapped.include_blank_age_observation}, "
+                "include_lidar_observation="
+                f"{env.envs[0].unwrapped.include_lidar_observation}. Use the same "
+                "observation config as the checkpoint or start a new run."
             )
         model.set_env(env, force_reset=True)
         starting_num_timesteps = int(model.num_timesteps)
@@ -666,8 +668,17 @@ def save_run_metadata(
         "include_blank_age_observation": (
             metadata_env.include_blank_age_observation
         ),
+        "include_lidar_observation": metadata_env.include_lidar_observation,
         "blank_age_clip_s": metadata_env.blank_age_clip_s,
         "observation_field_names": metadata_env.observation_field_names,
+        "lidar": {
+            "num_beams": metadata_env.lidar.num_beams,
+            "fov_deg": metadata_env.lidar.fov_deg,
+            "max_range": metadata_env.lidar.max_range,
+            "noise_std": metadata_env.lidar.noise_std,
+            "robot_radius": metadata_env.robot_radius,
+            "obstacles": metadata_env.plume.obstacles.tolist(),
+        },
         "sim_sensor_scale": metadata_env.observation_builder.config.scale,
         "init_pose_mode": metadata_env.init_pose_mode,
         "scenario": metadata_env.scenario_metadata(),
@@ -677,6 +688,7 @@ def save_run_metadata(
             "progress_reward_scale": metadata_env.progress_reward_scale,
             "goal_bonus": metadata_env.goal_bonus,
             "oob_penalty": metadata_env.oob_penalty,
+            "collision_penalty": metadata_env.collision_penalty,
             "best_concentration_reward_scale": (
                 metadata_env.best_concentration_reward_scale
             ),
