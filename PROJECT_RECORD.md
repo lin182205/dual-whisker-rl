@@ -1636,3 +1636,16 @@ README 已增加 Linux 云服务器建环境、后台训练、TensorBoard SSH �
 - 障碍配置完成256-step、history=2、MLP PPO smoke，训练约123–140 fps；metadata 正确记录 base/stacked=`28/56` 和实际 LBM 求解状态。该 smoke 只证明训练链路连通，不代表策略已经学会绕障找源。
 
 由于障碍场的气味动力学已经改变，旧障碍 checkpoint 即使观测维度相同也不应与新模型直接混合续训或作为公平结果比较；正式实验应新开 run，并加入 `obstacle_flow.enabled=false` 的同 seed 消融。
+
+## 29. Mobile 训练入口默认启用障碍与雷达
+
+`scripts/train_mobile_whisker_ppo.py` 的 `--config` 默认值由空配置改为
+`configs/mobile_obstacles.yaml`。因此直接运行移动训练脚本时，会默认加载矩形障碍、D2Q9 LBM
+障碍绕流、碰撞闭环以及 12 束二维雷达策略观测；场景初始化模式沿用该配置中的 `fixed`。
+`--scenario-mode` 的帮助文字同步改为“不传时沿用配置文件设置”，避免继续暗示默认一定为
+`randomized`。
+
+该改动只改变训练入口的默认配置，不改变 `MobileWhiskerPuffEnv` 类本身的无参默认行为，
+也不改变评估或可视化脚本的默认配置。需要训练无障碍版本时，应显式传入一份无障碍配置。
+障碍雷达观测单帧为 28 维，history=20 时为 560 维，必须新开模型，不能续训旧的无障碍
+checkpoint。

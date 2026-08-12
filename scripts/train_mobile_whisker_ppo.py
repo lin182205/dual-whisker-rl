@@ -238,12 +238,17 @@ class RewardComponentsTensorboardCallback(BaseCallback):
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=Path, default=None)
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=Path("configs/mobile_obstacles.yaml"),
+        help="环境配置；默认启用矩形障碍、LBM 绕流和 12 束二维雷达观测。",
+    )
     parser.add_argument(
         "--scenario-mode",
         choices=("randomized", "fixed"),
         default=None,
-        help="覆盖配置中的移动场景初始化模式；默认使用 randomized。",
+        help="覆盖配置中的移动场景初始化模式；不传时沿用配置文件设置。",
     )
     parser.add_argument("--timesteps", type=int, default=300_000)
     parser.add_argument("--seed", type=int, default=None)
