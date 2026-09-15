@@ -1,0 +1,13 @@
+# E4 formal profile is also available without this file via --profile formal.
+plume_model: dynamic
+scenario_mode: randomized
+world_bounds: [-2.5, 2.5]
+domain_randomization: false
+vec_env_backend: subproc
+wind_speed_range: [0.12, 0.20]
+max_steps: 400
+b1_hit_threshold: 0.08
+b1_trend_threshold: -0.02
+b1_contrast_threshold: 0.03
+b1_search_period: 8
+b1_scan_period: 2

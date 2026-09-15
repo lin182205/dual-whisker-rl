@@ -1,4 +1,4 @@
-"""移动机器人 + 双触须气源搜索可视化（静态 PNG + GIF）。
+"""移动机器人 + 双触须气源搜索可视化（静态 PNG + MP4）。
 
 复用 `visualize_whisker_only_env` 的羽流配色与触须/机器人绘制助手；本脚本负责
 3 元动作 rollout（[移动, 左扇区, 右扇区]）、到达/出界即停，并在信息框显示左右
@@ -28,6 +28,7 @@ if str(ROOT) not in sys.path:
 
 from dual_whisker_rl.envs import MobileWhiskerPuffEnv
 from dual_whisker_rl.paths import resolve_path_args
+from dual_whisker_rl.visualization import save_matplotlib_animation
 from train_whisker_only_ppo import load_config
 from visualize_whisker_only_env import build_plume_colormap
 from visualize_whisker_only_env import draw_robot_heading_marker
@@ -52,18 +53,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=3)
     parser.add_argument("--steps", type=int, default=200)
     parser.add_argument("--resolution", type=int, default=100)
-    parser.add_argument("--stride", type=int, default=1, help="GIF 每隔多少步取一帧。")
+    parser.add_argument("--stride", type=int, default=1, help="动画每隔多少步取一帧。")
     parser.add_argument("--stochastic", action="store_true")
     parser.add_argument("--domain-randomization", action="store_true")
     parser.add_argument("--png-path", type=Path, default=Path("results/figures/mobile_whisker_env.png"))
-    parser.add_argument("--gif-path", type=Path, default=Path("results/figures/mobile_whisker_env.gif"))
+    parser.add_argument(
+        "--animation-path",
+        "--gif-path",
+        dest="animation_path",
+        type=Path,
+        default=Path("results/figures/mobile_whisker_env.mp4"),
+        help="动画输出路径；扩展名支持 .mp4 或 .gif，--gif-path 为兼容别名。",
+    )
     parser.add_argument("--title", type=str, default="Mobile Whisker Source Search")
     return resolve_path_args(
         parser.parse_args(),
         "model_path",
         "config",
         "png_path",
-        "gif_path",
+        "animation_path",
     )
 
 
@@ -263,7 +271,7 @@ def render_animation(data, path, title, stride, fps):
         return heatmap, line, robot, hs, ha, left_line, right_line, left_tip, right_tip, txt
 
     anim = animation.FuncAnimation(fig, update, frames=frame_ids, interval=int(1000 / fps), blit=False)
-    anim.save(path, writer=animation.PillowWriter(fps=fps), dpi=120)
+    save_matplotlib_animation(anim, path, fps=fps, dpi=120)
     plt.close(fig)
 
 
@@ -364,7 +372,7 @@ def render_static_rollouts(rollouts, path, title):
 
 
 def render_animation_rollouts(rollouts, path, title, stride, fps):
-    """在同一 GIF 中并排播放一个或两个评估 episode。"""
+    """在同一动画中并排播放一个或两个评估 episode。"""
     if not 1 <= len(rollouts) <= 2:
         raise ValueError("render_animation_rollouts expects one or two rollouts")
     if len(rollouts) == 1:
@@ -509,7 +517,7 @@ def render_animation_rollouts(rollouts, path, title, stride, fps):
         interval=int(1000 / fps),
         blit=False,
     )
-    anim.save(path, writer=animation.PillowWriter(fps=fps), dpi=100)
+    save_matplotlib_animation(anim, path, fps=fps, dpi=100)
     plt.close(fig)
 
 
@@ -538,7 +546,7 @@ def main() -> None:
 
     data = capture_rollout(env, model, history_length, args.steps, args.resolution, args.seed, not args.stochastic)
     render_static(data, args.png_path, args.title)
-    render_animation(data, args.gif_path, args.title, args.stride, fps=6)
+    render_animation(data, args.animation_path, args.title, args.stride, fps=6)
     mean_difference, mean_abs_difference = summarize_sensor_differences(
         data["sensor_differences"]
     )
@@ -552,7 +560,7 @@ def main() -> None:
         f"{mean_abs_difference:.6f}"
     )
     print(f"saved_png={args.png_path}")
-    print(f"saved_gif={args.gif_path}")
+    print(f"saved_animation={args.animation_path}")
 
 
 if __name__ == "__main__":

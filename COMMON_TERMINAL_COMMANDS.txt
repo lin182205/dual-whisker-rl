@@ -54,11 +54,11 @@ python scripts/evaluate_mobile_whisker_ppo.py --model-path results/models/mobile
 
 python scripts/evaluate_mobile_whisker_ppo.py --model-path results/models/mobile_whisker_gru_ppo.zip --episodes 100 --domain-randomization --no-visualization
 
-python scripts/evaluate_mobile_whisker_ppo.py --model-path results/models/mobile_whisker_gru_ppo.zip --json-path results/logs/custom_eval/metrics.json --png-path results/figures/custom_eval.png --gif-path results/figures/custom_eval.gif --reward-breakdown-path results/logs/custom_eval/reward_breakdown.csv
+python scripts/evaluate_mobile_whisker_ppo.py --model-path results/models/mobile_whisker_gru_ppo.zip --json-path results/logs/custom_eval/metrics.json --png-path results/figures/custom_eval.png --animation-path results/figures/custom_eval.mp4 --reward-breakdown-path results/logs/custom_eval/reward_breakdown.csv
 
 python scripts/visualize_mobile_whisker_env.py --model-path results/models/mobile_whisker_gru_ppo.zip --seed 10000 --steps 200
 
-python scripts/visualize_mobile_whisker_env.py --model-path results/models/mobile_whisker_gru_ppo.zip --seed 10000 --steps 200 --png-path results/figures/mobile_gru_rollout.png --gif-path results/figures/mobile_gru_rollout.gif
+python scripts/visualize_mobile_whisker_env.py --model-path results/models/mobile_whisker_gru_ppo.zip --seed 10000 --steps 200 --png-path results/figures/mobile_gru_rollout.png --animation-path results/figures/mobile_gru_rollout.mp4
 
 python scripts/visualize_mobile_whisker_env.py --no-model --seed 10000 --steps 200
 

@@ -1,0 +1,24 @@
+# Singh et al. (2023) plume physics adapted to the project's mobile arena.
+plume_model: paper
+paper_plume_profile: constant  # constant | sparse | sparser | switch_once | switch_many
+scenario_mode: fixed
+world_bounds: [-2.5, 2.5]
+
+dt: 0.2
+wind_sampling_mode: fixed
+wind_speed_range: [0.5, 0.5]
+domain_randomization: false
+
+# Exact author-code defaults. For randomized wind/source directions, change
+# crosswind_mode to wind_perpendicular to preserve rotational symmetry.
+plume_overrides:
+  paper_sim_dt: 0.01
+  puff_init_radius: 0.01
+  crosswind_velocity_std_scale: 1.0
+  crosswind_mode: global_y
+  puff_warmup_seconds: 6.0
+
+# The profile applies these author defaults automatically:
+# constant/switch_*: birth_rate=1.0, spread_rate=0.01 m/s
+# sparse:            birth_rate=0.4, spread_rate=0.01 m/s
+# sparser:           birth_rate=0.4, spread_rate=0.005 m/s

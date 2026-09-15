@@ -1,0 +1,95 @@
+flowchart TB
+    subgraph TARGET["① 固定本轮 Rollout 数据并计算训练目标"]
+        direction LR
+        BUFFER["RolloutBuffer<br/>8 个环境 × 512 步，共 4,096 条样本<br/>保存 sₜ、aₜ、rₜ、episode start<br/>V旧(sₜ) 与 log π旧(aₜ｜sₜ)"]
+        TD["TD 残差<br/>δₜ = rₜ + γmₜV旧(sₜ₊₁) − V旧(sₜ)<br/>γ = 0.99<br/>真正终止时 mₜ = 0，否则 mₜ = 1"]
+        GAE["从每个环境的时间轴末端向前递推<br/>Âₜ = δₜ + γλmₜÂₜ₊₁<br/>λ = 0.95"]
+        RETURN["得到 Critic 回归目标<br/>R̂ₜ = Âₜ + V旧(sₜ)"]
+        BUFFER --> TD --> GAE --> RETURN
+    end
+
+    subgraph EPOCH["② 组织 Epoch 和 Minibatch"]
+        direction LR
+        SHUFFLE["开始一个 epoch<br/>随机打乱全部 4,096 条样本"]
+        SPLIT["依次读取 16 个 minibatch<br/>每批 256 条<br/>一个 epoch 内不重复且完整覆盖"]
+        BATCH["当前训练批数据<br/>sₜ：256 × 320，aₜ：256 × 3<br/>V旧(sₜ)、log π旧(aₜ｜sₜ)<br/>Âₜ 与 R̂ₜ"]
+        NORM["仅标准化当前批优势<br/>Āₜ = (Âₜ − mean Â) ÷ (std Â + 10⁻⁸)"]
+        SHUFFLE --> SPLIT --> BATCH --> NORM
+    end
+
+    subgraph FORWARD["③ 当前 Actor-Critic 网络重新前向计算"]
+        direction TB
+        FEATURE["历史观测进入共享编码器<br/>256 × 320 → 256 × 20 × 16<br/>单层 GRU 64 → Linear 64 → 64 + GELU<br/>得到共享特征 fₜ：256 × 64"]
+        ACTOROUT["Actor 分支<br/>64 → 160 → 160 → 26 logits<br/>拆分为 6、10、10 三组 Categorical<br/>输出当前 log πθ(aₜ｜sₜ) 与策略熵 Hₜ"]
+        CRITICOUT["Critic 分支<br/>64 → 160 → 160 → 1<br/>输出当前状态价值 Vθ(sₜ)：256 × 1"]
+        FEATURE --> ACTOROUT
+        FEATURE --> CRITICOUT
+    end
+
+    subgraph LOSS["④ 按当前 Minibatch 计算 Actor 与 Critic 损失"]
+        direction TB
+        subgraph POLICY["Actor 路径"]
+            direction LR
+            JOINT["联合动作对数概率<br/>log πθ(aₜ｜sₜ)<br/>= log πθ(aᵐₜ｜sₜ) + log πθ(aᴸₜ｜sₜ)<br/>+ log πθ(aᴿₜ｜sₜ)"]
+            RATIO["新旧策略概率比<br/>ρₜ(θ) = exp(log πθ(aₜ｜sₜ)<br/>− log π旧(aₜ｜sₜ))"]
+            CLIP["PPO 裁剪<br/>ρ̄ₜ = clip(ρₜ，0.8，1.2)<br/>q₁ = ρₜĀₜ，q₂ = ρ̄ₜĀₜ"]
+            PLOSS["Actor 损失<br/>Lᴬ = −mean min(q₁，q₂)"]
+            ENTROPY["熵损失<br/>Lᴴ = −mean Hₜ<br/>熵系数为 0.003"]
+            JOINT --> RATIO --> CLIP --> PLOSS
+            PLOSS --> ENTROPY
+        end
+        subgraph VALUEPATH["Critic 路径"]
+            direction LR
+            VALUEPAIR["当前价值预测与固定回归目标<br/>Vθ(sₜ) 和 R̂ₜ"]
+            VLOSS["Critic 损失<br/>Lⱽ = mean(R̂ₜ − Vθ(sₜ))²<br/>价值系数为 0.5，未启用价值裁剪"]
+            VALUEPAIR --> VLOSS
+        end
+    end
+
+    TOTAL["⑤ 合并总损失<br/>L = Lᴬ + 0.5Lⱽ + 0.003Lᴴ"]
+
+    subgraph STABILITY["⑥ 更新前检查策略变化幅度"]
+        direction LR
+        KL["近似 KL<br/>Δℓₜ = log πθ(aₜ｜sₜ) − log π旧(aₜ｜sₜ)<br/>KLapprox = mean(exp(Δℓₜ) − 1 − Δℓₜ)"]
+        KLCHECK{"KLapprox > 1.5 × 0.02<br/>也就是大于 0.03？"}
+        EARLY["是<br/>停止本轮剩余 minibatch 和 epoch<br/>直接开始下一轮环境采样"]
+        KL --> KLCHECK -->|"是"| EARLY
+    end
+
+    subgraph OPTIM["⑦ 反向传播并更新参数"]
+        direction LR
+        BACKWARD["未超过 KL 阈值<br/>清空旧梯度并计算<br/>g = ∇θL"]
+        GRADCLIP["全局梯度范数裁剪<br/>g ← g × min(1，0.5 ÷ ‖g‖₂)"]
+        ADAM["Adam 更新全部参数<br/>θ ← Adam(θ，g)<br/>学习率 10⁻⁴"]
+        PARAMS["梯度流向<br/>Lᴬ、Lᴴ → Actor<br/>Lⱽ → Critic<br/>三部分共同更新共享 GRU 与投影层"]
+        BACKWARD --> GRADCLIP --> ADAM --> PARAMS
+    end
+
+    subgraph LOOP["⑧ 决定下一批数据"]
+        direction LR
+        BATCHCHECK{"当前 epoch 是否还有<br/>未训练的 minibatch？"}
+        NEXTBATCH["有<br/>读取下一批 256 条样本<br/>回到步骤③重新前向计算"]
+        EPOCHCHECK{"没有<br/>是否已经完成 5 个 epoch？"}
+        NEXTEPOCH["未完成<br/>epoch 加 1 并重新打乱 4,096 条样本<br/>回到步骤②"]
+        NEXTROLLOUT["已完成<br/>保留更新后的网络参数<br/>开始下一轮 8 × 512 步采样"]
+        BATCHCHECK -->|"有"| NEXTBATCH
+        BATCHCHECK -->|"没有"| EPOCHCHECK
+        EPOCHCHECK -->|"未完成"| NEXTEPOCH
+        EPOCHCHECK -->|"完成"| NEXTROLLOUT
+    end
+
+    RETURN --> SHUFFLE
+    NORM --> FEATURE
+    ACTOROUT --> JOINT
+    CRITICOUT --> VALUEPAIR
+    ENTROPY --> TOTAL
+    VLOSS --> TOTAL
+    TOTAL --> KL
+    KLCHECK -->|"否"| BACKWARD
+    PARAMS --> BATCHCHECK
+
+    style BUFFER stroke-width:4px
+    style BATCH stroke-width:4px
+    style FEATURE stroke-width:4px
+    style TOTAL stroke-width:4px
+    style NEXTROLLOUT stroke-width:4px

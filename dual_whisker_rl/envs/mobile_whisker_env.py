@@ -22,6 +22,7 @@ from gymnasium import spaces
 from dual_whisker_rl.envs.robot_model import DifferentialDriveRobot
 from dual_whisker_rl.envs.robot_model import RobotState
 from dual_whisker_rl.envs.whisker_only_env import WhiskerOnlyPuffEnv
+from dual_whisker_rl.envs.world_bounds import resolve_world_bounds, world_bounds_config
 
 
 class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
@@ -39,9 +40,13 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         cfg = dict(config or {})
-        # 注入 mobile 默认：更大场地（2m，±1.0）以显现追踪。
-        cfg.setdefault("world_half", 1.0)
-        wh = float(cfg["world_half"])
+        # 低层环境继续兼容旧的 ±1.0 默认；E4/正式配置通过 world_bounds 显式设置场地。
+        if "world_bounds" not in cfg and "world_half" not in cfg:
+            cfg["world_half"] = 1.0
+        world_min, world_max, wh = resolve_world_bounds(
+            cfg.get("world_bounds"), cfg.get("world_half"), default_half=1.0
+        )
+        cfg["world_bounds"] = world_bounds_config(world_min, world_max)
         explicit_source = cfg.get("source_position") is not None
         scenario_mode_explicit = "scenario_mode" in cfg
         scenario_mode = str(
@@ -61,18 +66,31 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         if scenario_mode == "fixed" and not explicit_source:
             cfg["source_position"] = (-(wh - 0.2), 0.0)
         cfg.setdefault("max_steps", 400)
-        # 大场地需要羽流能横跨过去，否则下风侧起点闻不到气味：加大风速、延长 puff 寿命。
-        cfg.setdefault("wind_speed_range", (0.12, 0.20))
+        plume_model = str(cfg.get("plume_model", "dynamic"))
+        # 论文模式使用作者的 0.5 m/s；原模式保持面向机器人尺度的慢风和长寿命 puff。
+        cfg.setdefault(
+            "wind_speed_range",
+            (0.5, 0.5) if plume_model == "paper" else (0.12, 0.20),
+        )
         overrides = dict(cfg.get("plume_overrides") or {})
-        overrides.setdefault("max_puff_age", 16.0)
+        if plume_model == "dynamic":
+            # 寿命按场地直径和最小风速估算，保证 puff 能从上风源覆盖到下风边界。
+            wind_min = max(float(cfg["wind_speed_range"][0]), 1e-3)
+            overrides.setdefault("max_puff_age", max(16.0, 2.2 * wh / wind_min))
+            overrides.setdefault("puff_bounds_margin", max(1.1, 0.20 * wh))
         cfg["plume_overrides"] = overrides
         # 本环境的观测拼接假定父类 12 维硬件观测，禁止 privileged。
         if str(cfg.get("observation_mode", "hardware")) != "hardware":
             raise ValueError("MobileWhiskerPuffEnv 只支持 observation_mode='hardware'")
         cfg["observation_mode"] = "hardware"
+        active_side = cfg.get("active_whisker_side")
+        if active_side not in (None, "left", "right"):
+            raise ValueError("active_whisker_side must be None, left, or right")
         super().__init__(cfg)
 
         self.scenario_mode = scenario_mode
+        self.active_whisker_side = active_side
+        self._scenario_robot_override = None
         self.scenario_source_distance_range = self._validate_range(
             "scenario_source_distance_range",
             cfg.get("scenario_source_distance_range", (0.65 * wh, 0.80 * wh)),
@@ -80,7 +98,7 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         )
         self.scenario_source_crosswind_range = self._validate_range(
             "scenario_source_crosswind_range",
-            cfg.get("scenario_source_crosswind_range", (-0.15 * wh, 0.15 * wh)),
+            cfg.get("scenario_source_crosswind_range", (-0.30 * wh, 0.30 * wh)),
         )
         self.scenario_robot_downwind_range = self._validate_range(
             "scenario_robot_downwind_range",
@@ -156,7 +174,9 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         # 默认系数保证朝气源正常前进一步的距离奖励能覆盖单步时间成本，避免
         # “正确移动也持续亏分”；越界惩罚则在下方按整局最坏成本做安全校验。
         self.goal_radius = float(cfg.get("goal_radius", 0.10))
-        self.progress_reward_scale = float(cfg.get("progress_reward_scale", 3.0))
+        # 距离势差按场地半宽反比缩放，避免扩大场地后辅助奖励上界失控。
+        default_progress_reward_scale = 3.0 / max(self.world_half, 1e-6)
+        self.progress_reward_scale = float(cfg.get("progress_reward_scale", default_progress_reward_scale))
         configured_goal_bonus = float(cfg.get("goal_bonus", 50.0))
         if not math.isclose(configured_goal_bonus, 50.0, rel_tol=0.0, abs_tol=1e-12):
             raise ValueError("goal_bonus is fixed at 50.0 for mobile source search")
@@ -352,6 +372,11 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
 
     def sample_initial_robot_pose(self) -> RobotState:
         """按场景模式采样机器人起点，并同步到底盘模型。"""
+        if self._scenario_robot_override is not None:
+            x, y, heading = self._scenario_robot_override
+            self.robot.reset(x, y, heading)
+            self.initial_heading_mode = "scenario"
+            return self.robot.state
         if self.scenario_mode == "fixed":
             return self._sample_fixed_initial_robot_pose()
         return self._sample_randomized_initial_robot_pose()
@@ -452,6 +477,7 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
                 "robot_start_y_range": [-(self.world_max - 0.15), self.world_max - 0.15],
                 "uniform_heading_probability": 0.0,
                 "source_facing_jitter_rad": 0.4,
+                "world_bounds": world_bounds_config(self.world_min, self.world_max),
             }
         return {
             "mode": "randomized",
@@ -463,11 +489,18 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
             "robot_crosswind_range": list(self.scenario_robot_crosswind_range),
             "uniform_heading_probability": self.scenario_uniform_heading_probability,
             "source_facing_jitter_rad": self.scenario_source_facing_jitter,
+            "world_bounds": world_bounds_config(self.world_min, self.world_max),
         }
 
     def _build_observation(self) -> np.ndarray:
         """构造硬件特征、本体感受和可选 blank_age 观测。"""
         base = super()._build_observation()
+        if self.active_whisker_side == "left":
+            base = base.copy()
+            base[[1, 3, 5, 6, 7, 9, 11]] = 0.0
+        elif self.active_whisker_side == "right":
+            base = base.copy()
+            base[[0, 2, 4, 6, 7, 8, 10]] = 0.0
         heading = self.robot_state.heading
         proprio = np.array(
             [
@@ -609,6 +642,11 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         self.best_concentration = 0.0
         self.stagnation_steps = 0
         self._reset_odor_search_state()
+        self._scenario_robot_override = None
+        if isinstance(options, dict) and isinstance(options.get("scenario"), dict):
+            pose = options["scenario"].get("robot_pose")
+            if pose is not None and len(pose) == 3:
+                self._scenario_robot_override = tuple(float(v) for v in pose)
         if self.scenario_mode == "randomized":
             if seed is not None:
                 self._scenario_rng = np.random.default_rng(
@@ -677,8 +715,10 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         left = self.left_sensor.update(raw_left)
         right = self.right_sensor.update(raw_right)
 
-        hit_left = 1.0 if left >= self.hit_threshold else 0.0
-        hit_right = 1.0 if right >= self.hit_threshold else 0.0
+        effective_left = left if self.active_whisker_side in (None, "left") else 0.0
+        effective_right = right if self.active_whisker_side in (None, "right") else 0.0
+        hit_left = 1.0 if effective_left >= self.hit_threshold else 0.0
+        hit_right = 1.0 if effective_right >= self.hit_threshold else 0.0
         self.left_hits.append(hit_left)
         self.right_hits.append(hit_right)
         self.left_hits = self.left_hits[-20:]
@@ -696,8 +736,8 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
             distance,
             reached,
             oob,
-            left,
-            right,
+            effective_left,
+            effective_right,
             position_displacement,
             reacquisition_event=bool(odor_search_info["reacquisition_event"]),
             whisker_reacquisition_rewarded=bool(

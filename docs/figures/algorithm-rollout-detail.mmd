@@ -1,0 +1,54 @@
+flowchart LR
+    subgraph INIT["一、向量环境初始化"]
+        direction TB
+        MAKE["创建 8 个独立 MobileWhiskerPuffEnv<br/>seed 依次为 seed 至 seed + 7"]
+        HISTORY["每个环境包装 ObservationHistoryWrapper<br/>单帧 16 维，保存最近 20 帧<br/>reset 时用初始帧复制填满历史"]
+        MONITOR["再包装 Monitor<br/>记录每回合回报、长度和终止信息"]
+        VEC["DummyVecEnv 提供批量同步接口<br/>同一进程中顺序推进 8 个环境<br/>不是 8 个操作系统线程"]
+        RESET["批量 reset<br/>得到初始历史观测：8 × 320"]
+        MAKE --> HISTORY --> MONITOR --> VEC --> RESET
+    end
+
+    subgraph LOOP["二、一个采样时刻，循环 512 次"]
+        direction TB
+        OLDOBS["读取当前批量历史观测<br/>sₜ：8 × 320"]
+        INFER["关闭梯度，批量前向计算一次<br/>GRU 输入：8 × 20 × 16<br/>Actor 采样 aₜ：8 × 3<br/>Critic 输出 V旧(sₜ)：8<br/>保存 log π旧(aₜ｜sₜ)：8"]
+        DISPATCH["把第 i 行联合动作发给第 i 个环境<br/>移动 1 个、左扇区 1 个、右扇区 1 个"]
+        ENVSTEP["各环境顺序执行<br/>底盘 → 动态 Puff → 触须 → 传感器<br/>气味搜索状态 → 16 维观测 → 七项奖励"]
+        STACK["历史窗口左移并加入新帧<br/>oₜ₋₁₈，…，oₜ，oₜ₊₁<br/>形成下一条 320 维历史观测"]
+        RETURN["批量返回<br/>下一观测：8 × 320，奖励：8<br/>完成标记：8，info：8 份字典"]
+        TIMEOUT["若因 400 步时间上限截断<br/>用 terminal observation 估计价值<br/>在该步奖励中加入 γV旧 后再存储"]
+        STORE["写入 RolloutBuffer 的第 t 行<br/>sₜ、aₜ、校正后 rₜ、episode start<br/>V旧(sₜ)、log π旧(aₜ｜sₜ)"]
+        AUTORESET["到源、越界或截断的环境自动 reset<br/>该环境下一次从新 episode 的历史开始<br/>其余环境继续原 episode"]
+        COUNT{"每个环境是否已采满 512 步？"}
+        OLDOBS --> INFER --> DISPATCH --> ENVSTEP --> STACK --> RETURN --> TIMEOUT --> STORE --> AUTORESET --> COUNT
+        COUNT -->|"否"| OLDOBS
+    end
+
+    subgraph BUFFER["三、一个完整 rollout"]
+        direction TB
+        SHAPE["时间轴 512 × 环境轴 8<br/>总样本数 4,096"]
+        OBSSHAPE["观测 512 × 8 × 320<br/>动作 512 × 8 × 3"]
+        SCALAR["奖励、episode start、旧价值、旧 log probability<br/>各为 512 × 8"]
+        INFO["info、trajectory 和七项奖励诊断<br/>用于日志与评估，不作为 PPO 训练张量存入 buffer"]
+        SHAPE --> OBSSHAPE --> SCALAR --> INFO
+    end
+
+    subgraph FINISH["四、采样结束并交给更新阶段"]
+        direction TB
+        LASTV["对第 512 步后的 8 条下一观测前向计算<br/>得到 8 个 bootstrap 状态价值"]
+        GAE["沿每个环境的时间轴从后向前递推<br/>计算 4,096 个 advantage 与 return"]
+        CALLBACK["采样期间同步记录<br/>Monitor 回合指标、七项奖励分量<br/>blank 与三类重捕获诊断"]
+        HANDOFF["本轮旧策略数据保持固定<br/>完整 RolloutBuffer 交给 PPO 更新"]
+        LASTV --> GAE --> HANDOFF
+        CALLBACK --> HANDOFF
+    end
+
+    RESET --> OLDOBS
+    COUNT -->|"是"| SHAPE
+    SHAPE --> LASTV
+    RETURN --> CALLBACK
+
+    style RESET stroke-width:4px
+    style LOOP stroke-width:4px
+    style SHAPE stroke-width:4px

@@ -1,5 +1,7 @@
 # STM32 双触须固件说明
 
+> 本文件中的接线示例主要面向 STM32 开发板 smoke test。自研主控 PCB 的权威输入见 [PCB 原理图接口规范](../../../docs/PCB_SCHEMATIC_INTERFACE_SPEC.md)，板载通信接口为 USB-C + CH340C。
+
 本目录用于存放 STM32 双触须硬件控制固件。当前硬件阶段的目标是先完成最小 smoke test，不直接进行强化学习训练，也不做复杂传感器滤波或标定。
 
 推荐工具链：
@@ -91,13 +93,15 @@ ADC1_IN3
 USART1 Asynchronous
 ```
 
-如果使用外部 USB-TTL 模块：
+开发板/飞线验证可使用外部 USB-TTL 模块：
 
 ```text
 USB-TTL TX -> STM32 PA10 / USART1_RX
 USB-TTL RX -> STM32 PA9  / USART1_TX
 USB-TTL GND -> STM32 GND
 ```
+
+自研 PCB 不使用该外置模块，而是将板载 CH340C 的 TXD/RXD 分别连接 PA10/PA9；USB VBUS 只给 MCU/CH340C 逻辑域供电，舵机和 MQ-3 由外部 5V 供电。
 
 注意：STM32F103C8T6 的 ADC 输入电压不能超过 3.3V。很多 MQ-3 模块使用 5V 供电，AO 输出可能高于 3.3V，因此进入 PA2/PA3 前必须确认电压安全；必要时加入分压电路或电平保护。
 

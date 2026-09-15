@@ -2,7 +2,7 @@
 
 复用 `dual_whisker_rl.evaluation.evaluate_policy`（源搜索指标、左右触须浓度差、
 reacquisition 等）。环境工厂用 `ObservationHistoryWrapper` 包装，堆叠长度从模型
-观测维度反推；默认选择首个成功和首个失败 episode 生成 PNG/GIF，并单独输出
+观测维度反推；默认选择首个成功和首个失败 episode 生成 PNG/MP4，并单独输出
 这些可视化轨迹的奖励分解 CSV。若评估结果只有一类，则只输出一个 episode。
 """
 
@@ -61,10 +61,12 @@ def parse_args() -> argparse.Namespace:
         help="默认按模型文件名写入评估 PNG。",
     )
     parser.add_argument(
+        "--animation-path",
         "--gif-path",
+        dest="animation_path",
         type=Path,
         default=None,
-        help="默认按模型文件名写入评估 GIF。",
+        help="默认按模型文件名写入评估 MP4；旧参数 --gif-path 仍兼容。",
     )
     parser.add_argument(
         "--reward-breakdown-path",
@@ -79,7 +81,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-visualization",
         action="store_true",
-        help="只计算 JSON 指标，不生成 PNG/GIF。",
+        help="只计算 JSON 指标，不生成 PNG/动画。",
     )
     args = parser.parse_args()
     if args.episodes < 1:
@@ -97,8 +99,8 @@ def parse_args() -> argparse.Namespace:
         args.json_path = Path("results/logs") / args.model_path.stem / "eval_metrics.json"
     if args.png_path is None:
         args.png_path = Path("results/figures") / f"{args.model_path.stem}_eval.png"
-    if args.gif_path is None:
-        args.gif_path = Path("results/figures") / f"{args.model_path.stem}_eval.gif"
+    if args.animation_path is None:
+        args.animation_path = Path("results/figures") / f"{args.model_path.stem}_eval.mp4"
     if args.reward_breakdown_path is None:
         args.reward_breakdown_path = (
             args.json_path.parent / "visualized_reward_breakdown.csv"
@@ -109,7 +111,7 @@ def parse_args() -> argparse.Namespace:
         "config",
         "json_path",
         "png_path",
-        "gif_path",
+        "animation_path",
         "reward_breakdown_path",
     )
 
@@ -412,13 +414,13 @@ def main() -> None:
         render_static_rollouts(visualization_rollouts, args.png_path, title)
         render_animation_rollouts(
             visualization_rollouts,
-            args.gif_path,
+            args.animation_path,
             title,
             args.animation_stride,
             fps=args.animation_fps,
         )
         print(f"saved_png={args.png_path}")
-        print(f"saved_gif={args.gif_path}")
+        print(f"saved_animation={args.animation_path}")
 
 
 if __name__ == "__main__":

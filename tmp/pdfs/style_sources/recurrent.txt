@@ -1,0 +1,958 @@
+
+
+===== PAGE 1 =====
+
+Robotic Odor Source Localization via End-to-End
+Recurrent Deep Reinforcement Learning
+1st Lingxiao Wang
+Department of Electrical Engineering
+Louisiana Tech University
+Ruston, Louisiana, USA
+lwang@latech.edu
+2nd Shuo Pang
+Department of Electrical Engineering and Computer Science
+Embry-Riddle Aeronautical University
+Daytona Beach, Florida, USA
+shuo.pang@erau.edu
+Abstract—This article presents a new olfactory-based naviga-
+tion algorithm that guides a mobile robot to ﬁnd odor sources in
+unknown environments. The proposed navigation algorithm takes
+onboard sensor measurements as inputs and calculates robot
+heading commands that direct the search agent (i.e., a mobile
+robot) to trace odor plumes back to the odor source. We modeled
+this plume tracing process as a partially observable Markov
+decision process (POMDP) since the robot cannot fully observe
+the search environment and adapted the twin delayed deep
+deterministic policy gradient (TD3) to train the search agent. The
+long short-term memory (LSTM) neural networks are utilized to
+construct the actor and critic networks in the TD3 algorithm
+to ﬁt the partially observable environment. We employed the
+curriculum learning to train the search agent in a realistic plume
+tracing simulator, where the turbulence of simulated airﬂows
+gradually increased. The agent was implemented in different
+airﬂow environments after the training. Simulation results show
+that in both laminar and turbulent ﬂow environments, the
+proposed algorithm achieved a higher success rate and shorter
+averaged search time compared to the original TD3 (i.e., without
+LSTM) and traditional olfactory-based navigation algorithms.
+I. INTRODUCTION
+Robotic odor source localization (OSL) is a technology that
+employs a mobile robot to ﬁnd an odor source in unknown
+environments. This technology can be implemented to solve
+many practical tasks, including monitoring air pollution [1],
+locating chemical gas leaks [2], locating unexploded mines and
+bombs [3], and marine surveys such as ﬁnding hydrothermal
+vents [4]. The key to correctly ﬁnding an odor source is
+designing an effective olfactory-based navigation algorithm,
+which guides robot to detect odor plumes as cues to approach
+the odor source.
+In recent years, reinforcement learning (RL) has gained
+increasing attention thanks to its recent success in solving
+complex problems, such as playing the game of Go [5] and
+Atari games [6]. An RL algorithm models the interactions
+between an agent and the environment: the agent performs
+actions in the environment and receives rewards, where the
+agent’s goal is to get the maximal accumulated reward [7].
+The RL framework is suitable for modeling the robotic OSL
+problem: the agent can be considered as the search robot;
+the environment is the search area; rewards can be deﬁned
+to encourage the robot to detect odor plumes and ﬁnd the
+odor source. Most RL algorithms model the problem as a fully
+Fig. 1. The framework of the proposed work. A mobile robot was employed
+as the search agent to ﬁnd the odor source in an unknown environment.
+Onboard sensor readings were fed into a recurrent actor network, trained
+by the recurrent TD3 algorithm. The actor network calculated robot heading
+commands, i.e., the target moving direction. Then, the robot moved to a
+new location in the simulated search environment by following the heading
+command and repeated this cycle until it found the odor source location. The
+robot moved at a constant speed to simplify the control problem.
+observable task (i.e., a Markov decision process, MDP) [6],
+[8], [9], [10]. However, this setting is unsuitable for modeling a
+robotic OSL problem because the search agent (i.e., a mobile
+robot) can only observe its surrounding environment due to
+the limited perceptive range of onboard sensors. For instance,
+the onboard airﬂow sensor can only measure wind speeds and
+directions at the robot’s position, not the wind information in
+the entire search area.
+In this work, we modeled the plume tracing process as a
+partially observable Markov decision process (POMDP) and
+adapted a recurrent deep RL algorithm to solve it. A mod-
+iﬁed twin delayed deep deterministic policy gradient (TD3)
+algorithm [10] was employed to train the recurrent actor
+and critic networks with long short-term memory (LSTM)
+layers. As shown in Fig. 1, a realistic simulation program
+was utilized as the training environment to train the recurrent
+actor and critic networks. The mobile robot was controlled
+by the recurrent actor network, where inputs were onboard
+sensor measurements, and the output was a heading command
+that directs the robot to approach the odor source location.
+After the training, we implemented the proposed navigation
+algorithm in different airﬂow environments. We compared
+43
+2023 Seventh IEEE International Conference on Robotic Computing (IRC)
+979-8-3503-9574-7/23/$31.00 ©2023 IEEE
+DOI 10.1109/IRC59093.2023.00014
+2023 Seventh IEEE International Conference on Robotic Computing (IRC) | 979-8-3503-9574-7/23/$31.00 ©2023 IEEE | DOI: 10.1109/IRC59093.2023.00014
+Authorized licensed use limited to: Louisiana Tech University. Downloaded on October 11,2024 at 19:28:48 UTC from IEEE Xplore.  Restrictions apply. 
+
+===== PAGE 2 =====
+
+the proposed algorithm with the traditional olfactory-based
+navigation algorithms, the original TD3, and other recurrent
+RL methods to evaluate its search performance.
+II. R ELA TED WORKS
+Traditional olfactory-based navigation algorithms can be
+categorized into three groups, i.e., chemotaxis, bio-inspired,
+and engineering-based (so-called probabilistic) algorithms
+[11]. The chemotaxis method is the gradient-following algo-
+rithm, which directs the robot to follow the plume concen-
+tration gradient to ﬁnd the source. This simple navigation
+algorithm performs well in laminar ﬂow environments [12].
+However, it is ineffective in turbulent ﬂow environments,
+where the odor plumes are twisted by turbulent ﬂows, resulting
+in an intermittent and patchy plume trajectory [13].
+The core of a bio-inspired navigation algorithm is to direct
+a mobile robot to mimic animal olfactory behaviors to ﬁnd the
+odor source, such as the mate-seeking behaviors of male moths
+[14] and foraging behaviors of lobsters [15]. Bio-inspired
+algorithms usually contain two search behaviors, including
+the ‘surge’ and ‘casting’ behaviors [16]. The ‘surge’ behavior
+activates when the robot detects odor plumes. Then, the robot
+moves upwind to approach the odor source location. In the
+‘casting’ behavior, the robot loses plume contact and moves
+across the wind direction to re-detect plumes. Recent works
+modiﬁed the ‘surge/casting’ search phases to improve search
+efﬁciency. For instance, Shigaki et al. [17] devised a fuzzy
+inference system to switch different search phases based on
+the current search situation [17]. Leathers et al. [18] showed
+that adding a ‘backward’ search phase can improve the success
+rate in lobster-inspired methods.
+By contrast, engineering-based algorithms leverage mathe-
+matical and physical principles to model the intricate process
+of plume distribution and use these models to make estima-
+tions regarding the precise location of the odor source. For
+instance, Pang et al. [19] characterized the plume propaga-
+tion process as a Gaussian random process and employed
+the Bayesian inference theorem to estimate possible odor
+source location based on airﬂow information to form a source
+probability map. During the robot maneuver, this map will
+be updated with new chemical and wind sensor observations.
+In addition to this approach, other methods such as source
+term estimation [20], [21], particle ﬁlters [22], occupancy
+grid techniques [23], and partially observable Markov decision
+processes [24] can also be enlisted to compute the source
+probability map.Subsequently, a path planner is deployed to
+steer the search agent toward the region exhibiting the highest
+probability of housing the odor source. Previous path plan-
+ning algorithms encompass methodologies like the artiﬁcial
+potential ﬁeld approach [25] and the A-star algorithm [26].
+Moreover, V ergassola et al. [27] introduced the innovative
+infotaxis algorithm, which incorporates information entropy to
+guide the search. This technique empowers the search agent
+to select movements that minimize the information uncertainty
+surrounding the odor source.
+In recent years, there has been a notable surge in the
+development of RL-based OSL methods [28], [29], [30],
+[31], [32]. For instance, Wang et al. [28] introduced a novel
+approach in which the plume tracing process is cast as a
+model-based RL problem. This approach formulates rewards
+based on a combination of plume and source estimations.
+Hu et al. [30] presented an alternative model-free RL-based
+plume tracing algorithm designed speciﬁcally for locating
+hydrothermal vents. This method utilizes a variant of the deep
+deterministic policy gradient (DDPG) algorithm to train end-
+to-end recurrent neural networks (RNNs). Chen et al. [31]
+introduced a deep Q-network-based plume tracing algorithm
+that operates by taking a heating map of sensor measurements
+as input and then calculating robot commands accordingly.
+Compared to traditional olfaction-based navigation algo-
+rithms, RL-based methods offer several distinct advantages:
+1) Elimination of Explicit Search Strategies: RL-based ap-
+proaches obviate the need for designing explicit search strate-
+gies. They discover odor sources through trial-and-error ex-
+periences without requiring the development of a speciﬁc
+navigation algorithm. 2) Fixed Querying Time: Once training
+is complete and the parameters of neural networks are estab-
+lished, the computational time required for calculating naviga-
+tion commands remains ﬁxed and independent of the size of
+the search area. 3)Continuous Performance Improvement:RL-
+based methods have the potential for continuous performance
+improvement. With more training episodes, these methods can
+continually enhance their search performance.
+Motivated by the above beneﬁts, we employed a deep
+RL algorithm to design a new olfactory-based navigation
+algorithm. Our work is different from the existing deep RL-
+based plume tracing algorithms in the following ways: 1) to
+the best of our knowledge, it is the ﬁrst time to implement the
+TD3 and recurrent TD3 in the OSL problem; 2) compared to
+[31], we propose an end-to-end RL model without the needs to
+pre-process the sensor data or to calculate a source likelihood
+map; 3) compared to [29], the simulated wind direction/speed
+and corresponding odor plume movements are changing in
+time. This time-varying setting is more realistic and practical;
+4) our work can be considered as a further improvement
+of [30], where the recurrent deterministic policy gradient
+(RDPG) [33] algorithm was implemented in an OSL problem.
+We implemented the recurrent TD3 algorithm to reduce the
+overestimation problem to improve the learning result; 5) we
+used a curriculum learning pattern in the training process,
+where the agent ﬁrst learned how to trace odors in a laminar
+ﬂow environment. We gradually increased the turbulence of
+airﬂows in the training environment to improve the agent’s
+search performance.
+III. P RELIMINARIES
+A. RL in MDP and POMDP
+The standard RL setting contains an agent and an environ-
+ment. The interaction between the agent and the environment
+is modeled as an MDP ∼{ S,A,P,R }, where S is a set of
+states,A is a set of actions, P is a transition probability, and
+44
+Authorized licensed use limited to: Louisiana Tech University. Downloaded on October 11,2024 at 19:28:48 UTC from IEEE Xplore.  Restrictions apply. 
+
+===== PAGE 3 =====
+
+(a)
+ (b)
+Fig. 2. One step transition in (a) MDP and (b) POMDP .
+R is a reward function. Figure 2(a) presents an MDP model
+within a time step. The agent is in a state ( st, st ∈S )a t
+timet, and after it takes an action (at, at ∈A) to arrive in the
+next state (st+1,st+1 ∈S) with the state transition probability
+P(st+1|st,at), the agent will obtain a reward (rt, rt ∈R) [7].
+By contrast, POMDP does not assume that the state is
+fully observable and is deﬁned as a six-tuple POMDP ∼
+{S,A,Ω,P,O,R }, where S, A, P, and R are the same
+as in the MDP , with an additional observation space Ωand
+observation probabilityO. As shown in Fig. 2(b), At time t,
+the agent receives an observation (ot, ot ∈Ω) at the current
+state (st, st ∈S), and after acting ( at, at ∈A), the agent is
+transferred to a new state ( st+1, st+1 ∈S) according to the
+state transition probabilityP(st+1|st,at) and receives a new
+observation (ot+1, ot+1 ∈Ω) with the observation probability
+O(ot+1|st+1,at) and a reward rt ∈R.
+The objective of an RL agent in either MDP or POMDP is
+to select actions that maximize its expected future discounted
+reward, i.e., E[∑∞
+t=0γtrt], where rt is the reward the agent
+received at time t and γ∈ [0,1] is the discount factor
+that penalizes the future rewards. A policy in RL algorithms
+guides the agent to select actions, including the stochastic
+policyπ(at|st) and the deterministic policyμ(st). The value
+function is a prediction of future return. For MDPs, the state-
+value function Vπ(st) represents the expected future return
+starting from a state st and following πafterward; action-
+value functionQπ(st,at) represents the expected future return
+of taking actionat at a state st and followingπafter that. For
+POMDPs, states is not directly observable. Thus, observation
+o is used to represent the state- and action-value functions.
+Denote an observation history
+ht ={o1,a 1,o 2,a 2,...,ot−1,at−1}, (1)
+then, the state-value function can be presented as Vπ(ot,ht)
+and the action-value function is Qπ(ot,ht,at) [34]. In deep
+RL, value functions are calculated using neural networks,
+where network parameters are learned from interactions be-
+tween the agent and the environment [35].
+B. Search Agent
+This work assumes that the search agent is a mobile robot.
+Speciﬁcally, it is assumed that this robot is equipped with
+a comprehensive sensor suite, including a chemical sensor,
+an anemometer, and a positioning sensor. These sensors can
+provide the measurement of various parameters, namely, odor
+concentrations denoted asρ, wind speeds represented asu with
+corresponding directionsφmeasured in the inertial frame. Fur-
+thermore, the robot’s position(x,y) within the inertial frame
+and its yaw anglesψare also included in sensor measurements.
+To control a mobile robot on a two-dimensional plane, only
+speed and heading commands are required. An additional
+simpliﬁcation is made by assuming that the robot maintains
+a constant speed, speciﬁcally v =1 m/s. The olfaction-based
+navigation method computes the heading commands, denoted
+as ψc, based on onboard sensor readings.
+Observations of the robot are sensor measurements. In tra-
+ditional olfactory-based navigation algorithms [14], [19], wind
+speeds/directions, robot yaw, and plume concentrations are
+essential information for calculating robot heading commands.
+Thus, we deﬁne the observation o as,
+o={vx,vy,ux,uy,δ}, (2)
+where vx = vcos(ψ) and vy = vsin(ψ) are robot speeds at
+x and y directions, respectively;ux = ucos(φ) and uy =
+usin(φ) are wind speeds at x and y directions, respectively;
+δis the plume non-detection period that measures the period
+between two consecutive plume detection events. The action
+a is the heading command, i.e.,
+a=ψc. (3)
+The range of heading commands is from−π/2 toπ/2, which
+speciﬁes the rotation direction (negative: anti-clockwise; pos-
+itive: clockwise) and rotation angle. We can also choose other
+heading command ranges, e.g.,−πto π, for different robotic
+platforms. Notice that we converted angle-related parameters
+into velocities, such as wind direction φand vehicle heading
+ψ, to avoid the problem that different angles could refer to
+the same directions, e.g.,−πand π. In addition, we consider
+that the robot detects odor plumes if ρexceeds a threshold;
+otherwise, the robot does not detect odor plumes.
+IV . METHODOLOGY
+A. Recurrent Actor and Critic Networks
+Fig. 3 presents the architectures of the actor and critic
+networks used in this work. Both actor and critic networks
+contain two branches, where branch 1 is used to process
+the current observation ot (or the current observation and
+action combination, i.e., ot and at, for the critic network),
+and branch 2 contains the LSTM layer, which is used to
+extract the information from the past observation history, i.e.,
+ht. Speciﬁcally, the observation history is ﬁrst processed by a
+linear layer and then fed into the LSTM layer. Outputs from
+two branches are concatenated and pass through two linear
+layers to calculate the output. For the actor network, the output
+is the action, i.e., at, and for the critic network, the output is
+the action-value functionQ(ot,ht,at).
+B. The Recurrent TD3 Training Algorithm
+We developed the training algorithm based on two existing
+algorithms, i.e., RDPG [33] and TD3 [10] algorithms. Algo-
+rithm 1 presents the training algorithm for the recurrent TD3,
+which includes the following main components:
+45
+Authorized licensed use limited to: Louisiana Tech University. Downloaded on October 11,2024 at 19:28:48 UTC from IEEE Xplore.  Restrictions apply. 
+
+===== PAGE 4 =====
+
+(a) Actor
+ (b) Critic
+Fig. 3. Architectures of actor and critic networks used in this work. Each
+network has two branches. Branch 1 is used to process the current state (and
+the state-action combination for the critic network). Branch 2 contains the
+LSTM layer, which is used to process the observation history ht. Outputs
+from two branches are concatenated and pass through two linear layers to get
+the output. The notation in a layer includes the layer type, output size, and
+the activation function.
+1) Initialization: Before the training, we initialize two critic
+networks, i.e., Qθ1 and Qθ2 , and the actor network, i.e., μβ,
+with random parameters θ1, θ2, and β. Then, we initialize
+target critic and actor networks by copying the previous
+networks, i.e., θ′
+1 ← θ1, θ′
+2 ← θ2, and β′ ← β. Finally, we
+initialize a replay bufferR to store training episodes.
+2) Interacting: In this part, the actor interacts with the
+environment and collects the training data. For an episode, we
+deﬁne the maximal search timeT (T = 200s in this work). At
+every second within an episode, the agent selects an actionat
+via the actor network μβ, added with a normal random noise
+ϵ ∼N(0,σ) (σ=1 0in the implementation). After the agent
+executes the action, it receives a new observation ot+1 and
+rewardrt. Rewards in this work are deﬁned to encourage the
+robot to detect odor plumes and ﬁnd the odor source location:
+r =
+⎧
+⎪⎪⎪⎨
+⎪⎪⎪⎩
+1 Concentration above threshold,
+0 Concentration below threshold,
+100 Find the source,
+−100 Run out of time or move outside.
+(4)
+The observation and action will be appended to the history
+via ht+1 ← ht,ot,at, and new observation and history will
+be used as the input for the actor network, i.e., ot ← ot+1
+andht ←ht+1. When an episode is completed, i.e., either the
+robot ﬁnds the odor source (the distance between the robot
+and the odor source is less than a threshold, i.e., 3 m), runs
+out of the search time, or moves to the outside of the search
+area, we store the sequence τ=(o1,a 1,r 1,...,oT,aT,rT) in
+the replay buffer R. If an episode ends before the time limit
+T , we pad the sequence τwith 0 to make all episodes have
+the same length T .
+3) Learning: In the learning step, a minibatch of N
+episodes will be randomly sampled from the replay bufferR.
+For each sample episode, we calculate a target critic value via
+yi
+t =ri
+t +γ min
+{j=1,2}
+Qθ′
+j
+(oi
+t+1,hi
+t+1,˜a), (5)
+Algorithm 1 Recurrent TD3 Training Algorithm
+1: Initialize two critic networks Qθ1 , Qθ2 and the actor
+networkμβ with parametersθ1, θ2, and β.
+2: Initialize target critic networks Qθ′
+1 , Qθ′
+2 and the target
+actor networkμ′
+β with parametersθ′
+1 ←θ1, θ′
+2 ←θ2, and
+β′ ←β.
+3: Initialize replay bufferR.
+4: for episode=1 toM do
+5: /* Interacting */
+6: Initialize the observation o1=env.reset() and observa-
+tion historyh1 ←0.
+7: for t=1 to T do:
+8: Select an action at =μβ(ot,ht)+ ϵ,ϵ ∼N(0,σ).
+9: Executeat and receive new observationot+1 and
+rewardrt.
+10: Append the observation and action to history:
+ht+1 ←ht,ot,at.
+11: Update observationot ← ot+1 and history ht ←
+ht+1.
+12: end for
+13: Store the sequence(o1,a 1,r 1,...,oT,aT,rT) in R.
+14: /* Learning */
+15: Sample{oi
+1,ai
+1,ri
+1,...,oi
+T,ai
+T,ri
+T}i=1,...,N fromR.
+16: Compute the target critic value for each sample
+episodei using
+yi
+t =ri
+t +γmin{j=1,2} Qθ′
+j
+(oi
+t+1,hi
+t+1,˜a),
+˜a=μβ′
+(oi
+t+1,hi
+t+1
+)+ϵ,ϵ ∼clip(N(0,σ),−c,c).
+17: Update the critic networks by gradient descent:
+θj ←∇θj
+1
+NT
+∑N
+i=1
+∑T
+t=1
+(Qθj
+(oi
+t,hi
+t,ai
+t
+)−yi
+t
+)2
+,
+j ∈(1,2).
+18: Update the actor network by gradient ascent:
+β←∇β 1
+NT
+∑N
+i=1
+∑T
+t=1Qθ1
+(oi
+t,hi
+t,μβ
+(oi
+t,hi
+t
+)).
+19: Update target networks:
+θ′
+j ←ρθj +(1 −ρ)θ′
+j,j ∈(1,2)
+β′ ←ρβ+(1 −ρ)β′
+20: end for
+where˜a=μβ′
+(oi
+t+1,hi
+t+1
+)+ϵ,ϵ ∼clip(N(0,σ),−c,c) and
+γis 0.9 in the implementation. In Eqn. 5, the smaller value
+from two target critic networks is used to form the target critic
+value, and the target actor network calculates an action˜a with
+a normal random noise that is clipped within−c andc (c=1 0
+in the implementation).
+With the target critic value yt, parameters of two critic
+networksθj, j ∈(1,2) are updated to minimize the difference
+(measured by the mean squared error, i.e., MSE) between the
+calculated critic values from critic networks and the target
+critic value via the gradient descent:
+θj ←∇θj
+1
+NT
+N∑
+i=1
+T∑
+t=1
+(Qθj
+(oi
+t,hi
+t,ai
+t
+)−yi
+t
+)2
+. (6)
+The actor network is updated to maximize the critic value.
+The goal is to improve the actor network so it can choose
+46
+Authorized licensed use limited to: Louisiana Tech University. Downloaded on October 11,2024 at 19:28:48 UTC from IEEE Xplore.  Restrictions apply. 
+
+===== PAGE 5 =====
+
+Fig. 4. A snapshot of the simulated search area. The size of the search area
+is 100 × 100 m2, where the odor source is located at (20, 0) m. The odor
+source locate can be changed to an arbitrary position inside the search area.
+The grey dots represent the emitted odor plumes. Arrows in the background
+indicate the airﬂow directions and speeds.
+good actions that maximize the future reward. Both Qθ1 and
+Qθ2 can be used to calculate the critic value, as in the original
+TD3 algorithm. In this work,Qθ1 is used to calculate the critic
+value. Thus, parameters of the actor network βare updated
+with the gradient ascent:
+β←∇β
+1
+NT
+N∑
+i=1
+T∑
+t=1
+Qθ1
+(oi
+t,hi
+t,μβ
+(oi
+t,hi
+t
+)). (7)
+Finally, the target critic and actor networks are updated via
+θ′
+j ←ρθj +(1 −ρ)θ′
+j,j ∈(1,2)
+β′ ←ρβ+(1 −ρ)β′ (8)
+whereρ=0.99, as suggested by the TD3.
+V. S IMULA TION RESULTS AND ANALYSIS
+A. Simulated Robotic OSL Environment
+To evaluate the search performance of the proposed
+olfactory-based navigation algorithm, we utilized a simulated
+robotic OSL environment, which was built based on [36].
+This simulation program was designed to provide a graphical
+animation that illustrates the development of odor plumes and
+the search process of the robotic agent within the search
+environment. The simulation consists of various dynamic
+components, including a time-varying ﬂow ﬁeld, a coherent
+trajectory for the odor plume, and the complete six-degree-of-
+freedom dynamics of a robotic agent. Notably, this simulation
+program has found utility in previous research endeavors,
+including studies referenced in [37] and [38].
+In Fig. 4, the search area within the simulation is presented.
+It spans a size of100×100 square meters. A coordinate system
+(x−y) is employed to denote positions within this area. Within
+this coordinate system, the odor source is located at (20,0)
+m and continuously emits 10 ﬁlament packages, referred to
+as plumes, per second. These plumes are represented by the
+grey dots clustered in the central region, forming a distinctive
+and curved trajectory. Notice that, the odor source location
+and plume emission rate can be adjusted in the simulation
+program. In the background, local wind vectors are represented
+by arrows. These arrows indicate both the direction of ﬂow and
+the magnitude of ﬂow velocity. The ﬂow vectors are calculated
+(a) U0=(1,0) m/s, ς=2
+ (b) U0=(1,0) m/s, ς=3
+(c) U0=(1,0) m/s, ς=4
+ (d) U0=(1,0) m/s, ς=5
+Fig. 5. Plots of averaged reward in the curriculum learning pattern, where
+the blue line is the proposed recurrent TD3 method and the orange line is the
+original TD3 method. The search environment was more and more turbulent
+in the training.
+based on dynamic boundary conditions that evolve over time.
+These conditions result from a combination of a mean ﬂow
+vector denoted as U0 and Gaussian white noise with a zero
+mean and variance ς. By altering the values of U0 and ς,
+different turbulence patterns within the airﬂow ﬁelds can be
+generated.
+B. Training Results
+We ﬁrst trained the agent in a laminar ﬂow environment,
+where U0=(1,0) m/s and ς=2. Then, we gradually increased
+theςvalue to 3, 4, and 5 to make the airﬂow ﬁeld in the search
+environment more turbulent. In each airﬂow environment,
+the number of training episodes was 10K, and the robot
+randomly selected actions to explore the environment in the
+ﬁrst 1K episodes. Parameters of actor and critic networks were
+randomly initialized in the ﬁrst environment. In the remain-
+ing environments, network parameters were loaded from the
+previous training result. The total training episodes was 40K.
+In an episode, the robot’s initial position was randomly
+selected within the search area. The robot was initially guided
+by the ‘zigzag’ search strategy [39] to detect odor plumes for
+the ﬁrst time. Once the robot obtained the ﬁrst plume detection,
+the proposed recurrent TD3 was activated to control the robot
+with the calculated heading commands. The ‘zigzag’ search
+strategy directed the robot to search plumes by moving across
+the wind directions and bouncing inward if it arrived at search
+area boundaries.
+Fig 5 presents the averaged rewards of the proposed re-
+current TD3 method (i.e., Algorithm 1) and the original TD3
+algorithm [10] obtained during the training. We can observe
+that rewards of the proposed recurrent TD3 and the original
+TD3 methods gradually grow with the increase of training
+47
+Authorized licensed use limited to: Louisiana Tech University. Downloaded on October 11,2024 at 19:28:48 UTC from IEEE Xplore.  Restrictions apply. 
+
+===== PAGE 6 =====
+
+(a) 32 s
+ (b) 61 s
+(c) 96 s
+ (d) 123 s
+(e) 151 s
+ (f) w/o Curriculum Learning
+Fig. 6. (a) - (e) Snapshots of a sample trial in a turbulent and unseen
+environment at different time steps. The robot search trajectory is painted in
+blue. We highlighted the durations of robot search behaviors along the robot
+trajectory. Except the ‘zigzag’ search behavior, the agent learned ‘backward
+search’, ‘crosswind casting’, and ‘upwind surge’ behaviors from the training.
+These learned search behaviors were very similar to animal olfactory search
+strategies, such as moth-inspired [14] and lobster-inspired [18] methods.
+(f) Search trajectory generated by the agent trained without the curriculum
+learning pattern.
+episodes. In Fig. 5(a), the averaged reward of the proposed
+recurrent TD3 method converges around 100, indicating a high
+success rate of correctly ﬁnding the source position. Compared
+to the original TD3 method, which converges around 50, the
+proposed recurrent TD3 method is more effective. In Fig. 5(b)-
+(d), our proposed method achieves a higher reward value at the
+end of the training, reﬂecting that the recurrent TD3 method
+is more effective in ﬁnding the odor source than the original
+TD3 algorithm. We will further prove this statement in the
+repeated tests at Section V -D.
+C. Sample Trials in A Turbulent Flow Environment
+We ﬁrst present a sample trial, where the proposed recurrent
+TD3 method was implemented in a turbulent and unseen ﬂow
+environment, where the time-varying wind was calculated via
+U0 =( 1,0) m/s and ς=6 . We also changed the odor source
+location, which was located at (10,0) m in this group of tests.
+Fig. 6 presents snapshots of the sample trial at different
+times during the search. As shown in Fig. 6(a), the robot
+started the search at (60,-40) m and employed the ‘zigzag’
+trajectory to ﬁnd plumes. At t=32 s, the robot detected the odor
+TABLE I
+STA TISTIC RESULTS OF REPEA TED TRIALS IN LAMINAR ENVIRONMENTS ;
+U0=(1,0) M/SA N D ς=2.
+Moth-
+inspired
+Method
+[14]
+Bayesian-
+Inference
+Method
+[19]
+TD3
+[10]
+RDPG
+[30]
+The
+Proposed
+Recurrent-
+TD3
+Success
+Rate 100/100 100/100 77/100 90/100 100/100
+Avg.
+Search
+Time (s)
+133.16 147.25 117.62 131.32 101.05
+Std.
+Search
+Time
+50.54 30.80 49.02 89.96 36.04
+plume for the ﬁrst time, which activates the proposed recurrent
+TD3 method. After this plume detection, the robot moved
+upwind but did not detect plumes (i.e., Fig. 6(b)). At t=61 s, the
+robot performed a backward crosswind search and successfully
+detected plumes at t=96 s as indicated by Fig. 6(c). After that,
+the robot continued moving upwind and re-detected plumes at
+t=110 s (i.e., Fig. 6(d)). The robot correctly found the odor
+source location at t=151 s as shown in Fig.6(e). Fig. 6(f)
+presents the search trajectories created by the search agent
+trained without the curriculum learning pattern. As presented
+in Fig. 6(e), the robot with the curriculum learning generated
+a wavy search trajectory during the upwind surge, which
+is similar to the ‘track-in’ and ‘track-out’ behaviors in the
+traditional moth-inspired method [14]. These curly movements
+help the robot to maintain inside plumes during the upwind
+surge, helping improve the success rate of ﬁnding the odor
+source. By contrast, the agent without the curriculum learning
+has a smooth upwind surge trajectory, and it failed to ﬁnd the
+odor source in this environment.
+Fig. 7 presents robot search trajectories with different odor
+source and robot initial positions. It is shown that the proposed
+recurrent TD3 method can effectively trace odor plumes and
+correctly ﬁnd the source location no matter how the odor
+source and robot initial positions change.
+D. Repeated Tests and Statistic Analysis
+To further evaluate the effectiveness of the proposed re-
+current TD3 method, we implemented it in repeated tests
+and compared it with other olfactory-based navigation meth-
+ods, including the traditional moth-inspired method [14], the
+Bayesian-inference method [19], the original TD3 algorithm
+[10], and the RDPG algorithm [30]. We ﬁrst implemented
+the above navigation methods in a laminar ﬂow environment,
+where U0 =( 1,0) m/s and ς=2 , and then in a turbulent
+ﬂow environment, where U0 =( 1,0) m/s and ς=5 . Each
+navigation method was repeatedly performed 100 times in both
+laminar and turbulent ﬂow environments, and the robot started
+at a far end of the search area, i.e., (80, -40) m. The time limit
+for a trial in this group of tests is 400 s.
+Table I presents the statistic results of in laminar environ-
+ments. Compared to the original TD3 method and RDPG,
+48
+Authorized licensed use limited to: Louisiana Tech University. Downloaded on October 11,2024 at 19:28:48 UTC from IEEE Xplore.  Restrictions apply. 
+
+===== PAGE 7 =====
+
+(a)
+ (b)
+ (c)
+ (d)
+Fig. 7. Trials with different odor source locations and robot initial positions. The odor source is located at (a) (10,-10) m, (b) (10,-20) m, (c) (30,-10) m,
+and (d) (20,10) m. The robot initial positions are labeled in the diagram.
+TABLE II
+STA TISTIC RESULTS OF REPEA TED TRIALS IN TURBULENT
+ENVIRONMENTS ; U0=(1,0) M/SA N D ς=5.
+Moth-
+inspired
+Method
+[14]
+Bayesian-
+Inference
+Method
+[19]
+TD3
+[10]
+RDPG
+[30]
+The
+Proposed
+Recurrent-
+TD3
+Success
+Rate 59/100 88/100 60/100 68/100 92/100
+Avg.
+Search
+Time (s)
+287.37 190.02 167.25 202.02 141.74
+Std.
+Search
+Time
+112.22 91.87 88.26 134.72 85.10
+our proposed method achieved a higher success rate and a
+smaller standard deviation, indicating the effectiveness of the
+proposed method. Compared to moth-inspired and Bayesian-
+inference methods, the proposed method achieved a shorter
+averaged search time. Table II shows the statistic results in
+turbulent ﬂow environments. The proposed method achieved
+the highest success rate in 100 repeated tests, i.e., 92%, which
+is 24% higher than the RDPG method, 32% higher than the
+original TD3 method.
+From this group of tests, we observe that: 1) compared to
+MDP , the POMDP is more effective in modeling the robotic
+OSL problem; 2) compared to RDPG, the recurrent TD3
+can learn a better search strategy to ﬁnd odor sources in
+unknown environments; 3) in the simulated laminar/turbulent
+ﬂow environments, the proposed method outperforms other
+methods in terms of the success rate and the averaged search
+time. It is worth mentioning that compared to the base model
+(i.e., Fig. 5(a)), which achieved 89% success rate and 158.29
+s averaged search time in this group of tests, our curriculum
+training method improves the success rate by 3% and reduces
+the averaged search time by 16.55 s.
+E. Discussion and Future Works
+From search trajectories generated by the proposed recurrent
+TD3 method (i.e., Fig. 6), we found that the search behaviors
+learned from the training were very similar to the ones used
+in traditional olfactory-based navigation methods, such as the
+‘upwind surge’ and ‘crosswind excursion’ in the moth-inspired
+method [14] and the ‘backward search’ in the lobster-inspired
+method [18]. In addition, the robot knew when and how
+to use the learned search behaviors to ﬁnd the odor source
+location effectively and adapted the learned skills in unseen
+environments. When we changed odor source locations, the
+robot could still successfully ﬁnd the source location, showing
+that the recurrent actor network did not memorize the ﬁnal
+source location but learned a valid plume tracing strategy.
+Moreover, in repeated tests, we found that the proposed
+recurrent TD3 achieved a better search performance compared
+to the original TD3 and the RDPG methods, demonstrating the
+effectiveness of the proposed navigation method.
+The future research directions include the following topics:
+1) implementing the proposed recurrent TD3 method in a real-
+world environment. Although simulation results suggest the
+effectiveness of the proposed method, implementing it in real-
+world environment is still a challenging task due to the gap
+between the simulation and the environment. Some existing
+techniques, e.g., transfer learning [40], [41], can be applied
+to mitigate the sim-to-real gap; 2) multiple search agents.
+Using multiple search agents instead of a single one could
+further improve the search performance since more agents
+can collect more samples from the environment, improving
+the sample efﬁciency; 3) other types of recurrent networks.
+Besides LSTM, other recurrent layers can be tested, e.g., gated
+recurrent unit (GRU).
+VI. C ONCLUSION
+This work presents a new olfactory-based navigation algo-
+rithm via an end-to-end recurrent deep RL method. We ﬁrst
+model the plume tracing process as an POMDP and devised
+a recurrent TD3 method to train the search agent. During the
+training process, we deﬁne rewards to encourage the search
+agent to detect odor plumes and ﬁnd the odor source. After
+the training, we implement the proposed method in unseen tur-
+bulent ﬂow environments and change the odor source location.
+Compared to traditional olfactory-based navigation methods,
+simulation results show that the proposed method achieved a
+shorter averaged search time in repeated tests. As for deep
+learning-based method, the proposed method outperforms the
+original TD3 and RDPG algorithm in terms of the success
+rate, while the success rate is improved by 32% and 24%,
+respectively.
+49
+Authorized licensed use limited to: Louisiana Tech University. Downloaded on October 11,2024 at 19:28:48 UTC from IEEE Xplore.  Restrictions apply. 
+
+===== PAGE 8 =====
+
+REFERENCES
+[1] M. Dunbabin and L. Marques, “Robots for environmental monitoring:
+Signiﬁcant advancements and applications,” IEEE Robotics & Automa-
+tion Magazine, vol. 19, no. 1, pp. 24–39, 2012.
+[2] S. Soldan, G. Bonow, and A. Kroll, “Robogasinspector-a mobile robotic
+system for remote leak sensing and localization in large industrial
+environments: Overview and ﬁrst results,” IF AC Proceedings V olumes,
+vol. 45, no. 8, pp. 33–38, 2012.
+[3] R. A. Russell, “Robotic location of underground chemical sources,”
+Robotica, vol. 22, no. 1, pp. 109–115, 2004.
+[4] G. Ferri, M. V . Jakuba, and D. R. Y oerger, “A novel method for
+hydrothermal vents prospecting using an autonomous underwater robot,”
+in 2008 IEEE International Conference on Robotics and Automation .
+IEEE, 2008, pp. 1055–1060.
+[5] D. Silver, A. Huang, C. J. Maddison, A. Guez, L. Sifre, G. V an
+Den Driessche, J. Schrittwieser, I. Antonoglou, V . Panneershelvam,
+M. Lanctot et al., “Mastering the game of go with deep neural networks
+and tree search,” nature, vol. 529, no. 7587, p. 484, 2016.
+[6] V . Mnih, K. Kavukcuoglu, D. Silver, A. Graves, I. Antonoglou, D. Wier-
+stra, and M. Riedmiller, “Playing atari with deep reinforcement learn-
+ing,” arXiv preprint arXiv:1312.5602, 2013.
+[7] R. S. Sutton and A. G. Barto, Reinforcement learning: An introduction.
+MIT press, 2018.
+[8] T. P . Lillicrap, J. J. Hunt, A. Pritzel, N. Heess, T. Erez, Y . Tassa,
+D. Silver, and D. Wierstra, “Continuous control with deep reinforcement
+learning,” arXiv preprint arXiv:1509.02971, 2015.
+[9] G. Lample and D. S. Chaplot, “Playing fps games with deep reinforce-
+ment learning,” in Proceedings of the AAAI Conference on Artiﬁcial
+Intelligence, vol. 31, no. 1, 2017.
+[10] S. Fujimoto, H. Hoof, and D. Meger, “Addressing function approxi-
+mation error in actor-critic methods,” in International conference on
+machine learning. PMLR, 2018, pp. 1587–1596.
+[11] X.-x. Chen and J. Huang, “Odor source localization algorithms on
+mobile robots: A review and future outlook,”Robotics and Autonomous
+Systems, vol. 112, pp. 123–136, 2019.
+[12] H. Ishida, G. Nakayama, T. Nakamoto, and T. Moriizumi, “Controlling
+a gas/odor plume-tracking robot based on transient responses of gas
+sensors,” IEEE Sensors Journal, vol. 5, no. 3, pp. 537–545, 2005.
+[13] T. Jing, Q.-H. Meng, and H. Ishida, “Recent progress and trend of
+robot odor source localization,” IEEJ Transactions on Electrical and
+Electronic Engineering, vol. 16, no. 7, pp. 938–953, 2021.
+[14] W. Li, J. A. Farrell, S. Pang, and R. M. Arrieta, “Moth-inspired
+chemical plume tracing on an autonomous underwater vehicle,” IEEE
+Transactions on Robotics, vol. 22, no. 2, pp. 292–307, 2006.
+[15] B. T. Michaelis, K. W. Leathers, Y . V . Bobkov, B. W. Ache, J. C.
+Principe, R. Baharloo, I. M. Park, and M. A. Reidenbach, “Odor
+tracking in aquatic organisms: the importance of temporal and spatial
+intermittency of the turbulent plume,” Scientiﬁc reports, vol. 10, no. 1,
+pp. 1–11, 2020.
+[16] S. Shigaki, M. Y amada, D. Kurabayashi, and K. Hosoda, “Robust
+moth-inspired algorithm for odor source localization using multimodal
+information,”Sensors, vol. 23, no. 3, p. 1475, 2023.
+[17] S. Shigaki, Y . Shiota, D. Kurabayashi, and R. Kanzaki, “Modeling of
+the adaptive chemical plume tracing algorithm of an insect using fuzzy
+inference,” IEEE Transactions on Fuzzy Systems , vol. 28, no. 1, pp.
+72–84, 2019.
+[18] K. W. Leathers, B. T. Michaelis, and M. A. Reidenbach, “Interpreting
+the spatial-temporal structure of turbulent chemical plumes utilized in
+odor tracking by lobsters,” Fluids, vol. 5, no. 2, p. 82, 2020.
+[19] S. Pang and J. A. Farrell, “Chemical plume source localization,” IEEE
+Transactions on Systems, Man, and Cybernetics, Part B (Cybernetics),
+vol. 36, no. 5, pp. 1068–1080, 2006.
+[20] M. Park, P . Ladosz, and H. Oh, “Source term estimation using deep
+reinforcement learning with gaussian mixture model feature extraction
+for mobile sensors,”IEEE Robotics and Automation Letters, vol. 7, no. 3,
+pp. 8323–8330, 2022.
+[21] F. Rahbar, A. Marjovi, and A. Martinoli, “An algorithm for odor source
+localization based on source term estimation,” in 2019 International
+Conference on Robotics and Automation (ICRA) . IEEE, 2019, pp.
+973–979.
+[22] Y . Ji, Y . Zhao, B. Chen, Z. Zhu, Y . Liu, H. Zhu, and S. Qiu,
+“Source searching in unknown obstructed environments through source
+estimation, target determination, and path planning,” Building and En-
+vironment, vol. 221, p. 109266, 2022.
+[23] M. Jakuba and D. R. Y oerger, “Autonomous search for hydrothermal
+vent ﬁelds with occupancy grid maps,” in Proc. of ACRA, vol. 8, 2008,
+p. 2008.
+[24] A. Loisy and R. A. Heinonen, “Deep reinforcement learning for the
+olfactory search pomdp: a quantitative benchmark,” arXiv preprint
+arXiv:2302.00706, 2023.
+[25] H.-f. Jiu, S. Pang, J.-l. Li, and B. Han, “Odor plume source localization
+with a pioneer 3 mobile robot in an indoor airﬂow environment,” in
+IEEE SOUTHEASTCON 2014. IEEE, 2014, pp. 1–6.
+[26] L. Wang and S. Pang, “Chemical plume tracing using an auv based
+on pomdp source mapping and a-star path planning,” in OCEANS 2019
+MTS/IEEE SEATTLE. IEEE, 2019, pp. 1–7.
+[27] M. V ergassola, E. Villermaux, and B. I. Shraiman, “‘infotaxis’ as a
+strategy for searching without gradients,”Nature, vol. 445, no. 7126, p.
+406, 2007.
+[28] L. Wang, S. Pang, and J. Li, “Olfactory-based navigation via model-
+based reinforcement learning and fuzzy inference methods,” IEEE
+Transactions on Fuzzy Systems, 2020.
+[29] S. H. Singh, F. van Breugel, R. P . Rao, and B. W. Brunton, “Emer-
+gent behaviour and neural dynamics in artiﬁcial agents tracking odour
+plumes,” Nature Machine Intelligence, vol. 5, no. 1, pp. 58–70, 2023.
+[30] H. Hu, S. Song, and C. P . Chen, “Plume tracing via model-free
+reinforcement learning method,”IEEE transactions on neural networks
+and learning systems, 2019.
+[31] X. Chen, C. Fu, and J. Huang, “A deep q-network for robotic odor/gas
+source localization: Modeling, measurement and comparative study,”
+Measurement, vol. 183, p. 109725, 2021.
+[32] Y . Zhao, B. Chen, X. Wang, Z. Zhu, Y . Wang, G. Cheng, R. Wang,
+R. Wang, M. He, and Y . Liu, “A deep reinforcement learning based
+searching method for source localization,” Information Sciences, vol.
+588, pp. 67–81, 2022.
+[33] N. Heess, J. J. Hunt, T. P . Lillicrap, and D. Silver, “Memory-based con-
+trol with recurrent neural networks,” arXiv preprint arXiv:1512.04455,
+2015.
+[34] L. Meng, R. Gorbet, and D. Kuli ´c, “Memory-based deep reinforcement
+learning for pomdps,” in 2021 IEEE/RSJ International Conference on
+Intelligent Robots and Systems (IROS). IEEE, 2021, pp. 5619–5626.
+[35] D. Silver, G. Lever, N. Heess, T. Degris, D. Wierstra, and M. Riedmiller,
+“Deterministic policy gradient algorithms,” in International conference
+on machine learning. Pmlr, 2014, pp. 387–395.
+[36] J. A. Farrell, J. Murlis, X. Long, W. Li, and R. T. Card ´e, “Filament-
+based atmospheric dispersion model to achieve short time-scale structure
+of odor plumes,” Environmental ﬂuid mechanics, vol. 2, no. 1-2, pp.
+143–169, 2002.
+[37] Q. Lu, Q.-L. Han, and S. Liu, “A cooperative control framework
+for a collective decision on movement behaviors of particles,” IEEE
+Transactions on Evolutionary Computation, vol. 20, no. 6, pp. 859–873,
+2016.
+[38] J.-y. Zhou, J.-g. Li, and S.-g. Cui, “A bionic plume tracing method with
+a mobile robot in outdoor time-varying airﬂow environment,” in 2015
+IEEE International Conference on Information and Automation. IEEE,
+2015, pp. 2351–2355.
+[39] L. Wang and S. Pang, “Robotic odor source localization via adaptive
+bio-inspired navigation using fuzzy inference methods,” Robotics and
+Autonomous Systems, vol. 147, p. 103914, 2022.
+[40] X. B. Peng, M. Andrychowicz, W. Zaremba, and P . Abbeel, “Sim-to-real
+transfer of robotic control with dynamics randomization,” in2018 IEEE
+international conference on robotics and automation (ICRA). IEEE,
+2018, pp. 3803–3810.
+[41] D. Ho, K. Rao, Z. Xu, E. Jang, M. Khansari, and Y . Bai, “Retinagan:
+An object-aware approach to sim-to-real transfer,” in2021 IEEE Inter-
+national Conference on Robotics and Automation (ICRA). IEEE, 2021,
+pp. 10 920–10 926.
+50
+Authorized licensed use limited to: Louisiana Tech University. Downloaded on October 11,2024 at 19:28:48 UTC from IEEE Xplore.  Restrictions apply. 

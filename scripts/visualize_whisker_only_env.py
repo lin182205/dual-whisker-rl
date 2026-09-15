@@ -25,6 +25,7 @@ from dual_whisker_rl.envs.whisker_only_env import WhiskerOnlyPuffEnv
 from dual_whisker_rl.envs.whisker_only_env import WORLD_MAX
 from dual_whisker_rl.envs.whisker_only_env import WORLD_MIN
 from dual_whisker_rl.paths import resolve_path_args
+from dual_whisker_rl.visualization import save_matplotlib_animation
 
 
 def build_plume_colormap() -> colors.LinearSegmentedColormap:
@@ -57,12 +58,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--steps", type=int, default=120)
     parser.add_argument("--resolution", type=int, default=100)
     parser.add_argument("--png-path", type=Path, default=Path("results/figures/whisker_only_env.png"))
-    parser.add_argument("--gif-path", type=Path, default=Path("results/figures/whisker_only_env.gif"))
+    parser.add_argument(
+        "--animation-path",
+        "--gif-path",
+        dest="animation_path",
+        type=Path,
+        default=Path("results/figures/whisker_only_env.mp4"),
+        help="动画输出路径；扩展名支持 .mp4 或 .gif，--gif-path 为兼容别名。",
+    )
     parser.add_argument(
         "--fps",
         type=float,
         default=None,
-        help="手动指定 GIF 帧率；默认根据环境 dt 和 realtime-speed 自动计算。",
+        help="手动指定动画帧率；默认根据环境 dt 和 realtime-speed 自动计算。",
     )
     parser.add_argument(
         "--realtime-speed",
@@ -99,7 +107,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="可视化环境也开域随机化（与训练一致的分布）。",
     )
-    return resolve_path_args(parser.parse_args(), "png_path", "gif_path", "model_path")
+    return resolve_path_args(parser.parse_args(), "png_path", "animation_path", "model_path")
 
 
 def capture_rollout(
@@ -508,7 +516,7 @@ def render_animation(
     realtime_speed: float,
     interpolation_frames: int,
 ) -> None:
-    """按参考动画样式渲染 GIF：气味场、源点、机器人、左右触须和信息框。"""
+    """按参考样式渲染动画：气味场、源点、机器人、左右触须和信息框。"""
     output_path.parent.mkdir(parents=True, exist_ok=True)
     stride = max(1, int(stride))
     interpolation_frames = max(0, int(interpolation_frames))
@@ -739,7 +747,7 @@ def render_animation(
         interval=max(1, int(1000 / fps)),
         blit=False,
     )
-    anim.save(output_path, writer=animation.PillowWriter(fps=fps), dpi=130)
+    save_matplotlib_animation(anim, output_path, fps=fps, dpi=130)
     plt.close(fig)
 
 
@@ -782,7 +790,7 @@ def main() -> None:
     render_static(episode_data, args.png_path, args.title)
     render_animation(
         episode_data,
-        args.gif_path,
+        args.animation_path,
         args.title,
         fps=args.fps,
         stride=args.animation_stride,
@@ -790,7 +798,7 @@ def main() -> None:
         interpolation_frames=args.interpolation_frames,
     )
     print(f"saved_png={args.png_path}")
-    print(f"saved_gif={args.gif_path}")
+    print(f"saved_animation={args.animation_path}")
 
 
 if __name__ == "__main__":

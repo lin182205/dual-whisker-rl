@@ -10,11 +10,13 @@ from gymnasium import spaces
 import numpy as np
 
 from dual_whisker_rl.envs.robot_model import RobotState
+from dual_whisker_rl.envs.paper_plume import PaperPuffPlume
 from dual_whisker_rl.envs.sensor_model import AsymmetricGasSensor
 from dual_whisker_rl.envs.sensor_model import FirstOrderGasSensor
 from dual_whisker_rl.envs.whisker_model import DualWhiskerSampler
 from dual_whisker_rl.hardware.sensor_preprocess import SensorPreprocessConfig
 from dual_whisker_rl.observation import WhiskerObservationBuilder
+from dual_whisker_rl.envs.world_bounds import resolve_world_bounds, world_bounds_config
 
 
 WORLD_MIN = -0.5
@@ -42,14 +44,17 @@ class DynamicPuffPlume:
         wind_sampling_mode: str = "random",
         obstacles: np.ndarray | None = None,
         plume_overrides: dict[str, Any] | None = None,
-        world_half: float = WORLD_MAX,
+        world_bounds: tuple[float, float] | list[float] | None = None,
+        world_half: float | None = None,
     ) -> None:
         self.rng = np.random.default_rng(seed)
+        self.noise_rng = np.random.default_rng(int(seed) + 0x4E4F4953)
         # 场地半宽可配置（默认 ±0.5 = 1m）。移动机器人环境用更大的场地以显现追踪行为。
-        self.world_half = float(world_half)
-        self.world_min = -self.world_half
-        self.world_max = self.world_half
+        self.world_min, self.world_max, self.world_half = resolve_world_bounds(
+            world_bounds, world_half, default_half=WORLD_MAX
+        )
         self.source_position_override = source_position
+        self._configured_source_position_override = source_position
         if source_position is None:
             self.source_x = self.world_min - 0.7
             self.source_y = 0.0
@@ -81,6 +86,7 @@ class DynamicPuffPlume:
         self.wind_speed_mean = 0.5 * (
             self.wind_speed_range[0] + self.wind_speed_range[1]
         )
+        self._configured_wind_speed_mean = self.wind_speed_mean
         self.wind_speed_std = 0.006
         self.wind_relaxation = 0.97
         # 平均风向的缓慢蜿蜒（meander）：OU 过程，均值回归到 wind_direction_base。
@@ -170,6 +176,7 @@ class DynamicPuffPlume:
         return {
             "world_min": self.world_min,
             "world_max": self.world_max,
+            "world_bounds": world_bounds_config(self.world_min, self.world_max),
             "source_position": (float(self.source_x), float(self.source_y)),
             "obstacles": self.obstacles.copy(),
             "gas_field_mode": "puff",
@@ -452,7 +459,7 @@ class DynamicPuffPlume:
         concentration += float(self._puff_concentration(x, y))
         concentration += self.gas_background
         if add_noise:
-            concentration += float(self.rng.normal(0.0, self.gas_noise_std))
+            concentration += float(self.noise_rng.normal(0.0, self.gas_noise_std))
         return max(0.0, concentration)
 
     def grid(
@@ -487,7 +494,7 @@ class DynamicPuffPlume:
                 / (2.0 * np.pi * sigma_downwind * sigma_crosswind)
             ).astype(np.float32)
         if add_noise:
-            concentration += self.rng.normal(
+            concentration += np.random.default_rng(0).normal(
                 0.0, self.gas_noise_std, size=concentration.shape
             ).astype(np.float32)
         concentration = np.maximum(concentration, 0.0)
@@ -520,12 +527,33 @@ class DynamicPuffPlume:
         self.wind_dir_meander_sigma = n["wind_dir_meander_sigma"] * float(r.uniform(0.6, 1.4))
         self.max_puff_age = n["max_puff_age"] * float(r.uniform(0.7, 1.3))
 
-    def reset(self, seed: int | None = None) -> None:
+    def reset(self, seed: int | None = None, scenario: dict[str, Any] | None = None) -> None:
+        """重置羽流；可选 scenario 用于 E4 固定场景复现。"""
         if seed is not None:
             self.rng = np.random.default_rng(seed)
+            self.noise_rng = np.random.default_rng(int(seed) + 0x4E4F4953)
         if self.domain_randomization:
             self._randomize_params()
+            episode_puff_mass = float(self.puff_init_mass)
+        else:
+            episode_puff_mass = float(self._dr_nominal.get("puff_init_mass", self.puff_init_mass))
+        scenario = scenario if isinstance(scenario, dict) else {}
+        self.wind_speed_mean = self._configured_wind_speed_mean
+        self.puff_init_mass = episode_puff_mass
+        self.source_position_override = self._configured_source_position_override
+        forced_wind = scenario.get("wind_direction")
+        forced_speed = scenario.get("wind_speed")
         self._sample_wind()
+        if forced_wind is not None:
+            self.wind_direction_base = float(forced_wind)
+            self.wind_direction = self.wind_direction_base
+        if forced_speed is not None:
+            self.wind_speed = float(forced_speed)
+            self.wind_speed_mean = float(forced_speed)
+        if "source_strength" in scenario:
+            self.puff_init_mass = episode_puff_mass * float(scenario["source_strength"])
+        if scenario.get("source_position") is not None:
+            self.source_position_override = tuple(float(v) for v in scenario["source_position"])
         self._place_source_upwind()
         self._warmup_puffs()
 
@@ -574,22 +602,52 @@ class WhiskerOnlyPuffEnv(gym.Env):
         self.time_penalty = float(cfg.get("time_penalty", 0.04))
 
         # 场地半宽可配置（默认 ±0.5 = 1m）。移动机器人环境用更大场地以显现追踪。
-        self.world_half = float(cfg.get("world_half", WORLD_MAX))
-        self.world_min = -self.world_half
-        self.world_max = self.world_half
+        self.world_min, self.world_max, self.world_half = resolve_world_bounds(
+            cfg.get("world_bounds"), cfg.get("world_half"), default_half=WORLD_MAX
+        )
 
         # 与 `PlumeEnv` 保持一致：环境持有一个 plume 对象负责气味场。
+        # 默认保留项目现有动态高斯 puff；paper 模式复现 Singh et al. 的
+        # Poisson 释放 + 横风随机游走 + 线性半径扩散模型。
         source_position = cfg.get("source_position")
-        self.plume = DynamicPuffPlume(
-            seed=seed,
-            source_position=tuple(source_position) if source_position is not None else None,
-            dt=float(cfg.get("dt", 0.2)),
-            gas_field_mode=str(cfg.get("gas_field_mode", "puff")),
-            wind_speed_range=tuple(cfg.get("wind_speed_range", (0.06, 0.11))),
-            wind_sampling_mode=str(cfg.get("wind_sampling_mode", "random")),
-            plume_overrides=cfg.get("plume_overrides"),
-            world_half=self.world_half,
-        )
+        self.plume_model = str(cfg.get("plume_model", "dynamic"))
+        plume_common = {
+            "seed": seed,
+            "source_position": (
+                tuple(source_position) if source_position is not None else None
+            ),
+            "dt": float(cfg.get("dt", 0.2)),
+            "wind_speed_range": tuple(
+                cfg.get(
+                    "wind_speed_range",
+                    (0.5, 0.5) if self.plume_model == "paper" else (0.06, 0.11),
+                )
+            ),
+            "wind_sampling_mode": str(
+                cfg.get(
+                    "wind_sampling_mode",
+                    "fixed" if self.plume_model == "paper" else "random",
+                )
+            ),
+            "plume_overrides": cfg.get("plume_overrides"),
+            "world_bounds": (self.world_min, self.world_max),
+            "world_half": self.world_half,
+        }
+        if self.plume_model == "dynamic":
+            self.plume = DynamicPuffPlume(
+                gas_field_mode=str(cfg.get("gas_field_mode", "puff")),
+                **plume_common,
+            )
+        elif self.plume_model == "paper":
+            self.plume = PaperPuffPlume(
+                gas_field_mode="paper_puff",
+                profile=str(cfg.get("paper_plume_profile", "constant")),
+                **plume_common,
+            )
+        else:
+            raise ValueError(
+                f"plume_model must be 'dynamic' or 'paper', got {self.plume_model!r}"
+            )
         self.field = self.plume  # 兼容旧可视化脚本中的 env.field 访问。
         self.whiskers = DualWhiskerSampler(
             length=float(cfg.get("whisker_length", 0.15)),
@@ -597,6 +655,8 @@ class WhiskerOnlyPuffEnv(gym.Env):
             servo_60deg_time_s=float(cfg.get("servo_60deg_time_s", 0.12)),
         )
         self.rng = np.random.default_rng(seed)
+        self.left_sensor_rng = np.random.default_rng(int(seed) + 0x4C53454E)
+        self.right_sensor_rng = np.random.default_rng(int(seed) + 0x5253534E)
         self.dt = float(cfg.get("dt", 0.2))
         self.sensor_model = str(cfg.get("sensor_model", "asymmetric"))
         self.sensor_alpha = float(cfg.get("sensor_alpha", 0.95))
@@ -611,8 +671,8 @@ class WhiskerOnlyPuffEnv(gym.Env):
             "recovery_tau": self.sensor_recovery_tau,
             "noise_std": self.sensor_noise_std,
         }
-        self.left_sensor = self._build_sensor()
-        self.right_sensor = self._build_sensor()
+        self.left_sensor = self._build_sensor("left")
+        self.right_sensor = self._build_sensor("right")
 
         # 域随机化：同时随机化羽流物理和传感器特性。默认关闭（便于复现/诊断），
         # 训练时建议在配置中打开 domain_randomization=True 以提高 sim-to-real 鲁棒性。
@@ -703,8 +763,11 @@ class WhiskerOnlyPuffEnv(gym.Env):
         # DR 下引入随机基线漂移，模拟真实 MQ-3 每次上电基线不一致。
         self.sensor_baseline_drift_std = float(r.uniform(0.0, 0.010))
 
-    def _build_sensor(self) -> FirstOrderGasSensor | AsymmetricGasSensor:
-        """按配置构造单个气体传感器。"""
+    def _build_sensor(self, side: str) -> FirstOrderGasSensor | AsymmetricGasSensor:
+        """按配置构造单个气体传感器，并使用侧别独立随机流。"""
+        if side not in ("left", "right"):
+            raise ValueError("sensor side must be left or right")
+        sensor_rng = self.left_sensor_rng if side == "left" else self.right_sensor_rng
         if self.sensor_model == "first_order":
             return FirstOrderGasSensor(self.sensor_alpha)
         return AsymmetricGasSensor(
@@ -714,7 +777,7 @@ class WhiskerOnlyPuffEnv(gym.Env):
             noise_std=self.sensor_noise_std,
             baseline_drift_std=self.sensor_baseline_drift_std,
             baseline_tau=self.sensor_baseline_tau,
-            rng=self.rng,
+            rng=sensor_rng,
         )
 
     def reset(
@@ -726,12 +789,25 @@ class WhiskerOnlyPuffEnv(gym.Env):
         super().reset(seed=seed)
         if seed is not None:
             self.rng = np.random.default_rng(seed)
+            self.left_sensor_rng = np.random.default_rng(int(seed) + 0x4C53454E)
+            self.right_sensor_rng = np.random.default_rng(int(seed) + 0x5253534E)
         if self.domain_randomization:
             self._randomize_sensors()
         # 重建传感器：使其使用当前 rng 和（可能已随机化的）参数。
-        self.left_sensor = self._build_sensor()
-        self.right_sensor = self._build_sensor()
-        self.plume.reset(seed)
+        self.left_sensor = self._build_sensor("left")
+        self.right_sensor = self._build_sensor("right")
+        # 实验运行器可通过 Gymnasium 的 options 注入已封存场景。
+        # 旧调用不传 options 时保持原有随机采样行为。
+        plume_scenario = None
+        if isinstance(options, dict):
+            candidate = options.get("scenario")
+            if isinstance(candidate, dict):
+                plume_scenario = candidate
+        if isinstance(self.plume, DynamicPuffPlume):
+            self.plume.reset(seed, scenario=plume_scenario)
+        else:
+            # PaperPuffPlume 保持旧 reset(seed) 接口。
+            self.plume.reset(seed)
         self.step_count = 0
         self.prev_left = 0.0
         self.prev_right = 0.0

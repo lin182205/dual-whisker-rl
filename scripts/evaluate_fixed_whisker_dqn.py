@@ -34,7 +34,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--figure-path", type=Path, default=Path("results/figures/fixed_whisker_dqn_eval_trajectory.png"))
     parser.add_argument("--sensor-response-path", type=Path, default=Path("results/figures/fixed_whisker_dqn_sensor_response.png"))
     parser.add_argument("--whisker-sector-path", type=Path, default=Path("results/figures/fixed_whisker_dqn_whisker_sectors.png"))
-    parser.add_argument("--animation-path", type=Path, default=Path("results/figures/fixed_whisker_dqn_eval_animation.gif"))
+    parser.add_argument("--animation-path", type=Path, default=Path("results/figures/fixed_whisker_dqn_eval_animation.mp4"))
     parser.add_argument("--animation-stride", type=int, default=1)
     parser.add_argument("--animation-fps", type=int, default=4)
     return resolve_path_args(

@@ -35,6 +35,7 @@ from dual_whisker_rl.agents import TransformerHistoryExtractor
 from dual_whisker_rl.envs import MobileWhiskerPuffEnv
 from dual_whisker_rl.paths import portable_path
 from dual_whisker_rl.paths import resolve_path_args
+from dual_whisker_rl.visualization import save_matplotlib_animation
 from train_whisker_only_ppo import load_config
 from visualize_whisker_only_env import build_plume_colormap
 from visualize_whisker_only_env import draw_robot_heading_marker
@@ -707,7 +708,7 @@ def save_attention_animation(
         blit=False,
         repeat=False,
     )
-    rollout_animation.save(path, writer=animation.PillowWriter(fps=fps), dpi=110)
+    save_matplotlib_animation(rollout_animation, path, fps=fps, dpi=110)
     plt.close(fig)
 
 
@@ -839,7 +840,7 @@ def main() -> None:
     save_per_head_plots(data, output_dir)
     save_attention_animation(
         data,
-        output_dir / "attention_rollout.gif",
+        output_dir / "attention_rollout.mp4",
         stride=args.animation_stride,
         fps=args.animation_fps,
     )

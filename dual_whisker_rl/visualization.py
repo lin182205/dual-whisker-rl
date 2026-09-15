@@ -12,6 +12,53 @@ import matplotlib.pyplot as plt
 from dual_whisker_rl.plotting import draw_odor_field
 
 
+def save_matplotlib_animation(
+    anim: animation.Animation,
+    path: Path,
+    *,
+    fps: float,
+    dpi: float | None = None,
+) -> None:
+    """按输出扩展名保存 Matplotlib 动画，默认推荐 H.264 MP4。"""
+
+    path = Path(path)
+    suffix = path.suffix.lower()
+    if suffix == ".mp4":
+        if not animation.writers.is_available("ffmpeg"):
+            raise RuntimeError(
+                "导出 MP4 需要 FFmpeg。请安装 FFmpeg、将 ffmpeg 加入 PATH，"
+                "或显式传入 .gif 输出路径。"
+            )
+        writer = animation.FFMpegWriter(
+            fps=fps,
+            codec="libx264",
+            extra_args=[
+                "-vf",
+                "pad=ceil(iw/2)*2:ceil(ih/2)*2",
+                "-crf",
+                "21",
+                "-preset",
+                "medium",
+                "-pix_fmt",
+                "yuv420p",
+                "-movflags",
+                "+faststart",
+            ],
+        )
+    elif suffix == ".gif":
+        writer = animation.PillowWriter(fps=fps)
+    else:
+        raise ValueError(
+            f"不支持的动画格式 {suffix or '<无扩展名>'}；只支持 .mp4 和 .gif。"
+        )
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    save_kwargs: dict[str, Any] = {"writer": writer}
+    if dpi is not None:
+        save_kwargs["dpi"] = dpi
+    anim.save(path, **save_kwargs)
+
+
 def save_trajectory_animation(
     env: Any,
     trajectory: list[dict[str, Any]],
@@ -21,7 +68,7 @@ def save_trajectory_animation(
     stride: int = 1,
     fps: int = 4,
 ) -> None:
-    """Save an animated GIF for a robot trajectory."""
+    """按路径扩展名保存机器人轨迹动画。"""
 
     if not trajectory:
         return
@@ -107,6 +154,5 @@ def save_trajectory_animation(
         blit=False,
         repeat=False,
     )
-    writer = animation.PillowWriter(fps=fps)
-    anim.save(path, writer=writer)
+    save_matplotlib_animation(anim, path, fps=fps)
     plt.close(fig)

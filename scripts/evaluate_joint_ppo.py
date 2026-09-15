@@ -1,4 +1,4 @@
-"""评估 Joint PPO，并输出轨迹图、传感器曲线、触须扇区统计和 GIF。"""
+"""评估 Joint PPO，并输出轨迹图、传感器曲线、触须扇区统计和动画。"""
 
 from __future__ import annotations
 
@@ -34,7 +34,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--figure-path", type=Path, default=Path("results/figures/joint_ppo_eval_trajectory.png"))
     parser.add_argument("--sensor-response-path", type=Path, default=Path("results/figures/joint_ppo_sensor_response.png"))
     parser.add_argument("--whisker-sector-path", type=Path, default=Path("results/figures/joint_ppo_whisker_sectors.png"))
-    parser.add_argument("--animation-path", type=Path, default=Path("results/figures/joint_ppo_eval_animation.gif"))
+    parser.add_argument("--animation-path", type=Path, default=Path("results/figures/joint_ppo_eval_animation.mp4"))
     parser.add_argument("--animation-stride", type=int, default=1)
     parser.add_argument("--animation-fps", type=int, default=4)
     return resolve_path_args(

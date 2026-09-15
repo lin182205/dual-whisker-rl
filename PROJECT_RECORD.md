@@ -1555,3 +1555,57 @@ README 已增加 Linux 云服务器建环境、后台训练、TensorBoard SSH �
 - 旧 `mobile_whisker_gru_ppo_9300000_steps.zip` 的堆叠维度为 300；默认 16 维环境明确不兼容，关闭 blank_age 后可按 15×20 正常恢复并产生动作。
 
 这些检查只证明状态机、奖励核算和日志链路正确。下一步应从新模型开始做同 seed 消融：`whisker_reacquisition_bonus=0.25` 对比 0，同时比较成功率、blank 底盘旋转比例、触须独立重捕获率和样本效率，不能用总回报单独判断奖励有效性。
+
+## 26. 实验动画默认迁移至 H.264 MP4
+
+为降低动态羽流、轨迹和注意力动画的存储占用，所有活动动画入口默认由 Pillow GIF 改为 FFmpeg/libx264 MP4。共享保存函数根据扩展名选择编码器：`.mp4` 使用 CRF 21、medium preset、`yuv420p` 和 faststart；`.gif` 仍使用 PillowWriter。编码滤镜会把奇数宽高补到偶数，解决 whisker-only 动画 1365×1105 无法直接编码为 yuv420p 的问题。FFmpeg 是系统依赖，不加入 Python requirements；不可用时明确提示安装并加入 PATH，不静默退回 GIF。
+
+移动评估、移动环境和 whisker-only 环境的正式参数改为 `--animation-path`，旧 `--gif-path` 作为兼容别名保留。扩展名决定格式，因此旧工作流仍可显式请求 GIF。固定触须/联合 PPO 评估和 Transformer 注意力动画也已改为默认 MP4；已有 GIF 不做转换或删除。
+
+验证结果：新增的 4 个 unittest 全部通过；移动、whisker-only 和注意力三种渲染器均实际输出 H.264/yuv420p，其中奇数尺寸被正确补成 1366×1106。对同一段 20 帧移动羽流轨迹，MP4 为 242,536 bytes，GIF 为 3,836,819 bytes，GIF 约为 MP4 的 15.82 倍。六个相关脚本的 `--help` 均正常。现有 Transformer 模型仍是旧的 300 维堆叠观测，与当前默认 320 维环境不兼容；注意力动画编码使用渲染函数独立验证，这一旧模型兼容问题与本次格式迁移无关。
+
+## 27. E4 统一仿真对比运行器
+
+本节实现了 E4 仿真主对比实验的统一运行链路：`dual_whisker_rl/e4_experiments.py` 提供固定场景库、方法动作适配、B0/B1 规则控制器、B6 单侧屏蔽和逐场景评估；`scripts/run_e4_experiments.py` 提供 `prepare/calibrate/train/evaluate/summarize/run/status` 阶段。
+
+正式场景按 3 风速 × 3 距离 × 2 横偏 × 3 源强 × 4 初始朝向 × 3 重复生成测试集 648 个场景，验证集 216 个场景；smoke 每个 split 取 12 个场景。场景通过 `reset(options={"scenario": ...})` 注入，源位置、位姿、风参数和源强记录在 JSONL 中。每个方法×种子逐场景原子保存，摘要同时给出分层指标和与主方法的配对差值。
+
+M/B2/B3/B6 使用 GRU 历史策略，B4 使用单帧 MLP，B5 通过输入维度启发式选择等宽 MLP 并记录实际宽度；B0/B1 不训练。B6 的缺失侧特征、几何、左右差分、命中、重捕获和气味奖励均屏蔽。 B1 阈值与搜索/扫描持续时间由配置控制，formal calibrate 在验证集搜索并封存 `calibration_b1.json`。B2 formal 校准会为十个固定扇区分别训练两个种子，在验证集按成功率、最终距离和 checkpoint 顺序选择；smoke 明确记录为未校准。
+
+恢复以状态文件、checkpoint、代码摘要、配置摘要和场景摘要为边界。 场景 JSONL 会再次和 manifest 做 hash 校验；评估每个 split 另写状态文件，支持逐场景 resume。恢复模型保留 PPO 参数与优化器，但环境重新初始化，metadata 明确记录续训来源；缺失场景不被计为失败。smoke 结果只用于连通性验证，不作为方法优劣结论。
+
+## 28. 自研双触须主控 PCB 原理图接口冻结
+
+为避免原理图绘制人员继续从开发板飞线记录中猜测板型、电源或连接器针序，新增 `docs/PCB_SCHEMATIC_INTERFACE_SPEC.md`，作为自研 PCB 的唯一权威输入。原有硬件模块图继续用于论文和系统概念说明，`hardware/wiring/wiring_notes.md` 与固件 README 继续保留开发板 smoke test 接线方式，但都显式指向新规范。
+
+### 28.1 已冻结的板级方案
+
+- 主控为 STM32F103C8T6/LQFP48，沿用当前 HSI 8MHz 和固件外设分配：PA0/PA1 为 TIM2 双舵机 PWM，PA2/PA3 为双路 MQ-3 ADC，PA9/PA10 为 USART1，PA13/PA14 为 SWD。
+- PC 接口改为板载 USB-C + CH340C，CH340C 按 3.3V 供电并使用内部时钟。串口协议保持 `STEP left right`、115200/8N1 和一问一答 JSON，不改上位机软件接口。
+- 外部稳压 5V（建议持续能力不低于 3A）供舵机和 MQ-3。USB VBUS 与外部 5V 经肖特基二极管或入后只生成逻辑 3.3V；USB 单独接入时 MCU/CH340C 可工作，但舵机和 MQ-3 保持断电。
+- J3/J4 舵机接口固定为 `GND / +5V_SERVO / PWM`；J5/J6 MQ-3 接口固定为 `+5V_SENSOR / GND / AO / DO`；J7 SWD 固定为 `3V3 / SWDIO / SWCLK / NRST / GND`。左右接口不可互换。
+- 两路 MQ-3 AO 使用 6.8kΩ/10kΩ、1% 分压和 100nF 滤波后进入 PA2/PA3；在模块 AO=5.25V 的最坏供电假设下，ADC 节点约 3.125V，计入电阻容差仍低于约 3.15V。DO 使用相同分压预留到 PB0/PB1，当前固件不启用。
+
+### 28.2 首版取舍
+
+首版定位为“最小验证板”，包含 MCU 最小系统、USB 串口、电源或入、ADC 分压、去耦、复位/启动、SWD 和测试点，不加入输入保险丝、防反接 MOS、TVS、负载开关或电流检测。USB D+/D- 的 ESD 器件只预留焊盘并标记 DNP。该取舍减少首板复杂度，但要求使用带限流的实验电源、严格检查 J2 极性，不能将此版本直接视为量产级硬件。
+
+### 28.3 原理图交付与验收原则
+
+新规范给出 J1～J7 的固定针序、网络命名、建议 BOM、ERC 审查清单和首板上电顺序。原理图验收必须覆盖 USB 单供电、外部 5V 单供电和双电源同时接入三种状态，并核对 USB 不向外设支路供电、两路 ADC 不绕过分压、CH340C 收发方向不交叉。制板后按“电源空载 → USB 枚举 → SWD → 串口 → ADC 已知电压 → 单舵机 → 双舵机双传感器”顺序逐级验证。
+
+## 29. E4 场地边界配置化与大场羽流适配
+
+本轮将仿真场地边界统一为配置项 `world_bounds: [min, max]`，当前 E4 配置为 `[-2.5, 2.5]`。`world_half` 作为旧入口兼容别名保留；显式边界要求关于原点对称，避免场景缩放、奖励归一化和羽流裁剪出现不一致。
+
+`DynamicPuffPlume`、`PaperPuffPlume`、`WhiskerOnlyPuffEnv` 和 `MobileWhiskerPuffEnv` 共享解析后的 `world_min/world_max`。E4 场景生成按场地半宽缩放源距离、下风距离和横风偏移，并在生成时检查源点与机器人均位于有效边界内；评估越界指标不再写死为 `abs(x)>=1.0`。动态移动环境的 puff 默认寿命按场地直径/最小风速估算，±2.5 场地下约为 45.8 s，保证羽流能够传播到下风侧区域。
+
+验证：E4 formal 场景数量仍为 648（validation 216），场景坐标和 plume 网格均落在 ±2.5；E4、paper 和移动场景初始化相关 17 项测试通过。低层移动环境未显式设置边界时继续使用旧 ±1.0 默认，正式 E4/配置文件使用新范围。
+
+## 30. E4 正式训练改用多进程环境并行
+
+`run_e4_experiments.py` 新增 `vec_env_backend`/`--vec-env-backend`，支持 `dummy`、`subproc` 和 `auto`。smoke 默认保留 `DummyVecEnv`，便于直接调试；formal 默认改为 `SubprocVecEnv`，8 个训练环境分别运行在独立 Python 进程中。Windows 显式使用 `spawn` 并在主入口调用 `freeze_support()`，避免子进程递归执行命令入口。
+
+训练代码不再依赖只有 `DummyVecEnv` 才有的 `env.envs[0]`。堆叠观测维度改从 VecEnv 的公开 `observation_space` 读取，GRU 的单帧基础维度通过 `get_attr("base_observation_dim")` 从各 worker 获取并检查一致性。并行后端写入 manifest、恢复签名和每个模型的 metadata，因此使用不同后端的旧任务不会被 `--resume` 静默混用。固定场景评估仍在主进程逐场景执行，保持原子保存和配对复现逻辑不变。
+
+验证：`py_compile` 和 E4 核心 4 项单元测试通过；Windows `spawn` 下以 2 个 worker 分别完成主方法 GRU 和 B5 历史 MLP 的 64-step smoke。主方法产物记录 `actual_timesteps=64`、`vec_env_backend=subproc`、`subproc_start_method=spawn`，模型与 TensorBoard event 均生成；同签名 `--resume` 正确跳过完成任务。`auto` 在 `n_envs=1` 时回退到 `dummy`，formal 默认仍解析为 8 worker 的 `subproc`。这些检查验证运行链路，不代表训练效果。

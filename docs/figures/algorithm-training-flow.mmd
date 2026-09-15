@@ -1,0 +1,56 @@
+flowchart LR
+    subgraph ENV[一、环境与观测构造]
+        direction TB
+        CONFIG[训练配置<br/>8 个并行环境<br/>每环境采样 512 步<br/>历史长度 20]
+        RESET[初始化场景与环境状态]
+        OBS[生成单帧观测<br/>无障碍 16 维 / 障碍 28 维]
+        HISTORY[历史观测构造<br/>堆叠最近 20 帧<br/>形成 320 / 560 维输入]
+
+        CONFIG --> RESET --> OBS
+        OBS -->|单帧观测：16 / 28 维| HISTORY
+    end
+
+    subgraph POLICY[二、PPO Actor-Critic 网络]
+        direction TB
+        GRU[时序编码层<br/>输入恢复为 20 × 16 / 20 × 28<br/>1 层 GRU：输入维度至 64]
+        PROJ[特征投影层<br/>1 层 Linear：64 至 64<br/>GELU 激活]
+        ACTOR[Actor 策略分支<br/>隐藏层 1：64 至 160 + Tanh<br/>隐藏层 2：160 至 160 + Tanh<br/>动作层：160 至 26]
+        CRITIC[Critic 价值分支<br/>隐藏层 1：64 至 160 + Tanh<br/>隐藏层 2：160 至 160 + Tanh<br/>价值层：160 至 1]
+        PREDICT[网络输出<br/>26 个 logits 拆为 6 + 10 + 10<br/>联合动作、旧动作对数概率、旧状态价值]
+
+        GRU --> PROJ
+        PROJ --> ACTOR --> PREDICT
+        PROJ --> CRITIC --> PREDICT
+    end
+
+    subgraph SAMPLING[三、并行环境采样]
+        direction TB
+        STEP[8 个环境执行联合动作<br/>移动、左扇区、右扇区]
+        DYNAMICS[推进机器人、羽流、双触须<br/>气体传感器与碰撞检测]
+        RESULT[返回下一观测、8 项奖励之和<br/>终止标记与环境信息]
+        SAMPLE[组成一条训练样本<br/>历史观测、动作、奖励、终止标记<br/>旧动作对数概率与旧状态价值]
+        BUFFER[RolloutBuffer<br/>持续接收每步训练样本<br/>下一观测进入下一时间步]
+
+        STEP --> DYNAMICS --> RESULT --> SAMPLE
+        SAMPLE -->|每步训练样本| BUFFER
+    end
+
+    subgraph UPDATE[四、PPO 参数更新]
+        direction TB
+        GAE[共 4096 条样本<br/>计算 GAE 与回报]
+        BATCH[打乱并划分批次<br/>批大小 256<br/>最多训练 5 个 epoch]
+        FORWARD[使用当前网络重新前向计算<br/>新动作对数概率、熵与新状态价值]
+        LOSS[计算 PPO 总损失<br/>策略裁剪损失 + 价值损失 + 熵正则]
+        OPTIM[Adam 反向传播<br/>更新 GRU、投影层、Actor 与 Critic]
+
+        GAE --> BATCH --> FORWARD --> LOSS --> OPTIM
+    end
+
+    OUTPUT[训练输出<br/>TensorBoard、checkpoint<br/>最佳模型、最终模型与运行元数据<br/>使用更新后的网络进入下一轮采样]
+
+    HISTORY -->|历史观测：320 / 560 维| GRU
+    PREDICT -->|动作接口：MultiDiscrete 6，10，10| STEP
+    BUFFER -->|8 × 512 = 4096 条样本| GAE
+    OPTIM -->|保存并回写最新网络参数| OUTPUT
+
+    style POLICY stroke-width:4px

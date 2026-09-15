@@ -1,5 +1,7 @@
 # STM32F103C8T6 双触须硬件接线说明
 
+> 本文件保留开发板/飞线阶段的接线参考。自研 PCB 必须以 [PCB 原理图接口规范](../../docs/PCB_SCHEMATIC_INTERFACE_SPEC.md) 为唯一依据；若两者冲突，以该规范为准。
+
 当前硬件：
 
 - STM32F103C8T6；
@@ -7,7 +9,7 @@
 - 右触须舵机；
 - 左 MQ-3 气体传感器；
 - 右 MQ-3 气体传感器；
-- PC 通过 USB-TTL 或板载 USB 串口与 STM32 通信。
+- PC 通过开发板外接 USB-TTL，或通过自研板板载 USB-C/CH340C 与 STM32 通信。
 
 当前目标是先完成最小 smoke test：
 
@@ -75,7 +77,9 @@ MQ-3 的 DO 数字输出第一阶段暂时不用，只使用 AO 模拟输出。
 
 ## 串口接线
 
-如果使用外部 USB-TTL 模块连接 USART1：
+### 开发板/飞线阶段
+
+使用外部 USB-TTL 模块连接 USART1：
 
 ```text
 USB-TTL TX -> STM32 PA10 / USART1_RX
@@ -83,7 +87,19 @@ USB-TTL RX -> STM32 PA9  / USART1_TX
 USB-TTL GND -> STM32 GND
 ```
 
-如果你的 STM32F103C8T6 开发板已经带 USB 转串口，则根据开发板实际串口连接选择对应 COM 口即可。
+如果 STM32F103C8T6 开发板已经带 USB 转串口，则根据开发板实际串口连接选择对应 COM 口。
+
+### 自研 PCB
+
+自研板采用板载 USB-C + CH340C，不需要再外接 USB-TTL：
+
+```text
+USB-C D+/D- -> CH340C
+CH340C TXD  -> STM32 PA10 / USART1_RX
+CH340C RXD  <- STM32 PA9  / USART1_TX
+```
+
+USB VBUS 只给逻辑域供电，不能带舵机和 MQ-3。完整针序、电源或入和保护要求见 PCB 原理图接口规范。
 
 ## CubeMX 外设配置建议
 

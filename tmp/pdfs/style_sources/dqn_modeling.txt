@@ -1,0 +1,1539 @@
+
+
+===== PAGE 1 =====
+
+Measurement 183 (2021) 109725
+Available online 25 June 2021
+0263-2241/© 2021 Elsevier Ltd. All rights reserved.
+A Deep Q-Network for robotic odor/gas source localization: Modeling, 
+measurement and comparative study 
+Xinxing Chen
+a , b , c
+, Chenglong Fu
+b , c
+, Jian Huang
+a , * 
+a
+Key Laboratory of Ministry of Education for Image Processing and Intelligent Control, School of Artificial Intelligence and Automation, Huazhong University of Science 
+and Technology, Wuhan 430074, China 
+b
+Shenzhen Key Laboratory of Biomimetic Robotics and Intelligent Systems, Shenzhen 518055, China 
+c
+Guangdong Provincial Key Laboratory of Human-Augmentation and Rehabilitation Robotics in Universities, Southern University of Science and Technology, Shenzhen 
+518055, China   
+ARTICLE INFO  
+Keywords: 
+Olfactory robot 
+Odor source localization 
+Deep Q-Network 
+Obstacle avoidance 
+Action policy 
+ABSTRACT  
+Robotic odor/gas source localization is a widely studied field, but most of the existing works are about rule-based 
+algorithms. In this paper, the Deep Q-Network algorithm is applied to solve the odor source localization problem. 
+An odor hits distribution model is proposed to model the odor concentration distribution in indoor environments, 
+taking the dispersion by airflow, the odor molecular random walk, and the obstacles into account. The Deep Q- 
+Network takes the stacked historic measurement data as the input and outputs the expected cumulative future 
+reward of actions of the robots. The network is trained through 35,000 repeated episodes of random odor source 
+localization tasks. The Deep Q-Network method is evaluated under four different environment settings in a 
+simplified simulator and compared with two widely used odor source localization algorithms. The evaluation 
+results demonstrate the advantages of the proposed algorithm. The algorithm is also validated in more complex 
+indoor environments.   
+1. Introduction 
+Robotic odor/gas source localization (OSL/GSL) is a cross-discipline 
+involved with ethology [1 – 4] , computational fluid dynamics [5,6] , 
+sensing technologies [7,8] , probability theory [9 – 12] , path planning 
+algorithms [13,14] and mobile robotics [15,16] . OSL in an indoor 
+environment is an important but challenging task, especially for custom 
+security and disaster rescue. Drugs and bombs release chemical plumes, 
+which cannot be easily smelled by humans. Police dogs are often 
+employed in these tasks because of their sensitive noses. However, some 
+dangerous situations, such as tracking poisonous gas leakage, would 
+harm the safety of these searching animals and their human handlers. 
+Robotic solutions are a good substitute for living searching animals. 
+They do not need much training from expert human handlers and can be 
+produced in a large amount. They don ’ t need rest in long-time tasks, 
+either. Compared with static sensor network solutions [17,18] , robotic 
+solutions require less sensor nodes and can be adjustable to various 
+environments. 
+Researches on robotic OSL started from the early 1900s. Various OSL 
+algorithms have been proposed, which can be roughly divided into four 
+categories [19,16] : gradient climbing algorithms, bio-inspired algo -
+rithms, probabilistic based algorithms, and multi-robot cooperation 
+algorithms. 
+Works on gradient climbing algorithms are early works in the OSL 
+field [20,21] . The robots climb the odor concentration gradient to locate 
+the odor source, where the concentration is usually the highest. How -
+ever, since the odor plumes are propagated by airflow, which is often 
+turbulent and may have eddies, the odor concentration gradient is not as 
+smooth as researchers expected. The robots tend to spiral in the 
+searching area and it will take a long time for them to locate the odor 
+source [16] . Bio-inspired algorithms [1 – 4,22,23] are designed to pro -
+gram the robots to mimic the living creature ’ s behavior when searching 
+for food and mates. These algorithms are easy to implement and 
+computationally cheap, but their searching time is not short, either [9] . 
+Probabilistic based algorithms [9 – 12] model the location of the odor 
+source as a probability distribution and update the location estimation 
+through iterative observations at different positions in the searching 
+area. These algorithms are reported to outperform some gradient 
+climbing and bio-inspired algorithms, but they are hard to implement 
+and of high computational cost [9] . Multi-robot cooperation algorithms 
+* Corresponding author. 
+E-mail address: huang_jan@mail.hust.edu.cn (J. Huang).  
+Contents lists available at ScienceDirect 
+Measurement 
+journal homepag e: www.el sevier.com/loc ate/mea surement 
+https://doi.org/10.1016/j.measurement.2021.109725 
+Received 10 March 2021; Received in revised form 1 June 2021; Accepted 4 June 2021   
+
+===== PAGE 2 =====
+
+Measurement 183 (2021) 109725
+2
+[24 – 26] encourage the robot to share knowledge about history obser -
+vation or keep a formation, which shortens the searching time. But these 
+algorithms rely on more than one robot, which will take much more cost 
+than other algorithms. 
+Most of the above algorithms are rule-based algorithms. The robot 
+will take movements according to its observations of odor concentration 
+and airflow direction, following a preset rule. These rules (e.g. fixed 
+odor concentration baseline, fixed odor plume distribution model) are 
+often built for a specific application scenario. Thus the algorithms are of 
+relatively poor robustness for various environmental conditions [27] . 
+Some fuzzy logic rule-based control algorithms [4,28 – 30] are proposed 
+to promote the robustness, but it is complex to set dedicated fuzzy rules 
+and membership functions. 
+Machine learning algorithms have been widely studied in the last 
+decades. Reinforcement learning (RL) [31] is a branch of machine 
+learning algorithms that let the agents learn an optimal action policy to 
+maximize the expected cumulative future reward. The action policy is 
+learned from a large number of repeated attempts under different 
+environment settings, so it is expected to be robust and can solve the 
+above issues of the rule-based algorithm. 
+RL have been applied in radiation source localization [32] , sound 
+source localization [33,34] , and walking-aid robot [35] . For OSL, [36] 
+applied a reinforcement learning-based multi-robot algorithm to opti -
+mize OSL performance across group size. [37] combined RL with 
+partially observable Markov decision process for autonomous under -
+water vehicles ’ plume tracing undersea. But these two works only 
+studied OSL in searching areas without obstacles. RL based OSL in the 
+area with obstacles has not been reported in the literature. 
+Based on this consideration, a Deep Q-Network (DQN) based OSL 
+algorithm is proposed in this paper. The algorithm is designed to guide 
+the robot to locate the odor source, which is of unknown releasing rate, 
+with minimum movement steps, and avoid obstacles in the searching 
+area. The performance of the proposed algorithm is evaluated under 
+different environment settings (with/ without obstacles, upwind/ 
+downwind starting positions of the robot, various source release rates, in 
+multiple rooms). The proposed algorithm is compared with a gradient 
+climbing algorithm in all settings, and a bio-inspired algorithm in two 
+settings where the robot starts from downwind positions. 
+Our main contributions are as follows:  
+(1) An odor hits distribution model has been proposed. The odor 
+plumes ’ dispersion through airflow, the odor molecular random 
+walk, and the existence of obstacles are all considered.  
+(2) A DQN based OSL algorithm with experience replay is designed. 
+A convolutional neural network is built for training the action- 
+value function. The historic measurement data matrices are 
+stacked to form the input of the neural network. 
+(3) The proposed OSL method is tested in various indoor environ -
+ments and compared with other two widely used methods. 
+The rest of the paper is organized as follows. The introduction of the 
+OSL task and the odor hits distribution model are presented in Section 2 . 
+The proposed DQN based OSL algorithm and its training details are in 
+Section 3 . Case study for different environmental conditions in the 
+simplified simulator and the comparison between algorithms are pre -
+sented in Section 4 . The validation of the DQN based algorithm in more 
+complex and realistic environments simulated by GADEN [5] is pre -
+sented in Section 5 . 
+2. The odor source localization task 
+The OSL task addressed in this paper is to find a single odor source in 
+an enclosed 10 m × 10 m 2D area, with obstacles inside, as efficiently as 
+possible. The area is modeled as a grid. The size of each cell is 1 m × 1 m. 
+The agent that is going to complete the task is called the olfactory robot. 
+Since the robot can build the map of the environment with SLAM 
+techniques, and SLAM is not among our main contribution of the paper, 
+in this work, the olfactory robot is assumed to have the prior knowledge 
+of the size of the area, the location of the obstacles and itself. It can also 
+measure the odor concentration and the airflow direction at its position. 
+Conventionally, the OSL task can be divided into three subtasks:  
+• Plume finding - searching in the environment to find odor plumes  
+• Plume tracking - searching towards the direction the odor plumes 
+come  
+• Source declaration - arriving at the immediate vicinity of the odor 
+source and determining its location 
+Due to the sophisticated dispersion of the odor plume, the olfactory 
+robot often has to address the first two subtasks alternately. So these two 
+subtasks are regarded as a whole in this paper. Normally, the source 
+declaration subtask can be achieved by recognition of odor acquisition 
+characteristics or other sensing modalities, such as vision. Therefore, in 
+this paper, it is assumed that the robot can locate the odor source when it 
+arrives within 1 m from the source. Similar assumptions are also made in 
+previous OSL papers [38 – 40] . 
+Odor concentration is measured in a discrete number of hits , a unit 
+which was also used in [41,9] . According to the physical nature of the 
+odor plume propagation, the odor concentration at a certain position 
+may be the outcome of two processes: one is the dispersion by the 
+airflow, the other one is the random walk of odor molecules. Inspired by 
+[9] , we proposed the following equations to model the hits measured by 
+the odor sensor: 
+r
+y
+= exp
+(
+ 2
+(
+y
+A
+w
++ A
+d
+x
+)
+2
+)
+(1)  
+Fig. 1. Illustration of odor hits distribution (The airflow direction is aligned to the x axis).  
+X. Chen et al.                                                                                                                                                                                                                                    
+
+===== PAGE 3 =====
+
+Measurement 183 (2021) 109725
+3
+r
+x
+=
+⎧
+⎪
+⎨
+⎪
+⎩
+1  A
+c
+x
+2
+if 0⩽ x < A
+
+1
+2
+c
+0 otherwise
+(2)  
+r
+m
+=
+1
+A
+r
+( x
+2
++ y
+2
++ 1 )
+(3)  
+λ = A
+s
+( r
+x
+r
+y
+* 1
+{ not blocked }
++
+r
+x
+2
+* 1
+{ going around the obstacle }
++ r
+m
+) (4)  
+C ∼ Poisson ( λ ) (5)  
+where the x axis is along the airflow direction, and the y axis is along the 
+cross-airflow direction. ( x , y ) is the relative position of the sensor to the 
+odor source. A
+w 
+is the plume width parameter, A
+d 
+is the diffusion 
+parameter, A
+s 
+is the source release rate parameter, A
+c 
+is the decay 
+parameter, A
+r 
+is the random walk parameter. There may be obstacles 
+blocking the airflow from the odor source to the olfactory robot, in 
+which case only the random walking odor molecules can be detected. 
+The indicator 1
+{ not blocked }
+equals to 1 if no obstacles are blocking the 
+airflow, and equals to 0 otherwise. 1
+{ going around the obstacle }
+equals to 1 if ( x ,
+y ) is on the way that the plumes going around the obstacle along its 
+boundaries and continue downward, and 0 otherwise. C is the number of 
+hits, which is assumed to be a sample of the Poisson distribution. The r
+m 
+term represents molecular random walk. It assumes some odor hits 
+distribute at locations in the upwind direction but near the odor source. 
+The r
+m 
+term can play an important role when modeling a scenario where 
+the wind is very weak and molecular random walk dominates. The 
+Poisson distribution randomizes the odor hits to model odor plumes 
+dispersed by unstable airflow. This model does not have a direct physical 
+interpretation but produces an odor hit map similar to the reality 
+(Demonstrations why it resembles the real odor plumes are given in 
+Appendix A ). Fig. 1a and 1 b illustrate two examples of the distribution of 
+odor hits in the area, with A
+w
+= 1 , A
+d
+= 0 . 1 , A
+c
+= 0 . 004 , A
+s
+= 50 , A
+r
+=
+2, one with obstacles and the other without obstacles inside. The odor 
+source is located at ( 3 , 3 ) . The x and y axes in these two figures is the 
+coordinate system of the searching area. The airflow direction is aligned 
+to the x axis. 
+In this paper, the OSL task and its scenario are set according to the 
+above odor hits distribution model. In the searching area, there is an 
+odor source located at an unknown position. The olfactory robot may 
+start from anywhere in the area, and its movement directions are limited 
+to up, down, left, right, with 1 m step size. The olfactory robot is ex -
+pected to avoid the obstacles inside the area and reach the odor source 
+with minimum movements. 
+3. DQN based OSL algorithm 
+In this work, DQN [42] from reinforcement learning is applied to 
+train the olfactory robot to locate odor sources. In this section, we 
+discuss the interaction between the olfactory robot and the environ -
+ment, present our proposed DQN based OSL algorithm, and show the 
+training details of the DQN. 
+3.1. The olfactory robot-environment interaction 
+All things interacting with the olfactory robot, including the odor 
+plumes, the airflow, and the obstacles, are called the environment. As 
+shown in Fig. 2 , the movements of the olfactory robot in an OSL task can 
+be regarded as the Markov Decision Processes (MDPs). At every step, the 
+olfactory robot takes an action A (in our case, A is a movement in the 
+area) according to an action policy and the environment responds to the 
+action and presents a new situation to the olfactory robot. The situation 
+is called state . State S in the OSL task is the airflow direction and the 
+odor hits the olfactory robot measures at its location and the knowledge 
+of the map of the area. The robot will gain a reward R for the action it 
+takes according to its current state . At time step t , the action A
+t 
+not only 
+influence the immediate reward R
+t 
+the olfactory robot will get at time 
+step t , but also subsequent states and future rewards . 
+In the OSL task in this work, the reward value at each time step t is 
+defined as follows: 
+r
+t
+=
+⎧
+⎨
+⎩
+20 if the robot arrives at within 1 m of the odor source
+ 10 the robot hits obstacles or boundaries of the area
+ 0 . 5 otherwise
+(6)  
+3.2. DQN for OSL 
+The aim of reinforcement learning is to learn an action policy to 
+maximize the cumulative future reward: 
+G
+t
+= R
+t + 1
++ γ R
+t + 2
++ γ
+2
+R
+t + 3
++ ⋯
+=
+∑
+T  t  1
+k = 0
+γ
+k
+R
+t + k + 1
+(7)  
+where R
+t 
+is the reward obtained at time step t , T is the final time step. γ is 
+the discount rate, 0 ⩽ γ ⩽ 1, which balances the importance of immediate 
+and far-future reward. The action policy is a mapping from state S to the 
+probabilities of taking every possible action A . 
+The action-value function of taking an action A
+t
+= a from the state 
+S
+t
+= ϕ under the action policy π , denoted by q
+π
+( ϕ , a ) , is the expected 
+value of G
+t
+: 
+q
+π
+( ϕ , a ) = E [ G
+t
+| S
+t
+= ϕ , A
+t
+= a , π ] (8) 
+When applying an optimal action policy, the optimal action-value 
+Fig. 2. The olfactory robot – environment interaction in a Markov decision process.  
+X. Chen et al.                                                                                                                                                                                                                                    
+
+===== PAGE 4 =====
+
+Measurement 183 (2021) 109725
+4
+function q
+* 
+is maximized: 
+q
+*
+( ϕ , a ) = max
+π
+q
+π
+( ϕ , a ) (9) 
+According to the Bellman equation [31] , 
+q
+*
+( ϕ , a ) = E [ r
+t + 1
++ γ max
+a
+′
+q
+*
+( S
+t + 1
+, a
+′
+)| S
+t
+= ϕ , A
+t
+= a ] (10) 
+Inspired by the Bellman equation, [43] proposed the updating rule of 
+the action-value function known as Q-learning: 
+Q ( S
+t
+, A
+t
+) ← α [ R
+t
++ γ max
+α
+Q ( S
+t + 1
+, α )  Q ( S
+t
+, A
+t
+)] + ( 1  α ) Q ( S
+t
+, A
+t
+) (11)  
+where Q is the learned action-value function, approximating q
+*
+. 
+In the OSL task, the dimensions of states and actions are large. In this 
+case, Eq. 11 is hard to implement. To solve this issue, we proposed to use 
+a DQN [44] based OSL algorithm, combining Q-learning with deep 
+neural networks. DQN parameterizes an approximate optimal action- 
+value function Q ( ϕ , a ; θ ) , in which θ is the parameter of the deep neu -
+ral network. In this work, a convolutional neural network (CNN) was 
+trained to approximate the optimal action-value function in Eq. 12 . 
+Q
+*
+( s , a ) = max
+π
+E [
+∑
+T  t  1
+k = 0
+γ
+k
+r
+t + k + 1
+| ϕ , a , π ] (12)  
+Q
+*
+( s , a ) is the maximum expected cumulative future reward the olfac -
+tory robot can obtain, starting from time step t with state ϕ , taking action 
+a , and following the action policy π . T is the final time step when the 
+olfactory robot finds the odor source or hit walls or obstacles. 
+The schema of CNN used in the proposed DQN based OSL algorithm 
+is presented in Fig. 3 . 
+The input layer of the CNN includes four matrices, the stack of which 
+is the state S
+t 
+at time step t . The first matrix is the olfactory robot tra -
+jectory matrix, in which the value of each cell is the number of times the 
+olfactory robot passing the corresponding position. The second and the 
+third matrices are the mean measured airflow direction matrix and the 
+mean measured odor hits matrix, in which the value of each cell is the 
+average value of measured airflow direction and measured odor hits, 
+respectively and the value keeps to be 0 if the olfactory robot has not 
+passed the position. For example, when the robot passes a cell twice, the 
+cell value in the trajectory matrix will change from 1 to 2. Assuming the 
+robot measures C
+1 
+odor hits and W
+1 
+wind direction when it passes this 
+cell for the first time, and C
+2 
+odor hits and W
+2 
+wind direction for the 
+second time, the cell value in the mean measured odor hits matrix and 
+the mean measured airflow direction will become 
+C 1 + C 2
+2 
+and 
+W 1 + W 2
+2
+, 
+respectively. The airflow direction is set to be  π in the training process, 
+which is aligned to the x axis of the searching area (please note that π 
+refers to a direction when talking about airflow directions). This setting 
+is for generating simplified airflow patterns and keeping the robot facing 
+the airflow. The fourth matrix is the current map matrix, in which the 
+value of the cell where the robot is located is 2, and the value of the cells 
+where there are obstacles is 1, the others are 0. Building this matrix 
+requires the robot to localize in the map accurately, e.g. using lidars 
+[45] . Fig. 4 shows an example of these four matrices in an OSL task. 
+The ‘size ’ in the convolution layers and maxpooling layer represents 
+the size of the convolution or pooling kernel. The ‘activation ’ in the 
+convolution layers and dense layers represents the activation function. 
+The names of these layers and the definition of corresponding 
+Fig. 3. Illustration of CNN in the DQN based OSL algorithm.  
+Fig. 4. An example of four matrices in the input layer of CNN (in each cell is the value of the matrix at the corresponding grid point).  
+X. Chen et al.                                                                                                                                                                                                                                    
+
+===== PAGE 5 =====
+
+Measurement 183 (2021) 109725
+5
+parameters come from the Keras API [46] . 
+The output layer is a dense layer with 4 units, each denotes the ex -
+pected cumulative future reward of the corresponding movement 
+direction. 
+The pseudocode of the proposed DQN based OSL algorithm is shown 
+in Algorithm 1 . 
+Algorithm 1 . DQN based OSL   
+1: Algorithm parameters: step size α ∈ ( 0 , 1 ] , small ∊ > 0, total episode number M =
+35000, discount rate γ = 0 . 9  
+2: Initialize replay memory size N = 60000  
+3: Initialize Q ( s , a ) arbitrarily  
+4: for episode = 1 , M do  
+5: t = 0  
+6: Initialize state ϕ
+1
+= ϕ ( tra
+1
+, air
+1
+, con
+1
+, map
+1
+)
+7: while the episode does not terminate do 
+8: t = t + 1  
+9: Select a random movement direction with probability ∊  
+10: otherwise select the optimal movement direction a
+t
+= max
+a
+Q
+*
+( ϕ ( S
+t
+) , a ; θ )
+11: Execute the movement and get a reward r
+t  
+12: Observe the current state ϕ
+t + 1  
+13: Store the transition experience ( ϕ
+t
+, a
+t
+, r
+t
+, ϕ
+t + 1
+) in the memory  
+14: Sample random minibatch (batch size = 32) of transitions ( ϕ
+j
+, a
+j
+, r
+j
+, ϕ
+j + 1
+) in 
+the memory  
+15: Set y
+j
+=
+{
+r
+j
+for terminal ϕ
+j + 1
+r
+j
++ γ m ax
+a
+′ Q
+
+ϕ
+j + 1
+, a
+′
+; θ
+)
+for non  terminal ϕ
+j + 1  
+16: Perform a gradient descent step on ( y
+j
+ Q
+
+ϕ
+j
+, a
+j
+; θ
+))
+2  
+17: end while 
+18: end for  
+tra
+t
+, air
+t
+, con
+t 
+and map
+t 
+denote the olfactory robot trajectory matrix, 
+mean measured airflow direction matrix, mean measured odor hits 
+matrix and current map matrix at time step t , respectively. 
+The termination conditions for each episode are as follows. When 
+any one of these conditions is satisfied, the episode will terminate and a 
+new episode will start.  
+• the olfactory robot reaches within 1 m of the odor source  
+• the olfactory robot runs into walls or obstacles  
+• the number of movement step of the olfactory robot exceeds 100 
+3.3. Training details 
+To train the CNN in our proposed DQN based OSL algorithm, we 
+conduct 35000 iterative episodes of OSL tasks in the simulated 10 m ×
+10 m area. There is an obstacle with 1 m width, random length from 
+0 (no obstacle) to 8 m, and random position in the area in each run. The 
+location of the odor source is uniform randomly distributed in the area. 
+The odor hits model in Eq. 1 to Eq. 5 are applied to generate the odor hits 
+measured by the olfactory robot, where A
+w
+= 1 , A
+d
+= 0 . 1 , A
+c
+= 0 . 004 ,
+A
+r
+= 2. A
+s
+, which represents the release rate of the odor source, is 
+uniformly sampled from 20 to 100. In this work, the airflow direction is 
+set uniform at each cell and is aligned to the x axis of the area. 
+At every step during training, The olfactory robot will select an ac -
+tion a from the collection of all possible actions A with the ∊ -greedy 
+method, which assigns a small probability ∊ selecting randomly among 
+all possible actions, and 1  ∊ selecting a = argmax
+a
+Q
+*
+( ϕ , a ) . In this 
+work, A = { up , down , left , right } . The parameter ∊ decreases from 1 to 
+0.001 linearly during the training to encourage ‘exploration ’ at the 
+beginning of the training process and encourage ‘exploitation ’ after the 
+action policy has been optimized. 
+To alleviate the problems of correlated measurement data at suc -
+cessive time steps, a technique known as experience replay [47] is also 
+applied. The olfactory robot ’ s experience e
+t
+= ( ϕ
+t
+, a
+t
+, r
+t
+, ϕ
+t + 1
+) at each 
+time step is stored in a dataset D = e
+1
+, ⋯ , e
+N
+, pooled over many episodes 
+into a replay memory. At each step, a random minibatch of transition 
+experience in the memory will be sampled to train the CNN. This 
+approach has several advantages. First, each transition experience is 
+potentially used in the training step of the CNN, which increases data 
+efficiency. Second, due to the strong correlations between the samples, 
+learning directly from experience of successive time steps is inefficient. 
+Randomizing sampling the experience breaks the correlations. 
+At each step, the sampled minibatch of transition experience ( ϕ
+j
+, a
+j
+,
+r
+j
+, ϕ
+j + 1
+) is used to calculate Q target y
+j 
+as line 15 in Algorithm 1 . Ac -
+cording to [44] , the parameters of CNN can be updated using gradient 
+descent method (Eq. 13 ). The loss function L ( θ
+j
+) is defined as Eq. 14 . 
+With the loss decreasing iteratively, the CNN approximates the optimal 
+Q
+*
+( s , a ) . 
+θ
+j + 1
+= θ
+j
+ α ∇
+θ
+L
+
+θ
+j
+)
+(13)  
+L
+
+θ
+j
+)
+= E
+e j ∼ D
+[
+y
+j
+ Q ( ϕ
+j
+, a
+j
+; θ
+j
+)
+2
+]
+(14) 
+In the training process, the robot is not programmed to avoid the 
+obstacle actively. Instead, we let the robot select actions freely to learn 
+an optimal action policy. In this process, the robot sometimes arrives at 
+the odor source fast and gets a positive reward, sometimes hits obstacles 
+and gets a negative reward. Iteratively, the robot learnt to go along an 
+optimal path to the odor source without hitting obstacles. 
+During the process of training, we recorded the reward the olfactory 
+robot obtained in each episode. Fig. 5 present the average reward in 
+every 100 episodes during the training. It can be seen that the average 
+reward increases from around  12 to 10 during the process and 
+converge to around 10. 
+4. Case study and performance evaluation in the simplified 
+simulator 
+In this section, we study the performance of the proposed DQN based 
+OSL algorithm in different cases and compare it with a widely studied 
+gradient climbing (GC) algorithm and an anemotaxis bio-inspired al -
+gorithm, Surge-Cast (SC). In the GC algorithm, the robot always goes to 
+the direction where the odor concentration increases fastest. In the SC 
+algorithm, the robot goes upwind when it is in the plume, and conducts 
+the crosswind search when it goes out of the plume. The details about GC 
+and SC are presented in Appendix B and C . 
+4.1. Environment settings 
+The performance of the proposed algorithm is evaluated under four 
+different map settings: The robot starts from the downwind/ upwind 
+direction of the odor source and there is/ is not an obstacle in the 
+searching area. The four maps are illustrated in Fig. 6 . 
+Under each map setting, we set the release rate parameter of the odor 
+source to be 20 , 40 , 60 , 80 , 100. For each combination of the map setting 
+and the release rate, we conducted 200 repeated runs with the proposed 
+DQN based algorithm, GC and SC, respectively to compare the perfor -
+mance difference between them. Since the original form of GC and SC do 
+not include obstacle avoidance, we programmed the robot to actively 
+Fig. 5. Training curve of the average reward.  
+X. Chen et al.                                                                                                                                                                                                                                    
+
+===== PAGE 6 =====
+
+Measurement 183 (2021) 109725
+6
+avoid obstacles and walls prior to obeying its action policy in all three 
+algorithms for fair comparison. Although the added obstacle avoidance 
+strategy is expected to ensure the robot not to hit obstacles and promote 
+the success rate of the algorithms, it cannot replace the optimal action 
+policy we trained - the trained action policy helps the robot plan a path 
+to the source without obstacles, instead of moving around an obstacle 
+when the robot has already come close to it. The termination conditions 
+of each run are the same as the first and the third in the training process. 
+Because SC is a plume tracking algorithm, it can only perform when the 
+robot is inside the plumes, otherwise the robot has to find the plumes, 
+which are dispersed downwind. In Setting C and D, when the robot is in 
+the upwind direction of the source, it is unsuitable to conduct SC. So SC 
+is not evaluated in Setting C and D. 
+4.2. Evaluation metrics 
+We identified two metrics to evaluate the performance of the OSL 
+algorithm: (1) success rate, and (2) distance overhead. 
+• Success rate - this metric for evaluating the feasibility of the algo -
+rithms. It is defined as the number of successful runs, in which the 
+robot reaches within 1 m from the odor source, per total number of 
+runs (200 in this work). 
+• Distance overhead - this metric reflects the efficiency of the algo -
+rithms. It is defined as the traveled distance of the olfactory robot 
+when reaching the odor source per shortest distance. Since the 
+Fig. 6. Four map settings (the initial position of the olfactory robot is marked by the red smile face, the odor source is marked by the yellow cloud, the obstacle is 
+marked by the black patch). 
+Fig. 7. Performance evaluation results in the simplified simulator.  
+X. Chen et al.                                                                                                                                                                                                                                    
+
+===== PAGE 7 =====
+
+Measurement 183 (2021) 109725
+7
+olfactory robot can only move on grid points in this work, the 
+shortest distance is also calculated assuming the robot moves on grid 
+points. 
+4.3. Results and discussion 
+The evaluation results under four map settings with different odor 
+source release rates are presented in Fig. 7 . 
+The example trajectories of DQN under four map settings are pre -
+sented in Fig. 8 . 
+For most settings, we can see that DQN based algorithm outperforms 
+GC, in terms of both metrics. SC performs similar to (in some cases even 
+slightly better than) DQN in terms of success rate, but the distance 
+overhead varies a lot with different source release rate. 
+For Setting A and Setting B, the success rate and distance overhead of 
+the DQN algorithm are close to 1. Since it is easier for the olfactory robot 
+to capture odor plumes with high odor hits when starting from the 
+downwind direction, under these two cases, the DQN algorithm yield 
+nice performance and is robust to different release rates of the odor 
+source. The success rate and the distance overhead of GC are not as good 
+as that of DQN, because the odor hits distribution is not smooth and the 
+olfactory robot often retraces the positions it has passed by and even gets 
+trapped. This disadvantage of GC will be more severe with the release 
+rate increases, because the distribution of the odor hits is of higher 
+variance. The performance of SC heavily depends on the odor hits 
+threshold which defines the state of ‘in plume ’ and ‘out of plume ’ . When 
+the odor hits distributed in the environment is lower than the pre-set 
+threshold, the robot will often conduct cross-wind cast, which leads to 
+higher distance overhead. 
+For Setting C and Setting D, the olfactory robot starts from the up -
+wind direction of the odor source, where the odor hits are more from 
+odor molecular random walk and thus much weaker than Setting A and 
+B. The olfactory robot will have to scan the area and capture odor 
+plumes (plume finding subtask), then tracking the odor plume (plume 
+tracking subtask), which is the same as what Fig. 8 c and Fig. 8 d. The 
+distance overhead of DQN in Setting D is not as good as in Setting A and 
+B, but is still in an acceptable range. It can also be seen that for both 
+Setting C and D, the success rate of GC is much lower when the odor 
+source release rate is 20. It may be because when the release rate is low, 
+the odor molecular movement is lower, then the olfactory robot may 
+measure 0 or very low odor hits when it is far from the odor source, thus 
+GC does not work well. The action policy learned from our training of 
+DQN is still able to handle this case well. For DQN, the success rate in 
+Setting D is lower than in Setting C, while the distance overhead in 
+Setting D is higher, because the obstacle can interfere with the plume 
+tracking process and the robot will have to do additional scans to bypass 
+it. 
+In terms of the results of GC, it can be seen that the trend is always 
+the same concerning the release rate, no matter the setting, except for 
+Setting B. An explanation can be that in Setting A, C, and D, the robot is 
+following a relative smoothly increasing odor concentration compared 
+to Setting B - In Setting A, the plumes are not blocked by the obstacles, 
+while in setting C and D, when the robot is upwind, the odor molecular 
+random walk dominates, which is not affected by the obstacle. So with 
+the source release rate increases, it can be easier for the robot to follow 
+the concentration gradient. In Setting B, the plumes go around the 
+obstacle and disperse downwind. When the source release rate increases 
+the fluctuation of the odor concentration near the obstacle is more 
+Fig. 8. Example trajectories of DQN under four map settings (the value of each cell denotes the times of the robot passing the corresponding position, the odor source 
+is marked by the yellow cloud). 
+Fig. 9. Statistical hypothesis tests results.  
+X. Chen et al.                                                                                                                                                                                                                                    
+
+===== PAGE 8 =====
+
+Measurement 183 (2021) 109725
+8
+severe, the robot may wander around, thus the success rate drops, and 
+the distance overhead increases. 
+To assess whether the performance of the algorithms are significantly 
+different, two-sample z-tests are conducted to evaluate the difference of 
+the “ distance overhead ” metric for each map setting and odor source 
+release rate. 
+The two-sample z-test is a kind of statistical hypothesis testing [48] . 
+It is used to compare two data samples to see whether they are from the 
+same probability distribution. The significance level α is the threshold 
+for the probability below which the null hypothesis is rejected, that is, 
+the two samples are considered as statistically different. α = 0 . 05 is a 
+classic threshold in statistical science [49] . 
+According to the z-test, for each pair of samples x
+1 
+and x
+2
+, the sta -
+tistical value U is calculated using Eq. 15 . 
+U =
+| x
+1
+ x
+2
+|
+̅̅̅̅̅̅̅̅̅̅̅̅ ̅
+σ
+2
+1
+n
+1
++
+σ
+2
+2
+n
+2
+√ (15)  
+where x
+1 
+and x
+2 
+are the means of the two samples, that is, the means of 
+“ distance overhead ” of two algorithms. σ
+1 
+and σ
+1 
+are the standard de -
+viations, n
+1 
+and n
+2 
+are the sizes of the two samples. If U > z
+α
+, the two 
+samples can be considered significantly different at the significance level 
+α . We set α = 0 . 05 in this paper. 
+The U values calculated from the performance evaluation results in 
+all settings are presented in Fig. 9 . z
+0 . 05
+= 1 . 645 is also plotted with red 
+dash-lines. In Settings A, C, and D, all the U values are higher than z
+0 . 05
+. 
+In Setting B, U < z
+0 . 05 
+when comparing DQN and SC with A
+s
+= 40. 
+Based on Fig. 7 and Fig. 9 , it can be concluded that the performance of 
+the DQN algorithm is significantly better than the GC algorithm under 
+all settings. While in most cases DQN is significantly better than SC, in a 
+few cases it may lag behind a bit. Considering that the DQN algorithm 
+can work in all settings, while the SC algorithm is unsuitable for Setting 
+C and D, and that the statistical hypothesis tests have demonstrated that 
+DQN is significantly better than GC in most cases, DQN shows its su -
+periority over SC. 
+To further evaluate the robustness of the DQN algorithm, we tested 
+the algorithm with the robot starting from random positions in the four 
+maps shown in Fig. 6 . The robot is not set to start from the smiling faces 
+anymore. Instead, the starting positions are uniform randomly selected 
+from 10 × 10 grid points. 200 repeated runs were conducted for each 
+map. The success rate and the distance overhead are shown in Fig. 10 . It 
+can be seen that the success rate can reach 90% in all maps, while the 
+distance overhead in the maps with obstacles are larger than that in the 
+empty maps, which is aligned with the case study results. The high 
+success rate and the acceptable distance overhead in all maps can 
+demonstrate the robustness of the DQN algorithm. 
+5. Tests in the high-fidelity simulator 
+5.1. Test the pretrained algorithm 
+To demonstrate the feasibility that the proposed algorithm can 
+extrapolate to other scenarios, tests are conducted with a high-fidelity 
+gas dispersion simulator, GADEN [5] . Wind field calculated by Open -
+FOAM, an open-source computational fluid dynamics tool, is imported 
+into GADEN to generate gas plumes. The simulated gas plumes were 
+reported to match the reality well. 
+Previously trained algorithm is applied in the test. In GADEN, the 
+simulated robot can measure the gas concentration with a simulated 
+photo ionization detector (PID) and the wind direction with an ane -
+moscope. The following equation is used to convert the gas concentra -
+tion c to hits C : 
+C =
+{
+round ( 5 * ( log
+2
+c  3 )) c ⩾8
+0 otherwise
+(16) 
+The above equation can convert gas concentration in GADEN simu -
+lation to hits, with a proper range (around 0 ∼ 40). This range is similar 
+to the hits range in the training process (around 0 ∼ 50), which can help 
+the robot make right decisions according to the proposed algorithm. 
+Besides, the log function is sensitive to concentration change when the 
+concentration is low, but not that sensitive when the robot is in the 
+plumes and the concentration is high enough (e.g. when the concen -
+tration increases from 0 to 20, the hits increase from 0 to 7, but when the 
+concentration increases from 2000 to 2100, the hits keep the same as 
+40). This can help the robot detect a significant change of hits when it 
+captures/loses the plumes and take the right action. Using a discretized 
+feature (the rate of hits) instead of a continuous feature (concentration) 
+helps reduce data noise (e.g. fluctuations of the gas concentration due to 
+Fig. 10. Performance evaluation results for DQN running with random starting positions in four maps.  
+Table 1 
+GADEN tests.  
+No. Environment Setting Source location Robot initial location Shortest distance Traveled distance Distance overhead 
+1 Empty room (3,3) (8,9) 10 10 1 
+2 Empty room (3,3) (0,9) 8 22 2.75 
+3 Empty room (3,3) (9,0) 8 8 1 
+4 Room with an obstacle (3,3) (9,0) 8 24 3 
+5 Room with an obstacle (3,3) (8,9) 10 22 2.2 
+6 Room with an obstacle (3,3) (3,9) 5 7 1.4 
+7 Multiple rooms (1,1) (0,9) 8 8 1 
+8 Multiple rooms (1,1) (7,2) 6 6 1 
+9 Multiple rooms (1,1) (9,5) 11 17 1.55  
+X. Chen et al.                                                                                                                                                                                                                                    
+
+===== PAGE 9 =====
+
+Measurement 183 (2021) 109725
+9
+air turbulence). 
+The differential-wheeled olfactory robot in GADEN simulation is 
+programmed to set the center of the optimal cell as its goal and navigate 
+towards the goal using a ROS package “ move_base ” . Using this package, 
+the velocity command for the robot is calculated from the robot ’ s real- 
+time position and yaw angle, and the robot will move to the goal 
+following a smooth curve (not necessarily a straight path). 
+The proposed algorithm is tested in 3 different scenarios (empty 
+room, room with an obstacle, and multiple rooms). For each scenario, 
+we present 3 configurations (changing the initial robot location). The 
+environment settings and the initial location of the robot of each test are 
+presented in Table 1 . All the scenarios are 10 m × 10 m and are modeled 
+as a grid. The size of each cell is 1 m × 1 m. The robot moves to one of 
+the grid points at every step following the trained action policy of the 
+proposed algorithm. The trajectories of the olfactory robot searching for 
+the source in these scenarios are illustrated in Fig. 11 . The wind direc -
+tion inside the 3 scenarios is presented in Fig. 12 . It can be seen that the 
+wind is not homogeneous neither constant in the environment with 
+obstacles or walls inside. The distance overhead for each scenario is 
+computed and shown in Table 1 . 
+Fig. 11. Environment settings in GADEN tests. 
+The coordinate system is illustrated by the red 
+arrows in (a), and is the same for (b) ∼ (i). For 
+(a) ∼ (f), the wind inlet is the left wall, the outlet 
+is the right wall. For (g) ∼ (i), the wind inlet is 
+the door on the bottom left, the outlets are the 
+cerulean blue windows in the front and on the 
+right. The wind at all the wind inlets is set to 
+1 m / s and is aligned to the x axis. The yellow 
+arrows are the trajectories of the robot searching 
+for the gas source. The initial position of the ol -
+factory robot is marked by the red smile face, the 
+odor source is marked by the yellow cloud.   
+Fig. 12. Wind direction in three scenarios (illustrated by blue arrows).  
+X. Chen et al.                                                                                                                                                                                                                                    
+
+===== PAGE 10 =====
+
+Measurement 183 (2021) 109725
+10
+From Fig. 11 and Table 1 , we can see that the proposed algorithm 
+works in more realistic and complex scenarios simulated with GADEN. 
+To evaluate the performance of the DQN algorithm statistically, and 
+compare it with other algorithms, we conducted repeated tests in the 
+above three scenarios with DQN, GC, and SC, respectively. The robot is 
+set to start at random positions in the downwind area from the odor 
+source. For each combination of the test scenario and the algorithm, 200 
+runs were conducted. The success rate and the distance overhead are 
+presented in Fig. 13 . Distance overhead was only calculated for suc -
+cessful runs. 
+In the “ empty room ” scenario, all of the algorithms achieve high 
+success rates (around 100%). The distance overhead of DQN and SC is 
+lower than that of GC, similar to the results in the simplified simulator. 
+In the “ room with an obstacle ” scenario, the success rate of SC is still 
+around 100%, which demonstrates the advantage of SC. The success rate 
+of DQN drops a bit, but the distance overhead of DQN is lower than that 
+of SC. The success rate of GC drops to lower than 10%. The obstacle 
+disturbs the airflow and the odor concentration fluctuates, which 
+heavily affects the performance of GC. In the “ multiple rooms ” scenario, 
+the success rate of both GC and SC are much lower than DQN. The 
+Fig. 13. Performance evaluation results in GADEN.  
+Fig. 14. The rotated central obstacle room scenario (the wind direction is 
+illustrated by blue arrows, the coordinate system is illustrated by the 
+red arrows). 
+Fig. 15. Performance evaluation results for retrained DQN in three scenarios.  
+Table A.2 
+Parameters of the hits-dispersion model.  
+Parameter A
+w  
+A
+d  
+A
+c  
+A
+r  
+A
+s  
+(a) 0.2 0.16 0.008 200 40 
+(b) 0.2 0.06 0.004 120 40 
+(c) 0.15 0.06 0.009 150 40 
+(d) 0.4 0.06 0.06 110 30  
+X. Chen et al.                                                                                                                                                                                                                                    
+
+===== PAGE 11 =====
+
+Measurement 183 (2021) 109725
+11
+distance overhead of DQN is higher than GC and SC, because it involves 
+more successful runs, while the distance overhead of GC and SC are 
+calculated based on a lower number of successful runs. Overall, DQN 
+shows a similar performance with SC in the “ empty room ” scenario. Both 
+GC and SC do not perform well in situations where the odor concen -
+tration fluctuates and the wind direction changes drastically, but DQN 
+can still handle these situations. Although DQN does not always lead the 
+robot to the gas source along the shortest path, the distance overhead is 
+in an acceptable range. 
+5.2. Train and test the algorithm in the high-fidelity simulator 
+In this section, the effect of using various airflow patterns during 
+training is studies. Based on the previous trained network, 1500 addi -
+tional training episodes are added, with the robot starting from random 
+positions in the top two rooms of the multiple room scenario. The added 
+training episodes bring in various patterns and make fuller use of the 
+“ mean measured airflow direction matrix ” . 
+After the additional training, we tested the DQN algorithm in 3 
+scenarios: the multiple room scenario and the central obstacle room 
+scenario shown in Fig. 12 , plus a rotated central obstacle room scenario 
+(shown in Fig. 14 ). The rotated central obstacle room scenario was built 
+by rotating the original map clockwise for 90 degrees, together with the 
+odor concentration distribution and the airflow distribution. 200 
+repeated runs were conducted with the robot starting from random 
+positions in the three scenarios. The success rate and the distance 
+overhead are shown in Fig. 15 . 
+Compared with the original DQN algorithm (the results are shown in 
+Fig. 13 ), the retrained DQN algorithm achieved much lower distance 
+overhead in the multiple rooms scenario. However, the success rate 
+declined from 79.5% to 77.5%. It has to be noted that the robot was set 
+to start from the top two rooms in the retraining process conducted in 
+the multi-room scenario, so the retrained network may be more capable 
+for situations where the airflow changes a lot, but may sacrifice per -
+formance in the steady airflow scenarios. The performance evaluation 
+was conducted in the whole area in the multi-room scenario. This can 
+explain why the distance overhead of the retrained DQN is much lower 
+than that in Fig. 13 - the robot goes alone a more straightforward path 
+when it starts from the top rooms, and why the overall success rate is a 
+bit lower - the success rate may decline a bit when the robot starts from 
+the bottom room. This unobvious difference on the success rate may also 
+due to the random tests and it does not mean a substantial performance 
+degrade. In the central obstacle scenario, the success rate and the dis -
+tance overhead of the retrained DQN are both better than the original 
+DQN shown in Fig. 13 . The retrained DQN algorithm can also achieve 
+88.5% success rate in the rotated scenario, which has never appeared in 
+the training process. In contrast, when the original DQN algorithm was 
+tested in the rotated scenario, it can only achieve 32.5% success rate, 
+which is much lower than that of the retrained algorithm. It can be 
+inferred that after training with various airflow patterns, the robot got 
+more guidance from the “ mean measured airflow direction matrix ” , thus 
+the performance of the algorithm was promoted. More elaborate 
+training process with various maps and airflow patterns may improve 
+the algorithm further. 
+6. Discussion 
+From the previous tests in various environments, it is clear that the 
+proposed algorithm can learn from a set of given training environments, 
+and the ability to later apply a learnt optimal action policy in similar 
+environments in the simplified simulator. To some extent, the proposed 
+method is also able to generalize for environments with different airflow 
+patterns or obstacles with different shapes (e.g. multi-room scenarios in 
+GADEN). In very different environments, the proposed algorithm can 
+achieve an acceptable success rate, but the distance overhead increases 
+drastically. Because very different states are fed into the CNN, the pre -
+viously trained algorithm cannot always guide the robot to the right 
+direction. Additional training processes are required to solve this issue. 
+Also, the proposed algorithm is designed and trained for 10 m × 10 m 
+environments, when applied in environments with different dimensions, 
+a scaling process is required. Besides, the proposed algorithm relies on 
+knowledge of the map of the scenario and the position of the robot. 
+We have also tested the algorithm in the multiple room scenario with 
+the odor source located inside top left room and the robot starting from 
+the top right room. The results turned out to be that the robot could 
+hardly find the odor source and it moved along heavily back-and-forth 
+trajectories. This result was due to the fact that the hits distribution in 
+the GADEN simulator was different from what we built to train the 
+Fig. A.16. Comparison results between the proposed hits-dispersion model and the gas plumes generated in GADEN. (a) and (b) correspond to the empty room. (c) 
+and (d) correspond to the room with an obstacle. (a) and (c) correspond to 1 m / s. (b) and (d) correspond to 0 . 4 m / s. Corresponding parameters of the hits-dispersion 
+model are shown in Table .A.2 . 
+Fig. B.17. The earliest gradient-based OSL robot.  
+Fig. C.18. Illustration of Surge-Cast algorithm.  
+X. Chen et al.                                                                                                                                                                                                                                    
+
+===== PAGE 12 =====
+
+Measurement 183 (2021) 109725
+12
+network - we assumed molecular random walk, so it is possible for the 
+robot to get some odor hits even if it is outside the plume. But in GADEN, 
+the odor concentration is set to 0 outside the plume. If the robot cannot 
+sense any odor hits, it will get limited information from the “ mean 
+measured odor hits matrix ” . So, it has difficulties searching for the odor 
+source located at the left top room. Considering differences between the 
+simulated multiple room scenarios in GADEN and the reality, real ex -
+periments need to be conducted to further evaluate the performance of 
+the proposed method. Additional environment exploration path plan -
+ning may also help in the multiple room scenarios. 
+In this paper, the parameters chosen for modeling the odor hit dis -
+tribution in Eq. 1 to Eq. 5 were selected empirically to simulate odor 
+plumes with random release rate. To adapt the method to other sce -
+narios, one solution is to rescale the measured odor concentration to fit 
+the range of hits in the training process, similar as Eq. 16 did. Another 
+solution is to retrain the network to make it fits a wider range of hits. The 
+parameters for training the network (e.g. discount rate, step size) were 
+selected referring other reinforcement learning papers [42,44,32] . Spe -
+cific values for these parameters will not affect the experiment results 
+too much, but can affect the convergence speed of the loss curve in the 
+training process, e.g., lower discount rate increases convergence speed 
+[50] , a large step size allows the model to learn faster, while a smaller 
+learning rate may allow the model to learn a more optimal solution [51] . 
+Readers can refer to the cited references and other reinforcement 
+learning/deep learning papers for more details in selecting the 
+parameters. 
+Other modified versions of the DQN algorithm, like Double-DQN 
+[52] , Multi-DQN [53] , Averaged-DQN [54] , Multisource Transfer 
+Double-DQN [55] have not been studied in this paper, but they are ex -
+pected to also work in OSL tasks. OSL methods based on these algorithms 
+can share the similar design and training process of our proposed al -
+gorithm. The proposed method is expected to be a benchmark for the 
+following works in this aspect. 
+7. Conclusion 
+In this work, we proposed a DQN based OSL algorithm. The proposed 
+algorithm takes the matrices of robot trajectory, the measured airflow 
+direction, the measured odor hit, and the current map as the input layer 
+of a convolutional neural network. The convolutional neural network 
+outputs the value of each possible action. The olfactory robot can take 
+the action with the highest value to find the odor source. 
+The proposed algorithm is evaluated under four map settings. For 
+each setting, different odor source release rates are set. The proposed 
+algorithm yield a good success rate and distance overhead when the 
+olfactory robot starts from the downwind direction of the odor source, 
+and slightly lower results when the robot starts from the upwind di -
+rection. The proposed algorithm is robust to different odor source 
+release rate, except that when starting from the upwind direction and 
+there is an obstacle between the robot and the odor source, the perfor -
+mance will decrease if the odor source release rate is low. 
+Overall, the proposed algorithm achieves better performance than a 
+traditional gradient climbing algorithm and moth-inspired algorithm, 
+especially in complex indoor scenarios, relying on knowledge of the map 
+of the scenario and the position of the robot, which the above mentioned 
+traditional algorithms do not require. 
+Future work will be focused on promoting the algorithm ’ s compu -
+tational efficiency and reduce the information it requires. More 
+advanced reinforcement learning algorithms and source localization 
+algorithms dedicated for larger maps (e.g. undersea or outdoor sce -
+narios) and more complex scenarios (e.g. higher dimensions, more ob -
+stacles) need to be further studied. We will also try to improve the 
+algorithm by centering the map around the robot as [56] did. Perfor -
+mance comparison with more elaborated OSL methods and experiments 
+on real robots will be conducted. 
+Declaration of Competing Interest 
+The authors declare that they have no known competing financial 
+interests or personal relationships that could have appeared to influence 
+the work reported in this paper. 
+Acknowledgment 
+This work was supported by the Fundamental Research Funds for the 
+Central Universities (HUST: 2019kfyRCPY, 2019kfyXKJC019), the 
+Research Fund of PLA of China (BWS17J024), and the Science, Tech -
+nology and Innovation Commission of Shenzhen Municipality 
+(ZDSYS20200811143601004).  
+Appendix A. Comparison between the hits-dispersion model and the gas plumes in GADEN 
+We quantitatively compare the proposed hits-dispersion model and the gas plumes generated in GADEN, a gas dispersion simulator [5] under 
+strong ( 1 m / s ) and weak airflow ( 0 . 4 m / s ) , respectively to see how the model resembles the reality. 
+In [5] , the gas plumes generated by the simulator was compared with the real gas plumes in a wind tunnel. The authors computed the symmetric 
+Kullback – Leibler divergence (sKLD), which is a widely used measure for the distance between probability density functions (PDFs) and has a low 
+sensitivity to outliers. The sKLD between the real and the simulated gas plumes was reported to not exceed 60 under various airflow profiles (0 . 1 m / s ,
+0 . 21 m / s, and 0 . 34 m / s), which means the simulated gas plumes well match the reality. 
+To justify the hits-dispersion model, the above method applied in the reference paper [5] was also used in this paper. The same environments as 
+Fig. 1 a and Fig. 1 b were built in GADEN. At each free (no obstacle existing) grid point in the environment, a simulated photo ionization detector (PID) 
+was deployed and took 30 measurements of the gas concentration with 2 Hz sampling rate. We applied Eq. 16 to convert the measured gas con -
+centration ( c ) to hits ( C ) . 
+At every grid point, the sKLD between the measured hits and the hits modeled by the hits-dispersion model was computed as follows: 
+KLD
+
+M
+1
+‖ M
+2
+)
+=
+∑
+i ∈ M
+M
+1
+i
+log
+M
+1
+i
+M
+2
+i
+sKLD
+
+M
+o
+‖ M
+h
+)
+= KLD
+
+M
+o
+‖ M
+h
+)
++ KLD
+
+M
+h
+‖ M
+o
+)
+(A.1)  
+where M
+o 
+is the PDF of the collected data at a given location of the olfactory robot, computed using 30 collected data. M
+h 
+is the PDF computed from 
+simulated odor hits at the same position. The calculated sKLD under four settings is shown in Fig. A.16 . 
+It can be seen that the sKLDs at most grid points under four settings are below 40, the maximums are around 50, lower than those in the reference 
+paper [5] . This demonstrates a good match between the proposed hits-dispersion model and the high-fidelity gas plumes in GADEN, which are proved 
+X. Chen et al.                                                                                                                                                                                                                                    
+
+===== PAGE 13 =====
+
+Measurement 183 (2021) 109725
+13
+to be similar to the reality. Thus it can be indirectly concluded that the proposed model resembles the real plumes. The sKLDs in the room with an 
+obstacle are relatively higher than those in the empty room, which means the proposed model does not ensemble the obstacle case as nicely as the 
+empty room case. However, the sKLDs are still within an acceptable range. Overall, the proposed model ensemble the reality to a certain degree. The 
+model is not as accurate as dedicated computational fluid dynamics tools, but it is good enough and fast for generating a large number of random 
+environment settings to train the DQN model in this paper. 
+Appendix B. Gradient climbing algorithm 
+Gradient climbing algorithm was first implemented with a single robot in [20] , which can also be seen as the first work in the OSL field. In their 
+work, a hardware system was designed (see Fig. B.17 ), which is composed of a capture device with gas sensors inside and a fan for active sniffing. The 
+system collected odor concentration C
+f
+, C
+b
+, C
+l
+, C
+r 
+in four directions and moved a step in the direction with the highest concentration. This process will 
+be continued until the system arrives at the odor source. 
+We implement this algorithm in our simulation. The olfactory robot is programmed to be able to move in four directions, the same as the proposed 
+DQN based algorithm. It is assumed that the robot has active sniffing, and can measure odor hits on the four nearest grid points from its location at 
+every step. And then it moves to the grid point with the highest odor hits. If more than one grid points are of the same highest odor hits, the olfactory 
+robot will select anyone from them randomly. The robot is programmed to avoid obstacles, which means it won ’ t move to the grid points where there 
+are boundaries and obstacles. 
+Appendix C. Surge-Cast algorithm 
+Surge-Cast algorithm [38] is a widely studied bio-inspired algorithm. It combines upwind surge and cross-wind casting. When in the plume, the 
+robot moves straight upwind until it loses the plume. Then it moves cross-wind to reacquire the plume. This process is illustrated in Fig. C.18 . 
+When the Surge-Cast algorithm is implemented in our simulation, the hit threshold we set to define the olfactory robot is “ in plume ” or “ out of 
+plume ” is 10. the olfactory robot is programmed to do a cross-wind scan first to find the plume, then move upwind while measuring odor hits at every 
+step until it loses the plume. It will then move in the crosswind line back and forth until it gets inside the plume. This iteration will keep running until it 
+reaches the odor source. The robot is also programmed to be able to avoid boundaries and obstacles. 
+Appendix D. Supplementary material 
+Supplementary data associated with this article can be found, in the online version, at https://doi.org/10.1016/j.measurement.2021.109725 . 
+References 
+[1] J.M.B. Calvo, S.B. i Badia, H.T. Sim ´o, P.F. Verschure, The real-world localization 
+and classification of multiple odours using a biologically based neurorobotics 
+approach, in: The International Joint Conference on Neural Networks (IJCNN), 
+2010, IEEE, 2010, pp. 1 – 7. 
+[2] F.W. Grasso, J. Atema, Integration of flow and chemical sensing for guidance of 
+autonomous marine robots in turbulent flows, Environmental Fluid Mechanics 2 
+(2002) 95 – 114 . 
+[3] T. Consi, J. Atema, C. Goudey, J. Cho, C. Chryssostomidis, Auv guidance with 
+chemical signals, in: Autonomous Underwater Vehicle Technology, 1994. AUV ’ 94., 
+Proceedings of the 1994 Symposium on, IEEE, 1994, pp. 450 – 455. 
+[4] X. Chen, J. Huang, Towards environmentally adaptive odor source localization: 
+Fuzzy l ´evy taxis algorithm and its validation in dynamic odor plumes, in: in: 2020 
+5th International Conference on Advanced Robotics and Mechatronics (ICARM), 
+IEEE, 2020, pp. 282 – 287 . 
+[5] J. Monroy, V. Hernandez-Bennetts, H. Fan, A. Lilienthal, J. Gonzalez-Jimenez, 
+Gaden: A 3d gas dispersion simulator for mobile robot olfaction in realistic 
+environments, Sensors 17 (2017) 1479 . 
+[6] M. Awadalla, T.-F. Lu, Z.F. Tian, B. Dally, Z. Liu, 3d framework combining cfd and 
+matlab techniques for plume source localization research, Building and 
+Environment 70 (2013) 10 – 19 . 
+[7] Y. Xing, T.A. Vincent, H. Fan, E. Schaffernicht, V.H. Bennetts, A.J. Lilienthal, 
+M. Cole, J.W. Gardner, Firenose on mobile robot in harsh environments, IEEE 
+Sensors Journal (2019) . 
+[8] H. Matsukura, H. Hashiguchi, H. Ishida, Tracking of a gas plume with the aid of 
+olfactory assist mask, IEEE Sensors Journal 17 (2017) 5332 – 5340 . 
+[9] T. Lochmatter, Bio-inspired and probabilistic algorithms for distributed odor 
+source localization using mobile robots, Ph.D. thesis, EPFL (2010) . 
+[10] X. Chen, J. Huang, Design and performance evaluation of a particle filter-based 
+algorithm for smoke plume path tracking, in: 4th IEEE International Conference on 
+Advanced Robotics and Mechatronics, ICARM 2019, Toyonaka, Japan, July 3 – 5, 
+2019, 2019, pp. 156 – 161. 
+[11] J.A. Farrell, S. Pang, W. Li, Plume mapping via hidden markov methods, IEEE 
+Transactions on Systems, Man, and Cybernetics, Part B (Cybernetics) 33 (2003) 
+850 – 863 . 
+[12] X. Chen, A. Marjovi, J. Huang, A. Martinoli, Particle source localization with a low- 
+cost robotic sensor system: Algorithmic design and performance evaluation, IEEE 
+Sensors Journal 20 (2020) 13074 – 13085 . 
+[13] H. Ishida, T. Ushiku, S. Toyama, H. Taniguchi, T. Moriizumi, Mobile robot path 
+planning using vision and olfaction to search for a gas source, in: SENSORS, 2005 
+IEEE, IEEE, 2005, pp. 4 – pp. 
+[14] H.-F. Jiu, S. Pang, J.-L. Li, B. Han, Odor plume source localization with a pioneer 3 
+mobile robot in an indoor airflow environment, in: IEEE SOUTHEASTCON 2014, 
+IEEE, 2014, pp. 1 – 6. 
+[15] G. Kowadlo, R.A. Russell, Robot odor localization: a taxonomy and survey, The 
+International Journal of Robotics Research 27 (2008) 869 – 894 . 
+[16] X. Chen, J. Huang, Odor source localization algorithms on mobile robots: A review 
+and future outlook, Robotics and Autonomous Systems 112 (2019) 123 – 136 . 
+[17] H. Zhou, Y. Song, X. Pan, D. Li, Airborne particles detection and sizing at single 
+particle level by a novel electrical current pulse sensor, Measurement 92 (2016) 
+58 – 62 . 
+[18] A. Lay-Ekuakille, S. Ikezawa, M. Mugnaini, R. Morello, C. De Capua, Detection of 
+specific macro and micropollutants in air monitoring: review of methods and 
+techniques, Measurement 98 (2017) 49 – 59 . 
+[19] J. Monroy, J. Gonzalez-Jimenez, Towards odor-sensitive mobile robots, in: Rapid 
+Automation: Concepts, Methodologies, Tools, and Applications, IGI Global, 2019, 
+pp. 1491 – 1510. 
+[20] R. Rozas, J. Morales, D. Vega, Artificial smell detection for robotic navigation, in: 
+Fifth International Conference on Advanced Robotics ’ Robots in Unstructured 
+Environments, 1991, IEEE, 1991, pp. 1730 – 1733. 
+[21] R.A. Russell, D. Thiel, R. Deveza, A. Mackay-Sim, A robotic system to locate 
+hazardous chemical leaks, in: Proceedings of 1995 IEEE International Conference 
+on Robotics and Automation, volume 1, IEEE, 1995, pp. 556 – 561 . 
+[22] X. Chen, J. Huang, Combining particle filter algorithm with bio-inspired 
+anemotaxis behavior: A smoke plume tracking method and its robotic experiment 
+validation, Measurement 154 (2020) 107482 . 
+[23] C. Xiong, D. Lu, Z. Zeng, L. Lian, C. Yu, Path planning of multiple unmanned 
+marine vehicles for adaptive ocean sampling using elite group-based evolutionary 
+algorithms, Journal of Intelligent & Robotic Systems (2020) 1 – 15 . 
+[24] X. Cui, C.T. Hardin, R.K. Ragade, A.S. Elmaghraby, A swarm approach for emission 
+sources localization, in: Tools with Artificial Intelligence, 2004. ICTAI 2004. 16th 
+IEEE International Conference on, IEEE, 2004, pp. 424 – 430. 
+[25] L. Marques, U. Nunes, A.T. de Almeida, Particle swarm-based olfactory guided 
+search, Autonomous Robots 20 (2006) 277 – 287 . 
+[26] J.M. Soares, A.P. Aguiar, A.M. Pascoal, A. Martinoli, An algorithm for formation- 
+based chemical plume tracing using robotic marine vehicles, in: OCEANS 2016 
+MTS/IEEE Monterey, IEEE, 2016, pp. 1 – 8 . 
+[27] J. Monroy, J.-R. Ruiz-Sarmiento, A.J. Gonzalez-Jimenez, et al., An evaluation of 
+plume tracking as a strategy for gas source localization in turbulent wind flows, in: 
+in: ISOCS/IEEE International Symposium on Olfaction and Electronic Nose 
+(ISOEN), IEEE, 2019, pp. 1 – 3 . 
+[28] J. Huang, M. Ri, D. Wu, S. Ri, Interval type-2 fuzzy logic modeling and control of a 
+mobile two-wheeled inverted pendulum, IEEE Transactions on Fuzzy Systems 26 
+(2018) 2030 – 2038 . 
+X. Chen et al.                                                                                                                                                                                                                                    
+
+===== PAGE 14 =====
+
+Measurement 183 (2021) 109725
+14
+[29] J. Li, J. Wang, H. Peng, L. Zhang, Y. Hu, H. Su, Neural fuzzy approximation 
+enhanced autonomous tracking control of the wheel-legged robot under uncertain 
+physical interaction, Neurocomputing 410 (2020) 342–353. 
+[30] J. Li, J. Wang, H. Peng, Y. Hu, H. Su, Fuzzy-torque approximation-enhanced sliding 
+mode control for lateral stability of mobile robot, IEEE Transactions on Systems, 
+Man, and Cybernetics: Systems (2021). 
+[31] R.S. Sutton, A.G. Barto, Reinforcement learning: An introduction, MIT press, 2018. 
+[32] Z. Liu, S. Abbaszadeh, Double q-learning for radiation source detection, Sensors 19 
+(2019) 960. 
+[33] Z. Zhang, Sound Source Localization in Complex Indoor Environment: A Self- 
+Supervised Incremental Learning Approach, Ph.D. thesis, UCLA (2019). 
+[34] H. Liu, Z. Zhang, Y. Zhu, S.-C. Zhu, E. Contributors, Self-supervised incremental 
+learning for sound source localization in complex indoor environment, in: in: 
+International Conference on Robotics and Automation (ICRA), IEEE, 2019, 
+pp. 2599–2605. 
+[35] W. Xu, J. Huang, Y. Wang, C. Tao, L. Cheng, Reinforcement learning-based shared 
+control for walking-aid robot and its experimental verification, Advanced Robotics 
+29 (2015) 1463–1481. 
+[36] A.T. Hayes, A. Martinoli, R.M. Goodman, Swarm robotic odor localization: Off-line 
+optimization and validation with real robots, Robotica 21 (2003) 427–441. 
+[37] H. Hu, S. Song, C.P. Chen, Plume tracing via model-free reinforcement learning 
+method, IEEE transactions on neural networks and learning systems (2019). 
+[38] T. Lochmatter, A. Martinoli, Tracking odor plumes in a laminar wind field with bio- 
+inspired algorithms. Experimental robotics, Springer, 2009, pp. 473–482. 
+[39] F. Rahbar, A. Marjovi, P. Kibleur, A. Martinoli, A 3-d bio-inspired odor source 
+localization and its validation in realistic environmental conditions, in: in: 2017 
+IEEE/RSJ International Conference on Intelligent Robots and Systems (IROS), 
+IEEE, 2017, pp. 3983–3989. 
+[40] B.L. Villarreal, G. Olague, J.L. Gordillo, Synthesis of odor tracking algorithms with 
+genetic programming, Neurocomputing 175 (2016) 1019–1032. 
+[41] M. Vergassola, E. Villermaux, B.I. Shraiman, ’infotaxis’ as a strategy for searching 
+without gradients, Nature 445 (2007) 406. 
+[42] V. Mnih, K. Kavukcuoglu, D. Silver, A. Graves, I. Antonoglou, D. Wierstra, 
+M. Riedmiller, Playing atari with deep reinforcement learning, 2013 arXiv preprint 
+arXiv:1312.5602. 
+[43] C.J.C.H. Watkins, Learning from delayed rewards, Ph.D. thesis, King’s College, 
+Cambridge, 1989. 
+[44] V. Mnih, K. Kavukcuoglu, D. Silver, A.A. Rusu, J. Veness, M.G. Bellemare, 
+A. Graves, M. Riedmiller, A.K. Fidjeland, G. Ostrovski, et al., Human-level control 
+through deep reinforcement learning, Nature 518 (2015) 529. 
+[45] J. Li, H. Qin, J. Wang, J. Li, Openstreetmap-based autonomous navigation for the 
+four wheel-legged robot via 3d-lidar and ccd camera, IEEE Transactions on 
+Industrial Electronics (2021). 
+[46] F. Chollet, et al., Keras, https://keras.io, 2015. 
+[47] L.-J. Lin, Reinforcement learning for robots using neural networks, Technical 
+Report, Carnegie-Mellon Univ Pittsburgh PA School of Computer Science, 1993. 
+[48] A. Stuart, K. Ord, S. Arnold, in: Alan Stuart, Keith Ord, Steven Arnold (Eds.), 
+Kendall’s advanced theory of statistics. Volume 2A: classical inference and the 
+linear model, Wiley Online Library, 1999. 
+[49] G. Di Leo, F. Sardanelli, Statistical significance: p value, 0.05 threshold, and 
+applications to radiomics—reasons for a conservative approach, European 
+radiology experimental 4 (2020) 1–8. 
+[50] R. Amit, R. Meir, K. Ciosek, Discount factor as a regularizer in reinforcement 
+learning, in: International Conference on Machine Learning, PMLR, 2020, pp. 
+269–278. 
+[51] W.C. Dabney, Adaptive step-sizes for reinforcement learning (2014). 
+[52] H. Van Hasselt, A. Guez, D. Silver, Deep reinforcement learning with double q- 
+learning, in: Proceedings of the AAAI Conference on Artificial Intelligence, volume 
+30, 2016. 
+[53] S. Carta, A. Ferreira, A.S. Podda, D.R. Recupero, A. Sanna, Multi-dqn: An ensemble 
+of deep q-learning agents for stock market forecasting, Expert Systems with 
+Applications 164 (2021) 113820. 
+[54] O. Anschel, N. Baram, N. Shimkin, Averaged-dqn: Variance reduction and 
+stabilization for deep reinforcement learning, in: International Conference on 
+Machine Learning, PMLR, 2017, pp. 176–185. 
+[55] J. Pan, X. Wang, Y. Cheng, Q. Yu, Multisource transfer double dqn based on actor 
+learning, IEEE transactions on neural networks and learning systems 29 (2018) 
+2227–2238. 
+[56] H. Bayerlein, M. Theile, M. Caccamo, D. Gesbert, UAV path planning for wireless 
+data harvesting: A deep reinforcement learning approach, in: GLOBECOM 
+2020–2020 IEEE Global Communications Conference, 2020, pp. 1–6. 
+X. Chen et al.                                                                                                                                                                                                                                    
