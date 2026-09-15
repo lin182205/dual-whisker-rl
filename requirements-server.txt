@@ -1,0 +1,4 @@
+# 仿真、训练、批量评测与 TensorBoard 的服务器依赖。
+# 真机串口依赖仍单独安装 requirements-hardware.txt。
+-r requirements.txt
+-r requirements-rl.txt

@@ -38,7 +38,7 @@ python scripts\evaluate_joint_ppo.py --episodes 50
 tensorboard --logdir results\tensorboard
 ```
 
-VS Code workspace settings point Python to `.venv` and enable automatic virtual environment activation for new integrated terminals.
+本地 IDE 配置不进入版本库。使用 VS Code 时，请在本机选择 `.venv` 中的 Python 解释器；服务器按下方 Linux 命令单独创建环境。
 
 FFmpeg is a system dependency for the default H.264 MP4 animation export. Install it
 separately and make sure `ffmpeg` is available on `PATH`; it is not a Python package in
@@ -53,6 +53,13 @@ Training scripts write TensorBoard logs to `results/tensorboard/`. Common curves
 Training seeds are random by default for better policy diversity. Pass `--seed 42` when you need a reproducible run. Each training run writes `run_metadata.json` under its log directory with the actual seed and config.
 
 ## Cloud training (Linux)
+
+服务器最小上传文件、依赖分组和可排除目录见
+[服务器训练文件与依赖清单](docs/SERVER_TRAINING_MANIFEST.md)。仿真服务器可用一个入口安装依赖：
+
+```bash
+python -m pip install -r requirements-server.txt
+```
 
 All CLI paths are repository-relative by default. The scripts resolve them against the
 repository root, so they work both from the repository directory and when invoked by an
@@ -93,9 +100,21 @@ To view TensorBoard locally, create an SSH tunnel with
 The `results/` directory is intentionally ignored by Git; copy checkpoints and logs with
 `rsync`, `scp`, or cloud object storage before releasing the server.
 
+上传服务器前可运行路径审计；它会检查代码和配置中的 Windows 盘符、用户目录、
+Linux/macOS 家目录、挂载目录和 UNC 路径字面量：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\check_portable_paths.py
+```
+
+图表脚本会自动发现系统中文字体。服务器没有中文字体时可安装 Noto CJK，或通过
+`DUAL_WHISKER_FONT_REGULAR`、`DUAL_WHISKER_FONT_BOLD` 指定字体文件；训练过程不依赖这些字体。
+建议通过 Git 克隆或归档源码上传。若直接复制工作区，应排除 `.venv`、`results`、
+STM32 `build`、`.git` 和本地 IDE 设置目录；这些环境或生成产物可能包含本机路径，但不属于训练源码。
+
 ## E4 仿真对比实验
 
-统一入口 `scripts/run_e4_experiments.py` 管理 M/B0–B6 的场景、训练、评估、恢复和汇总。默认 smoke 只用于连通性检查；正式结果使用固定验证/测试场景和 5 个训练种子。场地边界由配置文件的 `world_bounds: [-2.5, 2.5]` 控制，E4 smoke/formal 当前均使用该范围；旧 `world_half` 仍兼容。动态 puff 会按场地半宽和最小风速自动调整寿命，羽流网格、puff 裁剪和越界判断共享同一边界。训练环境后端由 `vec_env_backend` 控制：smoke 默认 `dummy` 便于调试，formal 默认 `subproc`，在 Windows 上以 `spawn` 启动 8 个独立环境进程；可用 `--vec-env-backend` 临时覆盖。
+统一入口 `scripts/run_e4_experiments.py` 管理 M/B0–B6 的场景、训练、评估、恢复和汇总。默认 smoke 只用于连通性检查；正式结果使用固定验证/测试场景和 5 个训练种子。场地边界由配置文件的 `world_bounds: [-2.5, 2.5]` 控制，E4 smoke/formal 当前均使用该范围；旧 `world_half` 仍兼容。动态 puff 会按场地半宽和最小风速自动调整寿命，羽流网格、puff 裁剪和越界判断共享同一边界。训练环境后端由 `vec_env_backend` 控制：smoke 默认 `dummy` 便于调试，formal 默认 `subproc`，在 Windows 上以 `spawn` 启动 8 个独立环境进程；可用 `--vec-env-backend` 临时覆盖。训练期间每完成一个“环境 rollout + 5 个 PPO epoch 更新”周期，终端会根据最近 5 个周期的墙钟时间打印预计剩余分钟数。
 
 ```powershell
 # 生成 smoke 场景和任务清单

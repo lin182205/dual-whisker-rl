@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from html import escape
 from pathlib import Path
+import sys
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -25,16 +26,18 @@ RIGHT_COLOR = "#f2aa63"
 CRITIC_COLOR = "#bd91ff"
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from dual_whisker_rl.font_utils import resolve_chinese_font
+
 FIGURE_DIR = ROOT / "docs" / "figures"
 PNG_PATH = FIGURE_DIR / "algorithm-ppo-neural-network.png"
 SVG_PATH = FIGURE_DIR / "algorithm-ppo-neural-network.svg"
 
-FONT_REGULAR = Path(r"C:\Windows\Fonts\msyh.ttc")
-FONT_BOLD = Path(r"C:\Windows\Fonts\msyhbd.ttc")
-
 
 def font(size: int, *, bold: bool = False) -> ImageFont.FreeTypeFont:
-    return ImageFont.truetype(str(FONT_BOLD if bold else FONT_REGULAR), size=size)
+    return ImageFont.truetype(str(resolve_chinese_font(bold=bold)), size=size)
 
 
 def text_png(

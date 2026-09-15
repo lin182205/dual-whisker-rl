@@ -1609,3 +1609,29 @@ M/B2/B3/B6 使用 GRU 历史策略，B4 使用单帧 MLP，B5 通过输入维度
 训练代码不再依赖只有 `DummyVecEnv` 才有的 `env.envs[0]`。堆叠观测维度改从 VecEnv 的公开 `observation_space` 读取，GRU 的单帧基础维度通过 `get_attr("base_observation_dim")` 从各 worker 获取并检查一致性。并行后端写入 manifest、恢复签名和每个模型的 metadata，因此使用不同后端的旧任务不会被 `--resume` 静默混用。固定场景评估仍在主进程逐场景执行，保持原子保存和配对复现逻辑不变。
 
 验证：`py_compile` 和 E4 核心 4 项单元测试通过；Windows `spawn` 下以 2 个 worker 分别完成主方法 GRU 和 B5 历史 MLP 的 64-step smoke。主方法产物记录 `actual_timesteps=64`、`vec_env_backend=subproc`、`subproc_start_method=spawn`，模型与 TensorBoard event 均生成；同签名 `--resume` 正确跳过完成任务。`auto` 在 `n_envs=1` 时回退到 `dummy`，formal 默认仍解析为 8 worker 的 `subproc`。这些检查验证运行链路，不代表训练效果。
+
+## 31. E4 训练剩余时间估算
+
+正式训练增加 rollout 周期计时回调。计时从一次环境 rollout 开始，到该批数据完成配置的 5 个 PPO epoch 更新并准备开始下一次 rollout 为止；最后一轮在训练结束回调中结算。每轮终端输出本轮耗时、最近 5 轮平均耗时、实际完成步数和预计剩余分钟数。剩余轮数按 `ceil((目标总步数-模型实际步数)/每轮步数)` 计算，因此与 SB3 按完整 rollout 向上对齐的预算规则一致。恢复训练继续使用 checkpoint 中的 `model.num_timesteps`，不会从零估算。
+
+周期耗时使用单调墙钟计时，因而会自然计入该轮发生的 checkpoint 或周期验证开销，更接近用户实际等待时间。平滑窗口、单位、PPO epoch 数同步写入每个训练任务的 `metadata.json`。ETA 以及准备、训练、评估和汇总等面向人的终端状态提示统一使用中文；结构化 JSON 字段保持稳定，避免破坏自动化读取。重定向到日志或任务捕获通道时显式使用 UTF-8，交互式 Windows 终端则沿用本地编码，避免中文乱码。验证采用 B4、2 个 SubprocVecEnv worker、2048 总步数完成两个 rollout：第一轮耗时 1.36 秒、剩余估算 0.02 分钟，第二轮完成后为 0.00 分钟；E4 核心 4 项单元测试和语法检查通过。这只是计时链路验证，正式服务器上的数值会随 CPU、worker 数和周期验证而变化。
+
+## 32. 服务器训练前的路径可移植性审计
+
+对主仓库及 `active-olfaction-pape` 论文子仓库的 Python、YAML、JSON、TOML、Shell、PowerShell 等运行文件进行了绝对路径复扫。训练主线和 E4 已统一使用 `dual_whisker_rl.paths`，没有本机盘符、用户名、家目录或挂载目录字面量。残留项来自辅助工具：两份网络结构图脚本写死 Windows 中文字体、Puppeteer 配置写死 Edge、PDF 文本提取工具写死桌面文献目录，论文子仓库的两份导出脚本也写死 Windows 字体。本轮已全部移除。
+
+新增 `dual_whisker_rl/font_utils.py`，图表脚本优先读取 `DUAL_WHISKER_FONT_REGULAR`/`DUAL_WHISKER_FONT_BOLD`，否则按字体族自动发现 Microsoft YaHei、Noto Sans CJK、Source Han Sans 等中文字体；论文子仓库提供等价工具和独立环境变量。PDF 提取脚本改为接收 `名称=PDF路径` 参数，Puppeteer 交由运行环境发现浏览器。字体和文献可以在运行时使用绝对路径，但仓库代码不再保存任何机器位置。
+
+新增 `scripts/check_portable_paths.py` 作为上传前检查，扫描 Windows 盘符、Linux/macOS 用户与挂载目录、UNC 网络路径。`.venv`、`results`、`node_modules`、STM32 `build` 和本地 IDE 配置属于 Git 忽略的环境或生成产物，不纳入源码审计。实际运行审计通过；从系统临时目录启动 `train_fixed_whisker_dqn.py`、`train_joint_ppo.py`、`train_mobile_whisker_ppo.py`、`train_whisker_only_ppo.py` 的帮助入口均成功，E4 formal dry-run 仍正确解析 216/648 场景、5 个种子、8 个 `subproc` worker。进一步从系统临时目录实际完成 B4、2 worker、64-step 训练，生成的 `metadata.json` 和 `state.json` 均不含 Windows 盘符，模型和 TensorBoard 路径保持为 `results/...`。`train_joint_dqn.py` 是已废弃入口，会按设计立即提示使用 PPO。修改文件均通过 Python 编译检查，Windows 字体自动发现得到有效字体文件。
+
+## 33. 服务器训练文件与依赖分层
+
+从所有 `train_*`、`evaluate_*` 和 E4 统一入口的导入链复核依赖。E4 正式训练与批量评测的直接第三方依赖为 NumPy、Gymnasium、PyYAML、PyTorch、Stable-Baselines3 和 TensorBoard；旧评测绘图直接使用 Matplotlib。PySerial 只服务真机串口，FFmpeg 只服务 MP4 动画，因此二者均不属于 E4 批量实验运行条件。新增 `requirements-server.txt` 汇总仿真与强化学习依赖，服务器可通过一个 requirements 入口安装。
+
+新增 `docs/SERVER_TRAINING_MANIFEST.md`，固定 E4 最小上传集、推荐验证文件、可排除目录和恢复流程。正式运行只需要 `dual_whisker_rl/`、E4 入口、smoke/formal 配置与 Python 依赖文件；`.venv`、首次运行时的 `results`、硬件/STM32、论文仓库、文档输出、临时 PDF、画图动画和本地 IDE 状态都可从训练上传包中排除。续训所用 E4 输出目录（默认 `results/e4/`）属于恢复输入，不能按首次上传规则丢弃；smoke/formal 长期并存时应显式使用不同 `--output-dir`。
+
+主仓库 `.gitignore` 现显式覆盖 Python 环境与缓存、`results`、STM32/CMake `build`、Git 元数据、本地 IDE/助手目录、日志和本地上传归档；论文子仓库同步忽略本地环境与编辑器状态。`.git` 元数据本身不会被 Git 跟踪，该规则主要用于工作区复制和归档清单的统一表达。
+
+## 34. 论文仓库与训练主仓库解耦
+
+`active-olfaction-pape` 已从 `dual-whisker-rl` 的 Git 索引中移除，主仓库不再保存论文仓库的 gitlink，也不负责传播论文仓库提交。主仓库 `.gitignore` 显式忽略同名目录，允许本地继续保留独立论文工作区而不影响训练代码状态。论文目录的文件和本地提交均未删除；后续如需同步论文，应在论文仓库中独立完成。

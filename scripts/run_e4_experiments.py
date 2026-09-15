@@ -53,6 +53,14 @@ PPO_EPOCHS = 5
 ETA_WINDOW_ROLLOUTS = 5
 
 
+def configure_output_encoding() -> None:
+    """重定向日志统一写 UTF-8；交互式 Windows 终端沿用其本地编码。"""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure) and not stream.isatty():
+            reconfigure(encoding="utf-8", errors="replace")
+
+
 def atomic_write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".tmp", dir=path.parent, delete=False) as f:
@@ -101,10 +109,12 @@ def make_rollout_eta_callback(method: str, seed: int, target_timesteps: int, rol
             remaining_rollouts = (remaining_steps + int(rollout_size) - 1) // int(rollout_size)
             remaining_minutes = average_seconds * remaining_rollouts / 60.0
             print(
-                f"[ETA] method={method} seed={seed} rollout={self.completed_rollouts} "
-                f"rollout+{PPO_EPOCHS}epoch={elapsed:.2f}s "
-                f"average={average_seconds:.2f}s completed={completed_steps}/{target_timesteps} "
-                f"estimated_remaining={remaining_minutes:.2f} min",
+                f"[训练剩余时间] 方法={method} 随机种子={seed} "
+                f"已完成采样轮次={self.completed_rollouts} "
+                f"本轮采样及{PPO_EPOCHS}轮更新耗时={elapsed:.2f}秒 "
+                f"最近{ETA_WINDOW_ROLLOUTS}轮平均耗时={average_seconds:.2f}秒 "
+                f"训练步数={completed_steps}/{target_timesteps} "
+                f"预计剩余={remaining_minutes:.2f}分钟",
                 flush=True,
             )
 
@@ -259,7 +269,7 @@ def prepare(args: argparse.Namespace) -> Path:
                     "scenario_hashes": manifest["scenario_hashes"],
                     "signature": experiment_signature(args, method, seed),
                 })
-    print(f"prepared={portable_path(root)} validation={len(scenarios['validation'])} test={len(scenarios['test'])}")
+    print(f"准备完成：目录={portable_path(root)} 验证场景={len(scenarios['validation'])} 测试场景={len(scenarios['test'])}")
     return root
 
 
@@ -611,7 +621,7 @@ def selected_fixed_sector(root: Path) -> int:
 def train_command(args: argparse.Namespace, root: Path) -> None:
     for method in args.methods:
         for seed in seeds_for_method(args, method):
-            print(f"train method={method} seed={seed}")
+            print(f"开始训练：方法={method} 随机种子={seed}")
             train_one(args, root, method, seed, fixed_sector=selected_fixed_sector(root) if method == "b2_fixed" else 5)
 
 
@@ -620,7 +630,7 @@ def evaluate_command(args: argparse.Namespace, root: Path) -> None:
     for split in splits:
         for method in args.methods:
             for seed in seeds_for_method(args, method):
-                print(f"evaluate split={split} method={method} seed={seed}")
+                print(f"开始评估：数据集={split} 方法={method} 随机种子={seed}")
                 evaluate_method(args, root, method, seed, split, fixed_sector=selected_fixed_sector(root) if method == "b2_fixed" else 5)
 
 
@@ -640,7 +650,7 @@ def summarize(args: argparse.Namespace, root: Path) -> None:
                     row.update({"method": method, "training_seed": seed})
                     all_rows.append(row)
     if not all_rows:
-        print("no completed episode results")
+        print("暂无已完成的回合结果")
         return
     grouped: dict[str, dict[str, Any]] = {}
     for method in args.methods:
@@ -709,7 +719,7 @@ def summarize(args: argparse.Namespace, root: Path) -> None:
         lines.append(f"| {method} | {split} | {value['episodes']} / {value.get('expected_episodes', value['episodes'])} | {value.get('coverage', 0.0):.3f} | {value.get('missing_episodes', 0)} | {value.get('success_rate', 0.0):.3f} | {value.get('mean_steps', 0.0):.2f} | {value.get('mean_final_distance', 0.0):.4f} |")
     lines.extend(["", "缺失场景保持为缺失，不计入失败回合。smoke 结果仅用于连通性验证。"])
     (root / "summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
-    print(f"saved_summary={portable_path(root / 'summary.md')}")
+    print(f"汇总已保存：{portable_path(root / 'summary.md')}")
 
 
 def status(args: argparse.Namespace, root: Path) -> None:
@@ -756,6 +766,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    configure_output_encoding()
     args = build_parser().parse_args()
     resolve_args(args)
     root = args.output_dir / args.profile

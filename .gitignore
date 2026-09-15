@@ -1,5 +1,37 @@
+# Python 本地环境与缓存
 .venv/
+venv/
 __pycache__/
 *.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
+# 训练、评测与本地打包产物
 results/
+*.log
+.codex-upload-*.tar
+
+# 独立论文工作区不属于仿真训练主仓库
+active-olfaction-pape/
+
+# STM32/CMake 本机构建目录
+hardware/firmware/**/build/
+hardware/firmware/**/cmake-build-*/
+
+# Git 元数据与本地 IDE/智能助手配置
+# .git 本身不会被 Git 纳入版本控制；保留规则便于直接复制或归档项目时排除。
+.git/
+**/.git/
+.vscode/
+.idea/
+.vs/
+.claude/
+.codex/
+.agents/
+*.code-workspace
+
+# 操作系统本地文件
+.DS_Store
+Thumbs.db
+desktop.ini
