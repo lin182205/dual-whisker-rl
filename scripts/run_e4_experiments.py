@@ -48,6 +48,11 @@ from dual_whisker_rl.envs.world_bounds import resolve_world_bounds, world_bounds
 
 
 VERSION = "e4-v1"
+CALIBRATION_SIGNATURE_VERSION = "e4-calibration-v2"
+# 仅用于迁移已经完成、且校准逻辑与当前一致的已知旧运行器产物。
+LEGACY_CALIBRATION_RUNNER_HASHES = {
+    "14fe05c": "a9c50b5371c5bee1bdab5569985a74e8e83ce96c557b65c186ce02cf1a58da13",
+}
 DEFAULT_OUTPUT = Path("results/e4")
 PPO_EPOCHS = 5
 ETA_WINDOW_ROLLOUTS = 5
@@ -351,16 +356,17 @@ def experiment_signature(args: argparse.Namespace, method: str, seed: int, fixed
     return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
-def calibration_signature(args: argparse.Namespace, root: Path) -> str:
-    """生成正式校准摘要，防止恢复时混用场景、配置或代码。"""
+def calibration_signature_payload(args: argparse.Namespace, root: Path) -> dict[str, Any]:
+    """生成只覆盖校准语义的稳定签名内容。"""
     signature_config = base_config(args)
     effective_max_steps = (
         args.max_steps
         if args.max_steps is not None
         else signature_config.get("max_steps") if signature_config.get("max_steps") is not None else 400
     )
-    payload = {
-        "version": VERSION,
+    return {
+        "signature_version": CALIBRATION_SIGNATURE_VERSION,
+        "experiment_version": VERSION,
         "profile": args.profile,
         "seeds": [int(seed) for seed in args.seeds[:2]],
         "n_envs": int(args.n_envs),
@@ -369,18 +375,57 @@ def calibration_signature(args: argparse.Namespace, root: Path) -> str:
         "max_steps": int(effective_max_steps),
         "config": signature_config,
         "scenario_hashes": verify_scenario_manifest(root),
+        "calibration_space": {
+            "b1_candidates": 48,
+            "b2_candidate_sectors": list(range(10)),
+            "b2_timesteps_per_candidate": 102400,
+            "selection_rule": "validation success_rate, then mean_final_distance, then deterministic tie break",
+        },
         "code_hashes": {
-            "runner": sha256_file(Path(__file__).resolve()),
             "experiment": sha256_file(ROOT / "dual_whisker_rl" / "e4_experiments.py"),
             "mobile_env": sha256_file(ROOT / "dual_whisker_rl" / "envs" / "mobile_whisker_env.py"),
             "plume_env": sha256_file(ROOT / "dual_whisker_rl" / "envs" / "whisker_only_env.py"),
             "world_bounds": sha256_file(ROOT / "dual_whisker_rl" / "envs" / "world_bounds.py"),
         },
     }
+
+
+def calibration_signature(args: argparse.Namespace, root: Path) -> str:
+    """生成正式校准摘要，防止恢复时混用场景、配置或核心代码。"""
+    payload = calibration_signature_payload(args, root)
     return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
-def load_completed_calibration(path: Path, method: str, signature: str) -> dict[str, Any] | None:
+def legacy_calibration_signatures(args: argparse.Namespace, root: Path) -> set[str]:
+    """计算可安全迁移的旧版校准签名。"""
+    current = calibration_signature_payload(args, root)
+    legacy_common = {
+        "version": VERSION,
+        "profile": current["profile"],
+        "seeds": current["seeds"],
+        "n_envs": current["n_envs"],
+        "vec_env_backend": current["vec_env_backend"],
+        "checkpoint_rollouts": current["checkpoint_rollouts"],
+        "max_steps": current["max_steps"],
+        "config": current["config"],
+        "scenario_hashes": current["scenario_hashes"],
+    }
+    signatures = set()
+    for runner_hash in LEGACY_CALIBRATION_RUNNER_HASHES.values():
+        payload = {
+            **legacy_common,
+            "code_hashes": {"runner": runner_hash, **current["code_hashes"]},
+        }
+        signatures.add(hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest())
+    return signatures
+
+
+def load_completed_calibration(
+    path: Path,
+    method: str,
+    signature: str,
+    legacy_signatures: set[str] | None = None,
+) -> dict[str, Any] | None:
     """读取可恢复校准结果；存在但损坏或不兼容时明确拒绝。"""
     if not path.exists():
         return None
@@ -390,7 +435,19 @@ def load_completed_calibration(path: Path, method: str, signature: str) -> dict[
         raise ValueError(f"calibration artifact is corrupt: {path}") from exc
     if payload.get("status") != "completed" or payload.get("method") != method:
         raise ValueError(f"calibration artifact is incomplete: {path}; use a new experiment directory")
-    if payload.get("signature") != signature:
+    saved_signature = str(payload.get("signature") or "")
+    if saved_signature != signature and saved_signature in (legacy_signatures or set()):
+        payload = {
+            **payload,
+            "signature": signature,
+            "signature_version": CALIBRATION_SIGNATURE_VERSION,
+            "migrated_from_signature": saved_signature,
+            "migrated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        atomic_write_json(path, payload)
+        print(f"恢复校准：已迁移兼容的旧签名；文件={portable_path(path)}", flush=True)
+        return payload
+    if saved_signature != signature:
         raise ValueError(f"calibration signature mismatch: {path}; use a new experiment directory")
     return payload
 
@@ -625,8 +682,9 @@ def calibrate_command(args: argparse.Namespace, root: Path) -> None:
         print(json.dumps({"status": "planned", "b1_candidates": len(b1_grid), "candidate_sectors": candidates, "seeds": args.seeds[:2], "timesteps_per_candidate": 102400}, ensure_ascii=False, indent=2))
         return
     signature = calibration_signature(args, root)
-    saved_b1 = load_completed_calibration(b1_path, "b1_reactive", signature) if args.resume else None
-    saved_b2 = load_completed_calibration(path, "b2_fixed", signature) if args.resume else None
+    compatible_legacy_signatures = legacy_calibration_signatures(args, root)
+    saved_b1 = load_completed_calibration(b1_path, "b1_reactive", signature, compatible_legacy_signatures) if args.resume else None
+    saved_b2 = load_completed_calibration(path, "b2_fixed", signature, compatible_legacy_signatures) if args.resume else None
     calibration_args = argparse.Namespace(**vars(args))
     calibration_args.timesteps = 102400
     calibration_args.eval_limit = None
@@ -674,7 +732,7 @@ def calibrate_command(args: argparse.Namespace, root: Path) -> None:
                 flush=True,
             )
         b1_selected = min(b1_scores, key=lambda item: (-float(item["success_rate"]), float(item["mean_final_distance"]) if item["mean_final_distance"] is not None else float("inf"), int(item["candidate_index"])))
-        saved_b1 = {"version": VERSION, "method": "b1_reactive", "status": "completed", "signature": signature, "candidate_count": len(b1_grid), "selected_config": b1_selected["config"], "selection_rule": "validation success_rate, then mean_final_distance, then candidate order", "scores": b1_scores}
+        saved_b1 = {"version": VERSION, "method": "b1_reactive", "status": "completed", "signature_version": CALIBRATION_SIGNATURE_VERSION, "signature": signature, "candidate_count": len(b1_grid), "selected_config": b1_selected["config"], "selection_rule": "validation success_rate, then mean_final_distance, then candidate order", "scores": b1_scores}
         atomic_write_json(b1_path, saved_b1)
     else:
         print(f"恢复校准：B1 已完成，跳过规则参数搜索；文件={portable_path(b1_path)}")
@@ -736,7 +794,7 @@ def calibrate_command(args: argparse.Namespace, root: Path) -> None:
             flush=True,
         )
     selected = min(candidates, key=lambda sector: (-scores[str(sector)]["success_rate"], scores[str(sector)]["mean_final_distance"] if scores[str(sector)]["mean_final_distance"] is not None else float("inf"), scores[str(sector)]["earliest_checkpoint"] if scores[str(sector)]["earliest_checkpoint"] is not None else float("inf"), sector))
-    payload = {"version": VERSION, "method": "b2_fixed", "status": "completed", "signature": signature, "candidate_sectors": candidates, "candidate_angles_deg": [float((s + 0.5) * 18.0) for s in candidates], "seeds": args.seeds[:2], "timesteps_per_candidate": calibration_args.timesteps, "selected_sector": selected, "selection_rule": "validation success_rate, then mean_final_distance, then earliest checkpoint", "scores": scores}
+    payload = {"version": VERSION, "method": "b2_fixed", "status": "completed", "signature_version": CALIBRATION_SIGNATURE_VERSION, "signature": signature, "candidate_sectors": candidates, "candidate_angles_deg": [float((s + 0.5) * 18.0) for s in candidates], "seeds": args.seeds[:2], "timesteps_per_candidate": calibration_args.timesteps, "selected_sector": selected, "selection_rule": "validation success_rate, then mean_final_distance, then earliest checkpoint", "scores": scores}
     atomic_write_json(path, payload)
     print(json.dumps({"status": "completed", "selected_sector": selected, "b1_selected_config": saved_b1["selected_config"], "b2_path": portable_path(path), "b1_path": portable_path(b1_path)}, ensure_ascii=False, indent=2))
 

@@ -79,6 +79,32 @@ class E4RunnerTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "signature mismatch"):
                 RUNNER.load_completed_calibration(path, "b1_reactive", "different")
 
+    def test_known_legacy_calibration_signature_is_migrated_atomically(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "calibration_b1.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": RUNNER.VERSION,
+                        "method": "b1_reactive",
+                        "status": "completed",
+                        "signature": "legacy",
+                        "selected_config": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            payload = RUNNER.load_completed_calibration(
+                path,
+                "b1_reactive",
+                "current",
+                {"legacy"},
+            )
+            self.assertEqual(payload["signature"], "current")
+            self.assertEqual(payload["migrated_from_signature"], "legacy")
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(saved["signature_version"], RUNNER.CALIBRATION_SIGNATURE_VERSION)
+
     def test_corrupt_calibration_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "calibration_b2.json"
@@ -100,10 +126,11 @@ class E4RunnerTests(unittest.TestCase):
             )
             args = RUNNER.argparse.Namespace(profile="formal", dry_run=False, resume=True)
             with patch.object(RUNNER, "calibration_signature", return_value="expected"):
-                with patch.object(RUNNER, "read_scenarios", side_effect=AssertionError("不应重新评估")):
-                    output = StringIO()
-                    with redirect_stdout(output):
-                        RUNNER.calibrate_command(args, root)
+                with patch.object(RUNNER, "legacy_calibration_signatures", return_value=set()):
+                    with patch.object(RUNNER, "read_scenarios", side_effect=AssertionError("不应重新评估")):
+                        output = StringIO()
+                        with redirect_stdout(output):
+                            RUNNER.calibrate_command(args, root)
             self.assertIn("B1 已完成，跳过规则参数搜索", output.getvalue())
             self.assertIn("B2 已完成，跳过固定角度搜索", output.getvalue())
 
