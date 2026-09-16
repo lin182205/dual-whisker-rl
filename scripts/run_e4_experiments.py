@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from functools import partial
 import hashlib
 import json
+import math
 from pathlib import Path
 import shutil
 import sys
@@ -396,6 +397,90 @@ def calibration_signature(args: argparse.Namespace, root: Path) -> str:
     return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
+def b1_calibration_grid() -> list[dict[str, Any]]:
+    """返回 B1 的完整候选空间，供搜索和旧产物校验共同使用。"""
+    return [
+        {"b1_hit_threshold": hit, "b1_trend_threshold": trend, "b1_contrast_threshold": contrast, "b1_search_period": search, "b1_scan_period": scan}
+        for hit in (0.06, 0.08, 0.10)
+        for trend in (-0.03, -0.02)
+        for contrast in (0.02, 0.03)
+        for search in (6, 8)
+        for scan in (1, 2)
+    ]
+
+
+def _is_finite_metric(value: Any, *, allow_none: bool = False) -> bool:
+    if value is None:
+        return allow_none
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value))
+
+
+def structurally_valid_legacy_calibration(
+    payload: dict[str, Any],
+    method: str,
+    expected_seeds: list[int],
+) -> bool:
+    """严格核验无签名版本号的早期完整校准产物。"""
+    if payload.get("signature_version") is not None or payload.get("version") != VERSION:
+        return False
+    if method == "b1_reactive":
+        grid = b1_calibration_grid()
+        scores = payload.get("scores")
+        if payload.get("candidate_count") != len(grid) or not isinstance(scores, list) or len(scores) != len(grid):
+            return False
+        try:
+            ordered = sorted(scores, key=lambda item: int(item["candidate_index"]))
+            for index, (score, expected_config) in enumerate(zip(ordered, grid)):
+                if int(score["candidate_index"]) != index or score.get("config") != expected_config:
+                    return False
+                if not _is_finite_metric(score.get("success_rate")) or not _is_finite_metric(score.get("mean_final_distance"), allow_none=True):
+                    return False
+            selected = min(
+                ordered,
+                key=lambda item: (
+                    -float(item["success_rate"]),
+                    float(item["mean_final_distance"]) if item["mean_final_distance"] is not None else float("inf"),
+                    int(item["candidate_index"]),
+                ),
+            )
+        except (KeyError, TypeError, ValueError):
+            return False
+        return payload.get("selected_config") == selected.get("config")
+    if method == "b2_fixed":
+        sectors = list(range(10))
+        scores = payload.get("scores")
+        if payload.get("candidate_sectors") != sectors or payload.get("seeds") != expected_seeds:
+            return False
+        if payload.get("timesteps_per_candidate") != 102400 or not isinstance(scores, dict) or set(scores) != {str(sector) for sector in sectors}:
+            return False
+        try:
+            for sector in sectors:
+                score = scores[str(sector)]
+                if not _is_finite_metric(score.get("success_rate")) or not _is_finite_metric(score.get("mean_final_distance"), allow_none=True):
+                    return False
+                if not _is_finite_metric(score.get("earliest_checkpoint"), allow_none=True):
+                    return False
+                runs = score.get("runs")
+                if not isinstance(runs, list) or [int(run["seed"]) for run in runs] != expected_seeds:
+                    return False
+                for run in runs:
+                    if not _is_finite_metric(run.get("success_rate")) or not _is_finite_metric(run.get("mean_final_distance"), allow_none=True):
+                        return False
+            selected = min(
+                sectors,
+                key=lambda sector: (
+                    -float(scores[str(sector)]["success_rate"]),
+                    float(scores[str(sector)]["mean_final_distance"]) if scores[str(sector)]["mean_final_distance"] is not None else float("inf"),
+                    float(scores[str(sector)]["earliest_checkpoint"]) if scores[str(sector)]["earliest_checkpoint"] is not None else float("inf"),
+                    sector,
+                ),
+            )
+        except (KeyError, TypeError, ValueError):
+            return False
+        return payload.get("selected_sector") == selected
+    return False
+
+
 def legacy_calibration_signatures(args: argparse.Namespace, root: Path) -> set[str]:
     """计算可安全迁移的旧版校准签名。"""
     current = calibration_signature_payload(args, root)
@@ -425,6 +510,7 @@ def load_completed_calibration(
     method: str,
     signature: str,
     legacy_signatures: set[str] | None = None,
+    structural_legacy_seeds: list[int] | None = None,
 ) -> dict[str, Any] | None:
     """读取可恢复校准结果；存在但损坏或不兼容时明确拒绝。"""
     if not path.exists():
@@ -436,13 +522,19 @@ def load_completed_calibration(
     if payload.get("status") != "completed" or payload.get("method") != method:
         raise ValueError(f"calibration artifact is incomplete: {path}; use a new experiment directory")
     saved_signature = str(payload.get("signature") or "")
-    if saved_signature != signature and saved_signature in (legacy_signatures or set()):
+    known_legacy_signature = saved_signature in (legacy_signatures or set())
+    structurally_valid_legacy = (
+        structural_legacy_seeds is not None
+        and structurally_valid_legacy_calibration(payload, method, structural_legacy_seeds)
+    )
+    if saved_signature != signature and (known_legacy_signature or structurally_valid_legacy):
         payload = {
             **payload,
             "signature": signature,
             "signature_version": CALIBRATION_SIGNATURE_VERSION,
             "migrated_from_signature": saved_signature,
             "migrated_at": datetime.now(timezone.utc).isoformat(),
+            "migration_validation": "known_signature" if known_legacy_signature else "complete_legacy_artifact_structure",
         }
         atomic_write_json(path, payload)
         print(f"恢复校准：已迁移兼容的旧签名；文件={portable_path(path)}", flush=True)
@@ -670,21 +762,15 @@ def calibrate_command(args: argparse.Namespace, root: Path) -> None:
             atomic_write_json(b1_path, b1_payload)
         print(json.dumps({"b2": payload, "b1": b1_payload}, ensure_ascii=False, indent=2))
         return
-    b1_grid = [
-        {"b1_hit_threshold": hit, "b1_trend_threshold": trend, "b1_contrast_threshold": contrast, "b1_search_period": search, "b1_scan_period": scan}
-        for hit in (0.06, 0.08, 0.10)
-        for trend in (-0.03, -0.02)
-        for contrast in (0.02, 0.03)
-        for search in (6, 8)
-        for scan in (1, 2)
-    ]
+    b1_grid = b1_calibration_grid()
     if args.dry_run:
         print(json.dumps({"status": "planned", "b1_candidates": len(b1_grid), "candidate_sectors": candidates, "seeds": args.seeds[:2], "timesteps_per_candidate": 102400}, ensure_ascii=False, indent=2))
         return
     signature = calibration_signature(args, root)
     compatible_legacy_signatures = legacy_calibration_signatures(args, root)
-    saved_b1 = load_completed_calibration(b1_path, "b1_reactive", signature, compatible_legacy_signatures) if args.resume else None
-    saved_b2 = load_completed_calibration(path, "b2_fixed", signature, compatible_legacy_signatures) if args.resume else None
+    calibration_seeds = [int(seed) for seed in args.seeds[:2]]
+    saved_b1 = load_completed_calibration(b1_path, "b1_reactive", signature, compatible_legacy_signatures, calibration_seeds) if args.resume else None
+    saved_b2 = load_completed_calibration(path, "b2_fixed", signature, compatible_legacy_signatures, calibration_seeds) if args.resume else None
     calibration_args = argparse.Namespace(**vars(args))
     calibration_args.timesteps = 102400
     calibration_args.eval_limit = None

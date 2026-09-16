@@ -105,6 +105,63 @@ class E4RunnerTests(unittest.TestCase):
             saved = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(saved["signature_version"], RUNNER.CALIBRATION_SIGNATURE_VERSION)
 
+    def test_complete_untracked_b1_calibration_is_structurally_migrated(self):
+        grid = RUNNER.b1_calibration_grid()
+        scores = [
+            {
+                "candidate_index": index,
+                "config": config,
+                "success_rate": 1.0 if index == 0 else 0.0,
+                "mean_final_distance": 0.5 + index,
+            }
+            for index, config in enumerate(grid)
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "calibration_b1.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": RUNNER.VERSION,
+                        "method": "b1_reactive",
+                        "status": "completed",
+                        "signature": "untracked-intermediate-signature",
+                        "candidate_count": len(grid),
+                        "selected_config": grid[0],
+                        "scores": scores,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            payload = RUNNER.load_completed_calibration(
+                path,
+                "b1_reactive",
+                "current",
+                set(),
+                [1, 2],
+            )
+            self.assertEqual(payload["signature"], "current")
+            self.assertEqual(payload["migration_validation"], "complete_legacy_artifact_structure")
+
+    def test_incomplete_untracked_b1_calibration_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "calibration_b1.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": RUNNER.VERSION,
+                        "method": "b1_reactive",
+                        "status": "completed",
+                        "signature": "unknown",
+                        "candidate_count": 48,
+                        "selected_config": {},
+                        "scores": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "signature mismatch"):
+                RUNNER.load_completed_calibration(path, "b1_reactive", "current", set(), [1, 2])
+
     def test_corrupt_calibration_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "calibration_b2.json"
@@ -124,7 +181,7 @@ class E4RunnerTests(unittest.TestCase):
                 json.dumps({**common, "method": "b2_fixed", "selected_sector": 5}),
                 encoding="utf-8",
             )
-            args = RUNNER.argparse.Namespace(profile="formal", dry_run=False, resume=True)
+            args = RUNNER.argparse.Namespace(profile="formal", dry_run=False, resume=True, seeds=[1, 2])
             with patch.object(RUNNER, "calibration_signature", return_value="expected"):
                 with patch.object(RUNNER, "legacy_calibration_signatures", return_value=set()):
                     with patch.object(RUNNER, "read_scenarios", side_effect=AssertionError("不应重新评估")):
