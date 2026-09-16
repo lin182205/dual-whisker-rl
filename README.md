@@ -77,12 +77,7 @@ bash scripts/setup_server_conda.sh --require-cuda
 conda activate dual-whisker-rl
 
 mkdir -p results/logs
-nohup python scripts/train_mobile_whisker_ppo.py \
-  --temporal-encoder gru \
-  --timesteps 1000000 \
-  --n-envs 8 \
-  --seed 1 \
-  > results/logs/mobile_cloud_stdout.log 2>&1 &
+bash scripts/run_e4_formal_conda.sh --background
 ```
 
 Inspect the process and logs:
@@ -130,3 +125,20 @@ STM32 `build`、`.git` 和本地 IDE 设置目录；这些环境或生成产物�
 ```
 
 每个方法×种子独立保存 `state.json`、模型、checkpoint 和逐场景 JSON；`summary.csv`、`summary.json`、`summary.md` 以及 `paired_differences.csv` 保留整体、分层和相对主方法差值。`--resume` 只复用版本、配置和场景摘要一致的完整产物。 汇总还显示每种子结果、期望回合数、覆盖率、缺失场景和配对缺失状态；重捕获无事件时耗时保持为空。
+
+服务器正式实验推荐使用 Conda 启动器。它固定 formal 配置并始终添加 `--resume`，首次运行和断点恢复使用同一条命令：
+
+```bash
+# 前台运行；SSH 会话应配合 tmux/screen
+bash scripts/run_e4_formal_conda.sh
+# 后台运行，断开 SSH 后继续
+bash scripts/run_e4_formal_conda.sh --background
+# 查看任务与评测进度
+bash scripts/run_e4_formal_conda.sh status
+# 安全中断当前任务
+bash scripts/run_e4_formal_conda.sh stop
+# 中断后恢复：再次执行原命令
+bash scripts/run_e4_formal_conda.sh --background
+```
+
+脚本用文件锁阻止同一输出目录被重复启动，自动保存日志和运行 PID。只续训可执行 `bash scripts/run_e4_formal_conda.sh train --background`，只补评测可执行 `... evaluate --background`。需要完全独立的新实验时传入新的 `--output-dir`；不要删除旧 checkpoint。正式校准产物也带场景、配置和代码签名，恢复时匹配则跳过 B1/B2 已完成搜索，不兼容时明确拒绝复用。首次校准会持续打印 B1/B2 候选进度、验证场景进度和预计剩余分钟。

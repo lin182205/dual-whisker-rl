@@ -37,6 +37,7 @@ conda activate dual-whisker-rl
 - `configs/e4_smoke.yaml`：服务器正式开跑前的短链路检查。
 - `requirements.txt`、`requirements-rl.txt`、`requirements-server.txt`：Python 依赖。
 - `scripts/setup_server_conda.sh`：Conda 一键部署、设备检查和部署验收。
+- `scripts/run_e4_formal_conda.sh`：激活 Conda、锁定输出目录、后台运行及断点恢复。
 
 推荐同时上传：
 
@@ -75,8 +76,9 @@ conda activate dual-whisker-rl
 python scripts/run_e4_experiments.py prepare --profile smoke
 python scripts/run_e4_experiments.py run --profile smoke --resume
 python scripts/run_e4_experiments.py status --profile smoke
-python scripts/run_e4_experiments.py calibrate --profile formal
-python scripts/run_e4_experiments.py run --profile formal --resume
+bash scripts/run_e4_formal_conda.sh --background
+bash scripts/run_e4_formal_conda.sh status
+bash scripts/run_e4_formal_conda.sh stop
 ```
 
 正式训练默认使用 8 个 `SubprocVecEnv` worker。若服务器 CPU 核数或内存不足，可通过 `--n-envs` 调低；GPU 主要负责较小的 PPO 网络，环境羽流计算和多进程采样通常更依赖 CPU。
@@ -93,3 +95,5 @@ git status --short
 服务器启动后先完成 smoke，再开启 formal。恢复训练时保留同一输出目录（默认 `results/e4/`）并添加 `--resume`；运行器会核对版本、配置、场景摘要和代码摘要，不兼容的产物不会被静默复用。smoke 与 formal 若需要长期并存，应分别通过 `--output-dir results/e4_smoke` 和 `--output-dir results/e4_formal` 指定目录，避免共用 manifest。
 
 部署脚本会把最终 Python 包版本写入 `results/deployment/<环境名>-pip-freeze.txt`，用于记录服务器实际安装状态。若服务器 CUDA 驱动需要特定 PyTorch wheel，请按服务商或 PyTorch 对应版本说明传入 `--torch-index-url`；脚本不会猜测 CUDA wheel 版本。
+
+正式启动器始终启用 `--resume`。PPO 从最近完整 checkpoint 继续并按“目标总步数－已完成步数”计算剩余预算；已完成模型直接跳过，逐场景评测跳过签名一致的 JSON。B1/B2 校准完成文件保存独立签名，匹配时整段跳过；首次搜索会打印候选/任务编号、阶段指标、累计耗时和预计剩余分钟。`stop` 会核对 PID 后发送 SIGINT，使运行器进入中断保存路径。恢复签名不一致时应指定新的 `--output-dir`，不要覆盖旧实验。

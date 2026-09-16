@@ -1641,3 +1641,11 @@ M/B2/B3/B6 使用 GRU 历史策略，B4 使用单帧 MLP，B5 通过输入维度
 新增 `scripts/setup_server_conda.sh`，面向已安装 Conda 的 Linux 训练服务器。默认创建或复用 `dual-whisker-rl` 环境和 Python 3.11，通过 `requirements-server.txt` 安装仿真、PyTorch、Stable-Baselines3 与 TensorBoard；部署后验证核心包版本、CUDA 状态、E4 单元测试、路径可移植性和 formal dry-run，并把实际包版本保存到 `results/deployment/`。
 
 脚本未检测到 NVIDIA GPU 时安装 CPU 版 PyTorch；检测到 GPU 时使用项目常规依赖安装，不根据驱动版本猜测 CUDA wheel。服务器需要固定 wheel 时显式传 `--torch-index-url`，需要强制 GPU 可用时传 `--require-cuda`。真机串口与 FFmpeg 继续作为 `--with-hardware`、`--with-ffmpeg` 可选项，正式批量 E4 默认不安装。`.gitattributes` 固定 shell 脚本使用 LF，避免 Windows 工作区提交后在 Linux 出现解释器换行错误。
+
+## 36. E4 正式实验一键启动与完整恢复
+
+新增 `scripts/run_e4_formal_conda.sh`。脚本定位项目根目录、加载 Conda 初始化脚本并激活 `dual-whisker-rl`，固定 formal profile 与配置，默认执行完整 `run`，并始终传入 `--resume`。支持 `prepare/calibrate/train/evaluate/summarize/status/stop` 分阶段调用、后台 nohup、统一日志、PID 记录和 `flock` 单目录互斥。`stop` 核对 PID 对应 E4 进程后发送 SIGINT，使运行器走中断状态保存路径。首次运行和中断恢复使用同一命令；新实验通过新的 `--output-dir` 隔离，不提供覆盖旧结果的快捷开关。
+
+补齐正式校准恢复边界：B1/B2 完成产物新增由场景摘要、配置、前两个校准种子、并行参数和关键代码摘要组成的签名。匹配时跳过已完成的 B1 规则搜索和 B2 角度搜索；产物损坏或签名不一致时拒绝复用。B2 未完成时继续沿用候选角度各自的 checkpoint 与逐场景恢复。另修正 E4 CLI 默认 profile 的 `foramal` 拼写错误，默认恢复为 smoke，并增加运行器测试覆盖默认值、校准签名匹配及损坏文件拒绝。
+
+校准过程新增中文进度与 ETA。B1 在 48 个规则候选开始和完成时打印参数、成功率、最终距离、累计耗时与预计剩余分钟；B2 在 10 个固定扇区 × 2 个种子的训练/验证开始和完成时打印总体任务进度，各 PPO 短训练内部继续输出 rollout ETA。逐场景评测每 50 个场景（不足 50 时在末尾）打印完成数、耗时和剩余分钟。`run --resume` 读取到签名一致且状态为 completed 的 `calibration_b1.json`、`calibration_b2.json` 时分别打印跳过信息，并在两者都完成后直接进入正式训练。

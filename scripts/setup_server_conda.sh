@@ -195,7 +195,7 @@ cat <<EOF
 [部署完成]
 激活环境：conda activate $ENV_NAME
 Smoke 测试：python scripts/run_e4_experiments.py run --profile smoke --resume
-正式实验：python scripts/run_e4_experiments.py run --profile formal --resume
+正式实验：bash scripts/run_e4_formal_conda.sh --background
 TensorBoard：tensorboard --logdir results --host 127.0.0.1 --port 6006
 依赖快照：results/deployment/${ENV_NAME}-pip-freeze.txt
 EOF

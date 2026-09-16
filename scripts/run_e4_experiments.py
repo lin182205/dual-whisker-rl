@@ -70,6 +70,15 @@ def atomic_write_json(path: Path, data: Any) -> None:
     temp.replace(path)
 
 
+def progress_timing(started_at: float, completed: int, total: int) -> tuple[float, float]:
+    """返回已耗时秒数和按当前平均速度估算的剩余分钟数。"""
+    elapsed_seconds = max(0.0, time.monotonic() - started_at)
+    if completed <= 0 or total <= completed:
+        return elapsed_seconds, 0.0
+    remaining_minutes = elapsed_seconds / completed * (total - completed) / 60.0
+    return elapsed_seconds, remaining_minutes
+
+
 def load_yaml(path: Path | None) -> dict[str, Any]:
     if path is None:
         return {}
@@ -334,6 +343,44 @@ def experiment_signature(args: argparse.Namespace, method: str, seed: int, fixed
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
+
+def calibration_signature(args: argparse.Namespace, root: Path) -> str:
+    """生成正式校准摘要，防止恢复时混用场景、配置或代码。"""
+    payload = {
+        "version": VERSION,
+        "profile": args.profile,
+        "seeds": [int(seed) for seed in args.seeds[:2]],
+        "n_envs": int(args.n_envs),
+        "vec_env_backend": args.vec_env_backend,
+        "checkpoint_rollouts": int(args.checkpoint_rollouts),
+        "max_steps": int(args.max_steps),
+        "config": base_config(args),
+        "scenario_hashes": verify_scenario_manifest(root),
+        "code_hashes": {
+            "runner": sha256_file(Path(__file__).resolve()),
+            "experiment": sha256_file(ROOT / "dual_whisker_rl" / "e4_experiments.py"),
+            "mobile_env": sha256_file(ROOT / "dual_whisker_rl" / "envs" / "mobile_whisker_env.py"),
+            "plume_env": sha256_file(ROOT / "dual_whisker_rl" / "envs" / "whisker_only_env.py"),
+            "world_bounds": sha256_file(ROOT / "dual_whisker_rl" / "envs" / "world_bounds.py"),
+        },
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+
+def load_completed_calibration(path: Path, method: str, signature: str) -> dict[str, Any] | None:
+    """读取可恢复校准结果；存在但损坏或不兼容时明确拒绝。"""
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"calibration artifact is corrupt: {path}") from exc
+    if payload.get("status") != "completed" or payload.get("method") != method:
+        raise ValueError(f"calibration artifact is incomplete: {path}; use a new experiment directory")
+    if payload.get("signature") != signature:
+        raise ValueError(f"calibration signature mismatch: {path}; use a new experiment directory")
+    return payload
+
 def make_model_env(method: str, cfg: dict[str, Any], seed: int, fixed_sector: int = 5):
     from stable_baselines3.common.monitor import Monitor
     env = make_env(method, {**cfg, "seed": seed}, history_length=method_metadata(method)["history_length"], fixed_sector=fixed_sector)
@@ -477,6 +524,20 @@ def evaluate_method(args: argparse.Namespace, root: Path, method: str, seed: int
     eval_state_path = task_dir / f"evaluation_{split}.json"
     eval_state = {"version": VERSION, "method": method, "seed": seed, "split": split, "signature": signature, "status": "running", "total": len(scenarios), "completed": 0}
     atomic_write_json(eval_state_path, eval_state)
+    evaluation_started = time.monotonic()
+    progress_interval = max(1, min(50, len(scenarios)))
+
+    def report_evaluation_progress() -> None:
+        if len(rows) % progress_interval != 0 and len(rows) != len(scenarios):
+            return
+        elapsed_seconds, remaining_minutes = progress_timing(evaluation_started, len(rows), len(scenarios))
+        print(
+            f"[评估进度] 数据集={split} 方法={method} 随机种子={seed} "
+            f"场景={len(rows)}/{len(scenarios)} 已耗时={elapsed_seconds / 60.0:.2f}分钟 "
+            f"预计剩余={remaining_minutes:.2f}分钟",
+            flush=True,
+        )
+
     for scenario in scenarios:
         output = episodes_dir / f"{scenario.scenario_id}.json"
         if args.resume and output.exists():
@@ -485,6 +546,7 @@ def evaluate_method(args: argparse.Namespace, root: Path, method: str, seed: int
                 if row.get("scenario_id") == scenario.scenario_id and row.get("signature") == signature:
                     rows.append(row)
                     atomic_write_json(eval_state_path, {**eval_state, "completed": len(rows)})
+                    report_evaluation_progress()
                     continue
             except (OSError, json.JSONDecodeError):
                 pass
@@ -501,6 +563,7 @@ def evaluate_method(args: argparse.Namespace, root: Path, method: str, seed: int
         atomic_write_json(output, row)
         rows.append(row)
         atomic_write_json(eval_state_path, {**eval_state, "completed": len(rows)})
+        report_evaluation_progress()
     env.close()
     atomic_write_json(task_dir / f"metrics_{split}.json", aggregate(rows))
     atomic_write_json(eval_state_path, {**eval_state, "status": "completed", "completed": len(rows)})
@@ -548,37 +611,88 @@ def calibrate_command(args: argparse.Namespace, root: Path) -> None:
     if args.dry_run:
         print(json.dumps({"status": "planned", "b1_candidates": len(b1_grid), "candidate_sectors": candidates, "seeds": args.seeds[:2], "timesteps_per_candidate": 102400}, ensure_ascii=False, indent=2))
         return
+    signature = calibration_signature(args, root)
+    saved_b1 = load_completed_calibration(b1_path, "b1_reactive", signature) if args.resume else None
+    saved_b2 = load_completed_calibration(path, "b2_fixed", signature) if args.resume else None
     calibration_args = argparse.Namespace(**vars(args))
     calibration_args.timesteps = 102400
     calibration_args.eval_limit = None
-    validation_scenarios = read_scenarios(root, "validation", None)
-    b1_scores: list[dict[str, Any]] = []
-    for candidate_index, candidate_config in enumerate(b1_grid):
-        candidate_cfg = base_config(args)
-        candidate_cfg.update(candidate_config)
-        candidate_env = make_env("b1_reactive", candidate_cfg)
-        candidate_controller = ReactiveController(
-            hit_threshold=float(candidate_config["b1_hit_threshold"]),
-            trend_threshold=float(candidate_config["b1_trend_threshold"]),
-            contrast_threshold=float(candidate_config["b1_contrast_threshold"]),
-            search_period=int(candidate_config["b1_search_period"]),
-            scan_period=int(candidate_config["b1_scan_period"]),
+    if saved_b1 is None:
+        validation_scenarios = read_scenarios(root, "validation", None)
+        b1_scores: list[dict[str, Any]] = []
+        b1_started = time.monotonic()
+        print(
+            f"[校准进度][B1] 开始规则参数搜索：候选={len(b1_grid)} "
+            f"每候选验证场景={len(validation_scenarios)} "
+            f"总评估回合={len(b1_grid) * len(validation_scenarios)}",
+            flush=True,
         )
-        candidate_rows = []
-        for validation_scenario in validation_scenarios:
-            candidate_controller.reset()
-            candidate_rows.append(evaluate_one(candidate_controller, candidate_env, validation_scenario, max_steps=args.max_steps))
-        candidate_env.close()
-        candidate_summary = aggregate(candidate_rows)
-        b1_scores.append({"candidate_index": candidate_index, "config": candidate_config, "success_rate": candidate_summary.get("success_rate", 0.0), "mean_final_distance": candidate_summary.get("mean_final_distance")})
-    b1_selected = min(b1_scores, key=lambda item: (-float(item["success_rate"]), float(item["mean_final_distance"]) if item["mean_final_distance"] is not None else float("inf"), int(item["candidate_index"])))
-    atomic_write_json(b1_path, {"version": VERSION, "method": "b1_reactive", "status": "completed", "candidate_count": len(b1_grid), "selected_config": b1_selected["config"], "selection_rule": "validation success_rate, then mean_final_distance, then candidate order", "scores": b1_scores})
+        for candidate_index, candidate_config in enumerate(b1_grid):
+            candidate_number = candidate_index + 1
+            print(
+                f"[校准进度][B1] 开始候选={candidate_number}/{len(b1_grid)} "
+                f"参数={json.dumps(candidate_config, ensure_ascii=False, sort_keys=True)}",
+                flush=True,
+            )
+            candidate_cfg = base_config(args)
+            candidate_cfg.update(candidate_config)
+            candidate_env = make_env("b1_reactive", candidate_cfg)
+            candidate_controller = ReactiveController(
+                hit_threshold=float(candidate_config["b1_hit_threshold"]),
+                trend_threshold=float(candidate_config["b1_trend_threshold"]),
+                contrast_threshold=float(candidate_config["b1_contrast_threshold"]),
+                search_period=int(candidate_config["b1_search_period"]),
+                scan_period=int(candidate_config["b1_scan_period"]),
+            )
+            candidate_rows = []
+            for validation_scenario in validation_scenarios:
+                candidate_controller.reset()
+                candidate_rows.append(evaluate_one(candidate_controller, candidate_env, validation_scenario, max_steps=args.max_steps))
+            candidate_env.close()
+            candidate_summary = aggregate(candidate_rows)
+            b1_scores.append({"candidate_index": candidate_index, "config": candidate_config, "success_rate": candidate_summary.get("success_rate", 0.0), "mean_final_distance": candidate_summary.get("mean_final_distance")})
+            elapsed_seconds, remaining_minutes = progress_timing(b1_started, candidate_number, len(b1_grid))
+            print(
+                f"[校准进度][B1] 完成候选={candidate_number}/{len(b1_grid)} "
+                f"成功率={candidate_summary.get('success_rate', 0.0):.4f} "
+                f"平均最终距离={candidate_summary.get('mean_final_distance')} "
+                f"累计耗时={elapsed_seconds / 60.0:.2f}分钟 "
+                f"预计剩余={remaining_minutes:.2f}分钟",
+                flush=True,
+            )
+        b1_selected = min(b1_scores, key=lambda item: (-float(item["success_rate"]), float(item["mean_final_distance"]) if item["mean_final_distance"] is not None else float("inf"), int(item["candidate_index"])))
+        saved_b1 = {"version": VERSION, "method": "b1_reactive", "status": "completed", "signature": signature, "candidate_count": len(b1_grid), "selected_config": b1_selected["config"], "selection_rule": "validation success_rate, then mean_final_distance, then candidate order", "scores": b1_scores}
+        atomic_write_json(b1_path, saved_b1)
+    else:
+        print(f"恢复校准：B1 已完成，跳过规则参数搜索；文件={portable_path(b1_path)}")
+    if saved_b2 is not None:
+        print(f"恢复校准：B2 已完成，跳过固定角度搜索；文件={portable_path(path)}")
+        return
     scores: dict[str, Any] = {}
+    b2_started = time.monotonic()
+    b2_total_runs = len(candidates) * len(args.seeds[:2])
+    b2_completed_runs = 0
+    print(
+        f"[校准进度][B2] 开始固定角度搜索：角度候选={len(candidates)} "
+        f"每候选种子={len(args.seeds[:2])} 总训练评估任务={b2_total_runs}",
+        flush=True,
+    )
     for sector in candidates:
         candidate_values = []
         for seed in args.seeds[:2]:
+            run_number = b2_completed_runs + 1
+            print(
+                f"[校准进度][B2] 开始任务={run_number}/{b2_total_runs} "
+                f"固定扇区={sector} 随机种子={seed} "
+                f"训练步数={calibration_args.timesteps}",
+                flush=True,
+            )
             task_dir = root / "calibration" / f"sector_{sector}" / f"seed_{seed}"
             train_one(calibration_args, root, "b2_fixed", seed, fixed_sector=sector, task_dir_override=task_dir)
+            print(
+                f"[校准进度][B2] 训练完成，开始验证：固定扇区={sector} 随机种子={seed}",
+                flush=True,
+            )
             rows = evaluate_method(calibration_args, root, "b2_fixed", seed, "validation", fixed_sector=sector, task_dir_override=task_dir)
             summary = aggregate(rows)
             checkpoint_steps = []
@@ -588,14 +702,30 @@ def calibrate_command(args: argparse.Namespace, root: Path) -> None:
                 except (IndexError, ValueError):
                     continue
             candidate_values.append({"seed": seed, "success_rate": summary.get("success_rate", 0.0), "mean_final_distance": summary.get("mean_final_distance"), "earliest_checkpoint": min(checkpoint_steps) if checkpoint_steps else None})
+            b2_completed_runs += 1
+            elapsed_seconds, remaining_minutes = progress_timing(b2_started, b2_completed_runs, b2_total_runs)
+            print(
+                f"[校准进度][B2] 完成任务={b2_completed_runs}/{b2_total_runs} "
+                f"固定扇区={sector} 随机种子={seed} "
+                f"成功率={summary.get('success_rate', 0.0):.4f} "
+                f"平均最终距离={summary.get('mean_final_distance')} "
+                f"累计耗时={elapsed_seconds / 60.0:.2f}分钟 "
+                f"预计剩余={remaining_minutes:.2f}分钟",
+                flush=True,
+            )
         success = float(np.mean([v["success_rate"] for v in candidate_values]))
         distances = [v["mean_final_distance"] for v in candidate_values if v["mean_final_distance"] is not None]
         checkpoint_values = [v["earliest_checkpoint"] for v in candidate_values if v["earliest_checkpoint"] is not None]
         scores[str(sector)] = {"success_rate": success, "mean_final_distance": float(np.mean(distances)) if distances else None, "earliest_checkpoint": min(checkpoint_values) if checkpoint_values else None, "runs": candidate_values}
+        print(
+            f"[校准进度][B2] 固定扇区={sector} 汇总完成：成功率={success:.4f} "
+            f"平均最终距离={scores[str(sector)]['mean_final_distance']}",
+            flush=True,
+        )
     selected = min(candidates, key=lambda sector: (-scores[str(sector)]["success_rate"], scores[str(sector)]["mean_final_distance"] if scores[str(sector)]["mean_final_distance"] is not None else float("inf"), scores[str(sector)]["earliest_checkpoint"] if scores[str(sector)]["earliest_checkpoint"] is not None else float("inf"), sector))
-    payload = {"version": VERSION, "method": "b2_fixed", "status": "completed", "candidate_sectors": candidates, "candidate_angles_deg": [float((s + 0.5) * 18.0) for s in candidates], "seeds": args.seeds[:2], "timesteps_per_candidate": calibration_args.timesteps, "selected_sector": selected, "selection_rule": "validation success_rate, then mean_final_distance, then earliest checkpoint", "scores": scores}
+    payload = {"version": VERSION, "method": "b2_fixed", "status": "completed", "signature": signature, "candidate_sectors": candidates, "candidate_angles_deg": [float((s + 0.5) * 18.0) for s in candidates], "seeds": args.seeds[:2], "timesteps_per_candidate": calibration_args.timesteps, "selected_sector": selected, "selection_rule": "validation success_rate, then mean_final_distance, then earliest checkpoint", "scores": scores}
     atomic_write_json(path, payload)
-    print(json.dumps({"status": "completed", "selected_sector": selected, "b1_selected_config": b1_selected["config"], "b2_path": portable_path(path), "b1_path": portable_path(b1_path)}, ensure_ascii=False, indent=2))
+    print(json.dumps({"status": "completed", "selected_sector": selected, "b1_selected_config": saved_b1["selected_config"], "b2_path": portable_path(path), "b1_path": portable_path(b1_path)}, ensure_ascii=False, indent=2))
 
 def selected_b1_config(root: Path) -> dict[str, Any]:
     path = root / "calibration_b1.json"
@@ -748,7 +878,7 @@ def status(args: argparse.Namespace, root: Path) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("prepare", "calibrate", "train", "evaluate", "summarize", "run", "status"), nargs="?", default="run")
-    parser.add_argument("--profile", choices=("smoke", "formal"), default="foramal")
+    parser.add_argument("--profile", choices=("smoke", "formal"), default="smoke")
     parser.add_argument("--methods", default=None, help="逗号分隔的方法；默认全部 M/B0-B6")
     parser.add_argument("--seeds", default=None, help="逗号分隔训练种子；默认 smoke=1、formal=1..5")
     parser.add_argument("--config", type=Path, default=None)
