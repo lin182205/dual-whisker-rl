@@ -50,6 +50,7 @@ from dual_whisker_rl.envs.world_bounds import resolve_world_bounds, world_bounds
 
 VERSION = "e4-v1"
 CALIBRATION_SIGNATURE_VERSION = "e4-calibration-v2"
+EXPERIMENT_SIGNATURE_VERSION = "e4-training-v2"
 # 仅用于迁移已经完成、且校准逻辑与当前一致的已知旧运行器产物。
 LEGACY_CALIBRATION_RUNNER_HASHES = {
     "14fe05c": "a9c50b5371c5bee1bdab5569985a74e8e83ce96c557b65c186ce02cf1a58da13",
@@ -332,12 +333,27 @@ def latest_checkpoint(task_dir: Path) -> Path | None:
     return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
+def ppo_rollout_settings(args: argparse.Namespace) -> tuple[int, int, int]:
+    """返回 PPO 的 n_steps、rollout 总步数和 batch_size。"""
+    n_steps = min(512, max(32, args.timesteps // max(args.n_envs, 1)))
+    rollout = n_steps * args.n_envs
+    batch_size = min(256, rollout)
+    while rollout % batch_size != 0:
+        batch_size //= 2
+        if batch_size < 2:
+            batch_size = 2
+            break
+    return n_steps, rollout, batch_size
+
+
 def experiment_signature(args: argparse.Namespace, method: str, seed: int, fixed_sector: int = 5, config_override: dict[str, Any] | None = None) -> str:
     signature_config = base_config(args)
     if config_override:
         signature_config.update(config_override)
+    n_steps, rollout, batch_size = ppo_rollout_settings(args)
     payload = {
-        "version": VERSION,
+        "signature_version": EXPERIMENT_SIGNATURE_VERSION,
+        "experiment_version": VERSION,
         "method": method,
         "seed": int(seed),
         "profile": args.profile,
@@ -345,16 +361,75 @@ def experiment_signature(args: argparse.Namespace, method: str, seed: int, fixed
         "vec_env_backend": args.vec_env_backend,
         "config": signature_config,
         "fixed_sector": int(fixed_sector),
-        "checkpoint_rollouts": int(args.checkpoint_rollouts),
+        "training": {
+            "algorithm": "PPO",
+            "policy": "MlpPolicy",
+            "learning_rate": 1e-4,
+            "n_steps": n_steps,
+            "rollout": rollout,
+            "batch_size": batch_size,
+            "n_epochs": PPO_EPOCHS,
+            "gamma": 0.99,
+            "gae_lambda": 0.95,
+            "ent_coef": 0.003,
+            "target_kl": 0.02,
+            "policy_definition_version": 1,
+        },
         "code_hashes": {
-            "runner": sha256_file(Path(__file__).resolve()),
             "experiment": sha256_file(ROOT / "dual_whisker_rl" / "e4_experiments.py"),
+            "gru_history": sha256_file(ROOT / "dual_whisker_rl" / "agents" / "gru_history.py"),
             "mobile_env": sha256_file(ROOT / "dual_whisker_rl" / "envs" / "mobile_whisker_env.py"),
             "plume_env": sha256_file(ROOT / "dual_whisker_rl" / "envs" / "whisker_only_env.py"),
             "world_bounds": sha256_file(ROOT / "dual_whisker_rl" / "envs" / "world_bounds.py"),
         },
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+
+def reconcile_training_state(
+    args: argparse.Namespace,
+    task_dir: Path,
+    current_state: dict[str, Any],
+    signature: str,
+    scenario_hashes: dict[str, str],
+    method: str,
+    seed: int,
+) -> dict[str, Any]:
+    """未产生训练产物时刷新状态；已有模型数据时保持严格拒绝。"""
+    state = dict(current_state)
+    has_training_artifacts = (
+        int(state.get("actual_timesteps", 0) or 0) > 0
+        or latest_checkpoint(task_dir) is not None
+        or (task_dir / "model.zip").exists()
+        or (task_dir / "metadata.json").exists()
+    )
+    scenario_mismatch = bool(state.get("scenario_hashes")) and state.get("scenario_hashes") != scenario_hashes
+    signature_mismatch = bool(state.get("signature")) and state.get("signature") != signature
+    if args.resume and has_training_artifacts and scenario_mismatch:
+        raise ValueError(f"scenario hash mismatch for {method} seed {seed}; prepare a new experiment directory")
+    if args.resume and has_training_artifacts and signature_mismatch:
+        raise ValueError(f"resume signature mismatch for {method} seed {seed}; prepare a new experiment directory")
+    if args.resume and not has_training_artifacts and (scenario_mismatch or signature_mismatch):
+        previous_signature = state.get("signature")
+        state.update(
+            {
+                "scenario_hashes": scenario_hashes,
+                "signature": signature,
+                "signature_version": EXPERIMENT_SIGNATURE_VERSION,
+                "signature_migrated_from": previous_signature,
+                "signature_migrated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        atomic_write_json(state_path(task_dir), state)
+        print(
+            f"恢复训练：方法={method} 随机种子={seed} 尚未产生训练步数或模型，已安全刷新准备状态签名",
+            flush=True,
+        )
+    else:
+        state["scenario_hashes"] = scenario_hashes
+        state["signature"] = signature
+        state["signature_version"] = EXPERIMENT_SIGNATURE_VERSION
+    return state
 
 
 def calibration_signature_payload(args: argparse.Namespace, root: Path) -> dict[str, Any]:
@@ -555,12 +630,7 @@ def train_one(args: argparse.Namespace, root: Path, method: str, seed: int, *, f
     task_dir.mkdir(parents=True, exist_ok=True)
     current_state = json.loads(state_path(task_dir).read_text(encoding="utf-8")) if state_path(task_dir).exists() else {}
     signature = experiment_signature(args, method, seed, fixed_sector=fixed_sector)
-    if current_state.get("scenario_hashes") and current_state.get("scenario_hashes") != scenario_hashes:
-        if args.resume:
-            raise ValueError(f"scenario hash mismatch for {method} seed {seed}; prepare a new experiment directory")
-    current_state["scenario_hashes"] = scenario_hashes
-    if args.resume and current_state.get("signature") and current_state.get("signature") != signature:
-        raise ValueError(f"resume signature mismatch for {method} seed {seed}; prepare a new experiment directory")
+    current_state = reconcile_training_state(args, task_dir, current_state, signature, scenario_hashes, method, seed)
     if method in RULE_METHODS:
         atomic_write_json(state_path(task_dir), {**current_state, "status": "ready", "actual_timesteps": 0, "artifact": "rule_controller"})
         return
@@ -585,14 +655,7 @@ def train_one(args: argparse.Namespace, root: Path, method: str, seed: int, *, f
     else:
         env = DummyVecEnv(env_fns)
     meta = method_metadata(method)
-    n_steps = min(512, max(32, args.timesteps // max(args.n_envs, 1)))
-    rollout = n_steps * args.n_envs
-    batch_size = min(256, rollout)
-    while rollout % batch_size != 0:
-        batch_size //= 2
-        if batch_size < 2:
-            batch_size = 2
-            break
+    n_steps, rollout, batch_size = ppo_rollout_settings(args)
     observation_dim = int(env.observation_space.shape[0])
     mlp_width = choose_mlp_width(observation_dim) if method == "b5_history_mlp" else 160
     kwargs: dict[str, Any] = {"net_arch": [mlp_width, mlp_width], "share_features_extractor": True}

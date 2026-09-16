@@ -162,6 +162,50 @@ class E4RunnerTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "signature mismatch"):
                 RUNNER.load_completed_calibration(path, "b1_reactive", "current", set(), [1, 2])
 
+    def test_unstarted_training_state_signature_is_safely_refreshed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            task_dir = Path(directory)
+            state = {
+                "status": "prepared",
+                "actual_timesteps": 0,
+                "signature": "old",
+                "scenario_hashes": {"validation": "v", "test": "t"},
+            }
+            args = RUNNER.argparse.Namespace(resume=True)
+            refreshed = RUNNER.reconcile_training_state(
+                args,
+                task_dir,
+                state,
+                "current",
+                {"validation": "v", "test": "t"},
+                "main",
+                1,
+            )
+            self.assertEqual(refreshed["signature"], "current")
+            self.assertEqual(refreshed["signature_migrated_from"], "old")
+            self.assertEqual(json.loads((task_dir / "state.json").read_text(encoding="utf-8"))["signature"], "current")
+
+    def test_started_training_state_signature_mismatch_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            task_dir = Path(directory)
+            state = {
+                "status": "interrupted",
+                "actual_timesteps": 4096,
+                "signature": "old",
+                "scenario_hashes": {"validation": "v", "test": "t"},
+            }
+            args = RUNNER.argparse.Namespace(resume=True)
+            with self.assertRaisesRegex(ValueError, "resume signature mismatch"):
+                RUNNER.reconcile_training_state(
+                    args,
+                    task_dir,
+                    state,
+                    "current",
+                    {"validation": "v", "test": "t"},
+                    "main",
+                    1,
+                )
+
     def test_corrupt_calibration_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "calibration_b2.json"
