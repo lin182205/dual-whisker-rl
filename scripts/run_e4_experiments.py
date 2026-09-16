@@ -154,12 +154,19 @@ def resolve_args(args: argparse.Namespace) -> None:
     defaults = profile_defaults(args.profile)
     args.output_dir = project_path(args.output_dir)
     args.config = project_path(args.config) if args.config else None
+    config_values = load_yaml(args.config) if args.config else {}
     args.methods = parse_list(args.methods) or list(METHOD_ORDER)
     args.seeds = parse_list(args.seeds, cast=int) or defaults["seeds"]
     args.timesteps = int(args.timesteps or defaults["timesteps"])
     args.n_envs = int(args.n_envs or defaults["n_envs"])
     args.checkpoint_rollouts = int(getattr(args, "checkpoint_rollouts", None) or defaults["checkpoint_rollouts"])
-    config_backend = load_yaml(args.config).get("vec_env_backend") if args.config else None
+    configured_max_steps = config_values.get("max_steps")
+    args.max_steps = int(
+        args.max_steps
+        if args.max_steps is not None
+        else configured_max_steps if configured_max_steps is not None else 400
+    )
+    config_backend = config_values.get("vec_env_backend")
     requested_backend = str(getattr(args, "vec_env_backend", None) or config_backend or defaults["vec_env_backend"])
     if requested_backend == "auto":
         args.vec_env_backend = "subproc" if args.n_envs > 1 else "dummy"
@@ -172,8 +179,8 @@ def resolve_args(args: argparse.Namespace) -> None:
         raise ValueError(f"unknown E4 methods: {', '.join(unknown)}")
     if args.vec_env_backend not in ("dummy", "subproc"):
         raise ValueError("vec-env-backend must be auto, dummy or subproc")
-    if args.timesteps < 1 or args.n_envs < 1 or args.checkpoint_rollouts < 1:
-        raise ValueError("timesteps, n-envs and checkpoint-rollouts must be positive")
+    if args.timesteps < 1 or args.n_envs < 1 or args.checkpoint_rollouts < 1 or args.max_steps < 1:
+        raise ValueError("timesteps, n-envs, checkpoint-rollouts and max-steps must be positive")
 
 def seeds_for_method(args: argparse.Namespace, method: str) -> list[int]:
     """返回方法实际需要运行的训练种子。
@@ -255,7 +262,7 @@ def prepare(args: argparse.Namespace) -> Path:
     manifest = experiment_manifest(args, scenarios)
     root = args.output_dir / args.profile
     if args.dry_run:
-        print(json.dumps({"output": portable_path(root), "scenario_counts": manifest["scenario_counts"], "methods": args.methods, "seeds": args.seeds, "method_seeds": manifest["method_seeds"], "vec_env_backend": args.vec_env_backend, "checkpoint_rollouts": args.checkpoint_rollouts}, ensure_ascii=False, indent=2))
+        print(json.dumps({"output": portable_path(root), "scenario_counts": manifest["scenario_counts"], "methods": args.methods, "seeds": args.seeds, "method_seeds": manifest["method_seeds"], "vec_env_backend": args.vec_env_backend, "checkpoint_rollouts": args.checkpoint_rollouts, "max_steps": args.max_steps}, ensure_ascii=False, indent=2))
         return root
     root.mkdir(parents=True, exist_ok=True)
     atomic_write_json(root / "manifest.json", manifest)
@@ -346,6 +353,12 @@ def experiment_signature(args: argparse.Namespace, method: str, seed: int, fixed
 
 def calibration_signature(args: argparse.Namespace, root: Path) -> str:
     """生成正式校准摘要，防止恢复时混用场景、配置或代码。"""
+    signature_config = base_config(args)
+    effective_max_steps = (
+        args.max_steps
+        if args.max_steps is not None
+        else signature_config.get("max_steps") if signature_config.get("max_steps") is not None else 400
+    )
     payload = {
         "version": VERSION,
         "profile": args.profile,
@@ -353,8 +366,8 @@ def calibration_signature(args: argparse.Namespace, root: Path) -> str:
         "n_envs": int(args.n_envs),
         "vec_env_backend": args.vec_env_backend,
         "checkpoint_rollouts": int(args.checkpoint_rollouts),
-        "max_steps": int(args.max_steps),
-        "config": base_config(args),
+        "max_steps": int(effective_max_steps),
+        "config": signature_config,
         "scenario_hashes": verify_scenario_manifest(root),
         "code_hashes": {
             "runner": sha256_file(Path(__file__).resolve()),
@@ -917,7 +930,7 @@ def main() -> None:
         summarize(args, root); return
     if args.command == "run":
         if args.dry_run:
-            print(json.dumps({"profile": args.profile, "methods": args.methods, "seeds": args.seeds, "method_seeds": {method: seeds_for_method(args, method) for method in args.methods}, "timesteps": args.timesteps, "n_envs": args.n_envs, "vec_env_backend": args.vec_env_backend, "checkpoint_rollouts": args.checkpoint_rollouts}, ensure_ascii=False, indent=2)); return
+            print(json.dumps({"profile": args.profile, "methods": args.methods, "seeds": args.seeds, "method_seeds": {method: seeds_for_method(args, method) for method in args.methods}, "timesteps": args.timesteps, "n_envs": args.n_envs, "vec_env_backend": args.vec_env_backend, "checkpoint_rollouts": args.checkpoint_rollouts, "max_steps": args.max_steps}, ensure_ascii=False, indent=2)); return
         calibrate_command(args, root)
         train_command(args, root)
         evaluate_command(args, root)

@@ -23,6 +23,42 @@ class E4RunnerTests(unittest.TestCase):
         args = RUNNER.build_parser().parse_args([])
         self.assertEqual(args.profile, "smoke")
 
+    def test_formal_config_resolves_max_steps_before_calibration(self):
+        args = RUNNER.build_parser().parse_args(
+            [
+                "run",
+                "--profile",
+                "formal",
+                "--config",
+                str(ROOT / "configs" / "e4_formal.yaml"),
+                "--output-dir",
+                "results/e4",
+                "--resume",
+            ]
+        )
+        self.assertIsNone(args.max_steps)
+        RUNNER.resolve_args(args)
+        self.assertEqual(args.max_steps, 400)
+
+    def test_calibration_signature_defensively_reads_config_max_steps(self):
+        args = RUNNER.build_parser().parse_args(
+            [
+                "run",
+                "--profile",
+                "formal",
+                "--config",
+                str(ROOT / "configs" / "e4_formal.yaml"),
+            ]
+        )
+        args.methods = list(RUNNER.METHOD_ORDER)
+        args.seeds = [1, 2, 3, 4, 5]
+        args.n_envs = 8
+        args.vec_env_backend = "subproc"
+        args.checkpoint_rollouts = 25
+        with patch.object(RUNNER, "verify_scenario_manifest", return_value={"validation": "v", "test": "t"}):
+            signature = RUNNER.calibration_signature(args, ROOT)
+        self.assertEqual(len(signature), 64)
+
     def test_completed_calibration_requires_matching_signature(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "calibration_b1.json"
