@@ -58,8 +58,11 @@ Training seeds are random by default for better policy diversity. Pass `--seed 4
 [服务器训练文件与依赖清单](docs/SERVER_TRAINING_MANIFEST.md)。仿真服务器可用一个入口安装依赖：
 
 ```bash
-python -m pip install -r requirements-server.txt
+bash scripts/setup_server_conda.sh
+conda activate dual-whisker-rl
 ```
+
+脚本会创建或复用 Conda 环境，安装 PyTorch、SB3、TensorBoard 和仿真依赖，随后检查核心包、CUDA、E4 单元测试、路径可移植性及 formal dry-run。无 NVIDIA GPU 时默认安装 CPU 版 PyTorch；GPU 服务器可加 `--require-cuda`，自定义 PyTorch wheel 源可传 `--torch-index-url URL`。真机或动画环境分别加 `--with-hardware`、`--with-ffmpeg`。
 
 All CLI paths are repository-relative by default. The scripts resolve them against the
 repository root, so they work both from the repository directory and when invoked by an
@@ -68,16 +71,10 @@ paths such as `results/models/mobile_whisker_gru_ppo.zip`, without a Windows dri
 a cloud-machine home directory. Explicit absolute paths remain supported for mounted data disks.
 
 ```bash
-git clone <repository-url> dual-whisker-rl
+git clone https://github.com/lin182205/dual-whisker-rl.git
 cd dual-whisker-rl
-
-sudo apt-get update
-sudo apt-get install -y ffmpeg
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-python -m pip install -r requirements-rl.txt
+bash scripts/setup_server_conda.sh --require-cuda
+conda activate dual-whisker-rl
 
 mkdir -p results/logs
 nohup python scripts/train_mobile_whisker_ppo.py \

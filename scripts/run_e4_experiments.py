@@ -748,7 +748,7 @@ def status(args: argparse.Namespace, root: Path) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("prepare", "calibrate", "train", "evaluate", "summarize", "run", "status"), nargs="?", default="run")
-    parser.add_argument("--profile", choices=("smoke", "formal"), default="smoke")
+    parser.add_argument("--profile", choices=("smoke", "formal"), default="foramal")
     parser.add_argument("--methods", default=None, help="逗号分隔的方法；默认全部 M/B0-B6")
     parser.add_argument("--seeds", default=None, help="逗号分隔训练种子；默认 smoke=1、formal=1..5")
     parser.add_argument("--config", type=Path, default=None)

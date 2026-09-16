@@ -4,11 +4,14 @@
 
 ## 1. Python 与系统依赖
 
-正式 E4 训练和批量评测需要 Python 3.10 或更新版本。推荐一次安装：
+正式 E4 训练和批量评测需要 Python 3.10 或更新版本。服务器自带 Conda 时推荐一键安装：
 
 ```bash
-python -m pip install -r requirements-server.txt
+bash scripts/setup_server_conda.sh
+conda activate dual-whisker-rl
 ```
+
+默认 Python 3.11、环境名 `dual-whisker-rl`。脚本重复执行会复用环境并补齐依赖，不会删除已有环境。常用选项：`--env-name NAME`、`--python VERSION`、`--cpu-only`、`--require-cuda`、`--torch-index-url URL`、`--with-hardware`、`--with-ffmpeg`。
 
 | 依赖 | 用途 | E4 正式实验 |
 |---|---|---|
@@ -33,6 +36,7 @@ python -m pip install -r requirements-server.txt
 - `configs/e4_formal.yaml`：正式场景、场地、并行环境和训练配置。
 - `configs/e4_smoke.yaml`：服务器正式开跑前的短链路检查。
 - `requirements.txt`、`requirements-rl.txt`、`requirements-server.txt`：Python 依赖。
+- `scripts/setup_server_conda.sh`：Conda 一键部署、设备检查和部署验收。
 
 推荐同时上传：
 
@@ -66,8 +70,8 @@ python -m pip install -r requirements-server.txt
 ## 4. 服务器启动顺序
 
 ```bash
-python -m pip install --upgrade pip
-python -m pip install -r requirements-server.txt
+bash scripts/setup_server_conda.sh --require-cuda
+conda activate dual-whisker-rl
 python scripts/run_e4_experiments.py prepare --profile smoke
 python scripts/run_e4_experiments.py run --profile smoke --resume
 python scripts/run_e4_experiments.py status --profile smoke
@@ -87,3 +91,5 @@ git status --short
 ```
 
 服务器启动后先完成 smoke，再开启 formal。恢复训练时保留同一输出目录（默认 `results/e4/`）并添加 `--resume`；运行器会核对版本、配置、场景摘要和代码摘要，不兼容的产物不会被静默复用。smoke 与 formal 若需要长期并存，应分别通过 `--output-dir results/e4_smoke` 和 `--output-dir results/e4_formal` 指定目录，避免共用 manifest。
+
+部署脚本会把最终 Python 包版本写入 `results/deployment/<环境名>-pip-freeze.txt`，用于记录服务器实际安装状态。若服务器 CUDA 驱动需要特定 PyTorch wheel，请按服务商或 PyTorch 对应版本说明传入 `--torch-index-url`；脚本不会猜测 CUDA wheel 版本。

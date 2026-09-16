@@ -1635,3 +1635,9 @@ M/B2/B3/B6 使用 GRU 历史策略，B4 使用单帧 MLP，B5 通过输入维度
 ## 34. 论文仓库与训练主仓库解耦
 
 `active-olfaction-pape` 已从 `dual-whisker-rl` 的 Git 索引中移除，主仓库不再保存论文仓库的 gitlink，也不负责传播论文仓库提交。主仓库 `.gitignore` 显式忽略同名目录，允许本地继续保留独立论文工作区而不影响训练代码状态。论文目录的文件和本地提交均未删除；后续如需同步论文，应在论文仓库中独立完成。
+
+## 35. Conda 服务器一键部署
+
+新增 `scripts/setup_server_conda.sh`，面向已安装 Conda 的 Linux 训练服务器。默认创建或复用 `dual-whisker-rl` 环境和 Python 3.11，通过 `requirements-server.txt` 安装仿真、PyTorch、Stable-Baselines3 与 TensorBoard；部署后验证核心包版本、CUDA 状态、E4 单元测试、路径可移植性和 formal dry-run，并把实际包版本保存到 `results/deployment/`。
+
+脚本未检测到 NVIDIA GPU 时安装 CPU 版 PyTorch；检测到 GPU 时使用项目常规依赖安装，不根据驱动版本猜测 CUDA wheel。服务器需要固定 wheel 时显式传 `--torch-index-url`，需要强制 GPU 可用时传 `--require-cuda`。真机串口与 FFmpeg 继续作为 `--with-hardware`、`--with-ffmpeg` 可选项，正式批量 E4 默认不安装。`.gitattributes` 固定 shell 脚本使用 LF，避免 Windows 工作区提交后在 Linux 出现解释器换行错误。
