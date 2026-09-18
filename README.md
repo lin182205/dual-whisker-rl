@@ -52,6 +52,10 @@ Training scripts write TensorBoard logs to `results/tensorboard/`. Common curves
 
 Training seeds are random by default for better policy diversity. Pass `--seed 42` when you need a reproducible run. Each training run writes `run_metadata.json` under its log directory with the actual seed and config.
 
+独立 PPO 训练入口默认使用 `--vec-env-backend auto`：当 `--n-envs` 大于 1 时，
+每个环境场景运行在独立 Python 进程中；单环境自动回退到同进程。调试时可显式传
+`--vec-env-backend dummy`，需要强制子进程时传 `--vec-env-backend subproc`。
+
 ## Cloud training (Linux)
 
 服务器最小上传文件、依赖分组和可排除目录见

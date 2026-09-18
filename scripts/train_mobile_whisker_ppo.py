@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import multiprocessing
 from pathlib import Path
 import sys
 
@@ -20,7 +21,6 @@ from stable_baselines3.common.callbacks import CheckpointCallback
 from stable_baselines3.common.callbacks import EvalCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.utils import set_random_seed
-from stable_baselines3.common.vec_env import DummyVecEnv
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -31,6 +31,9 @@ from dual_whisker_rl.agents import TransformerHistoryExtractor
 from dual_whisker_rl.envs import MobileWhiskerPuffEnv
 from dual_whisker_rl.paths import portable_path
 from dual_whisker_rl.paths import resolve_path_args
+from dual_whisker_rl.vec_env import make_vec_env
+from dual_whisker_rl.vec_env import resolve_vec_env_backend
+from dual_whisker_rl.vec_env import SUBPROC_START_METHOD
 from train_whisker_only_ppo import ObservationHistoryWrapper
 from train_whisker_only_ppo import load_config
 from train_whisker_only_ppo import resolve_seed
@@ -248,6 +251,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timesteps", type=int, default=300_000)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--n-envs", type=int, default=8)
+    parser.add_argument(
+        "--vec-env-backend",
+        choices=("auto", "dummy", "subproc"),
+        default="auto",
+        help="向量环境后端；auto 在 n-envs>1 时使用独立子进程。",
+    )
     parser.add_argument("--history-length", type=int, default=20)
     parser.add_argument(
         "--temporal-encoder",
@@ -353,6 +362,10 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--timesteps must be at least 1")
     if args.n_envs < 1:
         raise ValueError("--n-envs must be at least 1")
+    args.vec_env_backend = resolve_vec_env_backend(
+        args.vec_env_backend,
+        args.n_envs,
+    )
     if args.history_length < 1:
         raise ValueError("--history-length must be at least 1")
     if args.learning_rate <= 0.0:
@@ -470,7 +483,7 @@ def train(args: argparse.Namespace) -> PPO:
     args.seed = resolve_seed(args.seed)
 
     set_random_seed(args.seed)
-    env = DummyVecEnv(
+    env = make_vec_env(
         [
             (
                 lambda rank=rank: make_env(
@@ -482,10 +495,28 @@ def train(args: argparse.Namespace) -> PPO:
                 )
             )
             for rank in range(args.n_envs)
-        ]
+        ],
+        args.vec_env_backend,
     )
-    base_observation_dim = int(env.envs[0].unwrapped.observation_space.shape[0])
-    eval_env = make_env(config, args.seed + 100_000, args.history_length, args.log_dir / "eval")
+    stacked_observation_dim = int(env.observation_space.shape[0])
+    if stacked_observation_dim % args.history_length != 0:
+        env.close()
+        raise ValueError(
+            "stacked observation dimension must be divisible by history length: "
+            f"stacked={stacked_observation_dim}, history={args.history_length}"
+        )
+    base_observation_dim = stacked_observation_dim // args.history_length
+    eval_env = make_vec_env(
+        [
+            lambda: make_env(
+                config,
+                args.seed + 100_000,
+                args.history_length,
+                args.log_dir / "eval",
+            )
+        ],
+        args.vec_env_backend,
+    )
     eval_callback = EvalCallback(
         eval_env,
         best_model_save_path=str(args.log_dir / "best_model"),
@@ -634,6 +665,10 @@ def save_run_metadata(
         "train_env_seeds": [args.seed + idx for idx in range(args.n_envs)],
         "eval_seed": args.seed + 100_000,
         "n_envs": args.n_envs,
+        "vec_env_backend": args.vec_env_backend,
+        "subproc_start_method": (
+            SUBPROC_START_METHOD if args.vec_env_backend == "subproc" else None
+        ),
         "timesteps": args.timesteps,
         "starting_num_timesteps": starting_num_timesteps,
         "final_num_timesteps": int(model.num_timesteps),
@@ -731,6 +766,7 @@ def save_run_metadata(
 
 
 def main() -> None:
+    multiprocessing.freeze_support()
     args = parse_args()
     model = train(args)
     print(f"saved_model={portable_path(args.model_path)}")
@@ -738,6 +774,7 @@ def main() -> None:
     print(f"final_num_timesteps={model.num_timesteps}")
     print(f"seed={args.seed}")
     print(f"temporal_encoder={args.temporal_encoder}")
+    print(f"vec_env_backend={args.vec_env_backend}")
 
 
 if __name__ == "__main__":

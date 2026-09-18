@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import multiprocessing
 from pathlib import Path
 import secrets
 import sys
@@ -12,7 +13,6 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import EvalCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.utils import set_random_seed
-from stable_baselines3.common.vec_env import DummyVecEnv
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,6 +22,9 @@ if str(ROOT) not in sys.path:
 from dual_whisker_rl.envs import PlumeEnv
 from dual_whisker_rl.paths import portable_path
 from dual_whisker_rl.paths import resolve_path_args
+from dual_whisker_rl.vec_env import make_vec_env
+from dual_whisker_rl.vec_env import resolve_vec_env_backend
+from dual_whisker_rl.vec_env import SUBPROC_START_METHOD
 
 
 def parse_args() -> argparse.Namespace:
@@ -30,6 +33,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timesteps", type=int, default=50_000)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--n-envs", type=int, default=4)
+    parser.add_argument(
+        "--vec-env-backend",
+        choices=("auto", "dummy", "subproc"),
+        default="auto",
+        help="向量环境后端；auto 在 n-envs>1 时使用独立子进程。",
+    )
     parser.add_argument("--model-path", type=Path, default=Path("results/models/joint_ppo.zip"))
     parser.add_argument("--log-dir", type=Path, default=Path("results/logs/joint_ppo"))
     parser.add_argument("--tensorboard-dir", type=Path, default=Path("results/tensorboard"))
@@ -79,10 +88,14 @@ def train(args: argparse.Namespace) -> PPO:
     args.seed = resolve_seed(args.seed)
     if args.n_envs < 1:
         raise ValueError("--n-envs must be at least 1")
+    args.vec_env_backend = resolve_vec_env_backend(
+        args.vec_env_backend,
+        args.n_envs,
+    )
 
     set_random_seed(args.seed)
-    # 多环境采样：PPO 每次从多个独立环境收集 rollout，提高样本多样性。
-    env = DummyVecEnv(
+    # 多环境采样默认放入独立进程，避免同一解释器内顺序轮询。
+    env = make_vec_env(
         [
             (
                 lambda rank=rank: make_env(
@@ -93,10 +106,14 @@ def train(args: argparse.Namespace) -> PPO:
                 )
             )
             for rank in range(args.n_envs)
-        ]
+        ],
+        args.vec_env_backend,
     )
     # 评估环境使用独立 seed，避免训练采样和评估采样完全重合。
-    eval_env = make_env(config, args.seed + 100_000, args.log_dir / "eval")
+    eval_env = make_vec_env(
+        [lambda: make_env(config, args.seed + 100_000, args.log_dir / "eval")],
+        args.vec_env_backend,
+    )
     eval_callback = EvalCallback(
         eval_env,
         best_model_save_path=str(args.log_dir / "best_model"),
@@ -147,6 +164,10 @@ def save_run_metadata(args: argparse.Namespace, config: dict) -> None:
         "train_env_seeds": [args.seed + idx for idx in range(args.n_envs)],
         "eval_seed": args.seed + 100_000,
         "n_envs": args.n_envs,
+        "vec_env_backend": args.vec_env_backend,
+        "subproc_start_method": (
+            SUBPROC_START_METHOD if args.vec_env_backend == "subproc" else None
+        ),
         "timesteps": args.timesteps,
         "config_path": portable_path(args.config),
         "model_path": portable_path(args.model_path),
@@ -159,11 +180,13 @@ def save_run_metadata(args: argparse.Namespace, config: dict) -> None:
 
 
 def main() -> None:
+    multiprocessing.freeze_support()
     args = parse_args()
     train(args)
     print(f"saved_model={args.model_path}")
     print(f"seed={args.seed}")
     print(f"n_envs={args.n_envs}")
+    print(f"vec_env_backend={args.vec_env_backend}")
     print(f"tensorboard_dir={args.tensorboard_dir}")
     print(f"tensorboard_command=tensorboard --logdir {args.tensorboard_dir}")
 

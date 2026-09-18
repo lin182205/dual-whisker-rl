@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from collections import deque
 import json
+import multiprocessing
 from pathlib import Path
 import secrets
 import sys
@@ -17,7 +18,6 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import EvalCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.utils import set_random_seed
-from stable_baselines3.common.vec_env import DummyVecEnv
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,6 +27,9 @@ if str(ROOT) not in sys.path:
 from dual_whisker_rl.envs import WhiskerOnlyPuffEnv
 from dual_whisker_rl.paths import portable_path
 from dual_whisker_rl.paths import resolve_path_args
+from dual_whisker_rl.vec_env import make_vec_env
+from dual_whisker_rl.vec_env import resolve_vec_env_backend
+from dual_whisker_rl.vec_env import SUBPROC_START_METHOD
 
 
 class ObservationHistoryWrapper(gym.Wrapper):
@@ -82,6 +85,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timesteps", type=int, default=20_0000)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--n-envs", type=int, default=8)
+    parser.add_argument(
+        "--vec-env-backend",
+        choices=("auto", "dummy", "subproc"),
+        default="auto",
+        help="向量环境后端；auto 在 n-envs>1 时使用独立子进程。",
+    )
     parser.add_argument("--history-length", type=int, default=20)
     parser.add_argument("--model-path", type=Path, default=Path("results/models/whisker_only_ppo.zip"))
     parser.add_argument("--log-dir", type=Path, default=Path("results/logs/whisker_only_ppo"))
@@ -154,10 +163,14 @@ def train(args: argparse.Namespace) -> PPO:
         raise ValueError("--n-envs must be at least 1")
     if args.history_length < 1:
         raise ValueError("--history-length must be at least 1")
+    args.vec_env_backend = resolve_vec_env_backend(
+        args.vec_env_backend,
+        args.n_envs,
+    )
 
     set_random_seed(args.seed)
-    # 多环境并行采样：每个环境有独立随机气体羽流，提高触须策略泛化性。
-    env = DummyVecEnv(
+    # 多环境并行采样：每个独立进程维护一条随机气体羽流。
+    env = make_vec_env(
         [
             (
                 lambda rank=rank: make_env(
@@ -169,13 +182,19 @@ def train(args: argparse.Namespace) -> PPO:
                 )
             )
             for rank in range(args.n_envs)
-        ]
+        ],
+        args.vec_env_backend,
     )
-    eval_env = make_env(
-        config,
-        args.seed + 100_000,
-        args.history_length,
-        args.log_dir / "eval",
+    eval_env = make_vec_env(
+        [
+            lambda: make_env(
+                config,
+                args.seed + 100_000,
+                args.history_length,
+                args.log_dir / "eval",
+            )
+        ],
+        args.vec_env_backend,
     )
     eval_callback = EvalCallback(
         eval_env,
@@ -247,6 +266,10 @@ def save_run_metadata(args: argparse.Namespace, config: dict) -> None:
         "train_env_seeds": [args.seed + idx for idx in range(args.n_envs)],
         "eval_seed": args.seed + 100_000,
         "n_envs": args.n_envs,
+        "vec_env_backend": args.vec_env_backend,
+        "subproc_start_method": (
+            SUBPROC_START_METHOD if args.vec_env_backend == "subproc" else None
+        ),
         "timesteps": args.timesteps,
         "history_length": args.history_length,
         "base_observation_dim": base_obs_dim,
@@ -272,11 +295,13 @@ def save_run_metadata(args: argparse.Namespace, config: dict) -> None:
 
 
 def main() -> None:
+    multiprocessing.freeze_support()
     args = parse_args()
     train(args)
     print(f"saved_model={args.model_path}")
     print(f"seed={args.seed}")
     print(f"n_envs={args.n_envs}")
+    print(f"vec_env_backend={args.vec_env_backend}")
     print(f"history_length={args.history_length}")
     print(f"tensorboard_dir={args.tensorboard_dir}")
     print(f"tensorboard_command=tensorboard --logdir {args.tensorboard_dir}")

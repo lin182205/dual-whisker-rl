@@ -1657,3 +1657,22 @@ M/B2/B3/B6 使用 GRU 历史策略，B4 使用单帧 MLP，B5 通过输入维度
 服务器上的 B1 文件实际由未形成 Git 提交的中间运行器生成，旧脚本哈希无法从提交历史还原。对此增加第二层严格迁移：只接受未带签名版本号的 `e4-v1` 完成产物，并逐项校验 48 个 B1 候选或 10×2 个 B2 任务的候选集合、指标有限性、种子、102,400 步预算及按当前规则重算的最优项。完整内容全部一致时才原子改写为 v2 签名，并记录 `migration_validation`；缺项、损坏、选择结果不一致以及已经是 v2 但签名不符的产物继续拒绝。
 
 同类问题还影响 `prepare` 写入的训练 `state.json`：旧签名包含整个运行器文件，脚本修复后会把尚未开始、`actual_timesteps=0` 的 prepared 状态误判为不可恢复。训练签名升级为 `e4-training-v2`，只覆盖环境/策略核心代码、配置、并行方式和 PPO 语义超参数，不再绑定进度打印或 checkpoint 保存频率。恢复时若任务没有训练步数、checkpoint、最终模型或 metadata，则原子刷新准备状态签名并开始训练；只要已有任一训练产物，场景或签名不一致仍严格拒绝。
+
+## 37. 独立 PPO 训练入口改用多进程环境
+
+`train_joint_ppo.py`、`train_whisker_only_ppo.py` 和 `train_mobile_whisker_ppo.py`
+此前虽然支持多个环境，但实际使用 `DummyVecEnv`，所有场景仍在主 Python 进程内顺序推进。
+三个入口现统一增加 `--vec-env-backend auto|dummy|subproc`：默认 `auto` 在
+`n_envs>1` 时解析为 `SubprocVecEnv`，每个训练场景进入独立进程；单环境回退为
+`DummyVecEnv`。子进程跨平台统一使用 `spawn`，Windows 主入口调用
+`freeze_support()`。
+
+周期评估环境使用与训练环境一致的 VecEnv 类型，避免 SB3 训练/评估后端类型不一致；
+mobile 脚本不再访问仅 `DummyVecEnv` 暴露的 `env.envs[0]`，而是从公开
+`observation_space` 和 history length 推导单帧维度。实际后端与子进程启动方式写入
+`run_metadata.json`，终端也会打印实际后端。`dummy` 仍保留用于断点调试和低开销 smoke。
+
+验证：三个入口均通过 Python 语法和帮助入口检查；Windows `spawn` 下各以 2 个 worker
+完成一次训练，mobile 为 64 步，joint/whisker-only 因固定 512-step rollout 各为 1024
+全局步。三个终端输出和 metadata 均记录 `vec_env_backend=subproc`、
+`subproc_start_method=spawn`。这些检查验证并行链路，不代表策略效果。
