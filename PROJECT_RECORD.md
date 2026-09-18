@@ -1676,3 +1676,21 @@ mobile 脚本不再访问仅 `DummyVecEnv` 暴露的 `env.envs[0]`，而是从�
 完成一次训练，mobile 为 64 步，joint/whisker-only 因固定 512-step rollout 各为 1024
 全局步。三个终端输出和 metadata 均记录 `vec_env_backend=subproc`、
 `subproc_start_method=spawn`。这些检查验证并行链路，不代表策略效果。
+
+## 38. Mobile 独立训练默认 800 万步与轮次 ETA
+
+`train_mobile_whisker_ppo.py` 的默认训练预算由 300,000 步提高到 8,000,000 步。
+`--timesteps` 仍可显式覆盖；从 checkpoint 恢复时保持原语义，表示额外训练步数。
+
+新增完整 PPO 训练轮次计时：一轮从环境 rollout 开始，到该批样本完成全部 PPO epoch
+更新并准备进入下一轮为止。每轮开始打印轮次、墙钟时间和该轮环境步数；每轮结束打印
+实际耗时、最近 5 轮平均耗时、当前/目标步数和预计剩余分钟数。最后一轮在训练结束回调
+中结算，checkpoint 和周期评估若在本轮触发，其开销会自然计入 ETA。恢复训练以模型的
+实际 `num_timesteps` 为起点，目标步数为“起点 + 本次请求步数”。rollout 大小、PPO
+epoch 数、平滑窗口和 ETA 单位同步写入 `run_metadata.json`。
+
+验证：Python 语法与 CLI 帮助入口通过；2 个 `spawn` worker、每轮 64 环境步的两轮
+smoke 正确输出两次开始和结束记录，最后一轮在训练结束时结算。随后从 128 步模型额外
+续训 64 步，日志目标正确显示为 `192/192`；默认参数解析为 8,000,000，metadata
+记录 rollout size、实际 PPO epoch 数、5 轮 ETA 窗口和分钟单位。`git diff --check`
+通过。这些检查验证计时和恢复口径，不代表 800 万步正式训练结果。

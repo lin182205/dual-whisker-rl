@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import multiprocessing
 from pathlib import Path
 import sys
+import time
 
 import numpy as np
 from stable_baselines3 import PPO
@@ -37,6 +39,9 @@ from dual_whisker_rl.vec_env import SUBPROC_START_METHOD
 from train_whisker_only_ppo import ObservationHistoryWrapper
 from train_whisker_only_ppo import load_config
 from train_whisker_only_ppo import resolve_seed
+
+
+ETA_WINDOW_ROLLOUTS = 5
 
 
 class RewardComponentsTensorboardCallback(BaseCallback):
@@ -239,6 +244,79 @@ class RewardComponentsTensorboardCallback(BaseCallback):
                 )
 
 
+class TrainingCycleEtaCallback(BaseCallback):
+    """统计完整 PPO 训练轮次耗时，并估算剩余训练时间。
+
+    一轮从 rollout 开始，到该批样本完成全部 PPO epoch 更新并准备进入下一轮为止。
+    """
+
+    def __init__(
+        self,
+        *,
+        target_timesteps: int,
+        starting_timesteps: int,
+        rollout_size: int,
+        ppo_epochs: int,
+        window_rollouts: int = ETA_WINDOW_ROLLOUTS,
+    ) -> None:
+        super().__init__(verbose=0)
+        self.target_timesteps = int(target_timesteps)
+        self.starting_timesteps = int(starting_timesteps)
+        self.rollout_size = int(rollout_size)
+        self.ppo_epochs = int(ppo_epochs)
+        self.window_rollouts = int(window_rollouts)
+        self.total_rollouts = max(
+            1,
+            math.ceil(
+                max(0, self.target_timesteps - self.starting_timesteps)
+                / self.rollout_size
+            ),
+        )
+        self.cycle_started_at: float | None = None
+        self.cycle_seconds: list[float] = []
+        self.completed_rollouts = 0
+
+    def _report_completed_cycle(self, finished_at: float) -> None:
+        if self.cycle_started_at is None:
+            return
+        elapsed = max(0.0, finished_at - self.cycle_started_at)
+        self.cycle_seconds.append(elapsed)
+        self.cycle_seconds = self.cycle_seconds[-self.window_rollouts :]
+        self.completed_rollouts += 1
+        average_seconds = float(np.mean(self.cycle_seconds))
+        completed_steps = int(self.model.num_timesteps)
+        remaining_steps = max(0, self.target_timesteps - completed_steps)
+        remaining_rollouts = math.ceil(remaining_steps / self.rollout_size)
+        remaining_minutes = average_seconds * remaining_rollouts / 60.0
+        print(
+            f"[训练轮次] 第{self.completed_rollouts}/{self.total_rollouts}轮结束 "
+            f"本轮采样及{self.ppo_epochs}个PPO epoch耗时={elapsed:.2f}秒 "
+            f"最近{self.window_rollouts}轮平均耗时={average_seconds:.2f}秒 "
+            f"训练步数={completed_steps}/{self.target_timesteps} "
+            f"预计剩余={remaining_minutes:.2f}分钟",
+            flush=True,
+        )
+
+    def _on_rollout_start(self) -> None:
+        now = time.perf_counter()
+        self._report_completed_cycle(now)
+        self.cycle_started_at = now
+        current_rollout = min(self.completed_rollouts + 1, self.total_rollouts)
+        print(
+            f"[训练轮次] 第{current_rollout}/{self.total_rollouts}轮开始 "
+            f"时间={time.strftime('%Y-%m-%d %H:%M:%S')} "
+            f"每轮环境步数={self.rollout_size}",
+            flush=True,
+        )
+
+    def _on_step(self) -> bool:
+        return True
+
+    def _on_training_end(self) -> None:
+        self._report_completed_cycle(time.perf_counter())
+        self.cycle_started_at = None
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, default=None)
@@ -248,7 +326,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="覆盖配置中的移动场景初始化模式；默认使用 randomized。",
     )
-    parser.add_argument("--timesteps", type=int, default=300_000)
+    parser.add_argument("--timesteps", type=int, default=8_000_000)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--n-envs", type=int, default=8)
     parser.add_argument(
@@ -538,10 +616,6 @@ def train(args: argparse.Namespace) -> PPO:
     reward_components_callback = RewardComponentsTensorboardCallback(
         MobileWhiskerPuffEnv.REWARD_COMPONENT_NAMES
     )
-    callbacks = CallbackList(
-        [reward_components_callback, eval_callback, checkpoint_callback]
-    )
-
     # PPO 原生支持 MultiDiscrete([6, 10, 10])。
     if args.resume_from is None:
         model = PPO(
@@ -603,6 +677,22 @@ def train(args: argparse.Namespace) -> PPO:
             "resume_note=checkpoint PPO/model/optimizer parameters are preserved; "
             "--timesteps is additional training"
         )
+    target_timesteps = starting_num_timesteps + args.timesteps
+    rollout_size = int(model.n_steps) * int(env.num_envs)
+    eta_callback = TrainingCycleEtaCallback(
+        target_timesteps=target_timesteps,
+        starting_timesteps=starting_num_timesteps,
+        rollout_size=rollout_size,
+        ppo_epochs=int(model.n_epochs),
+    )
+    callbacks = CallbackList(
+        [
+            reward_components_callback,
+            eval_callback,
+            checkpoint_callback,
+            eta_callback,
+        ]
+    )
     model.learn(
         total_timesteps=args.timesteps,
         progress_bar=False,
@@ -672,6 +762,12 @@ def save_run_metadata(
         "timesteps": args.timesteps,
         "starting_num_timesteps": starting_num_timesteps,
         "final_num_timesteps": int(model.num_timesteps),
+        "training_cycle_timing": {
+            "rollout_size": int(model.n_steps) * args.n_envs,
+            "ppo_epochs": int(model.n_epochs),
+            "eta_window_rollouts": ETA_WINDOW_ROLLOUTS,
+            "eta_unit": "minutes",
+        },
         "resume_from": portable_path(args.resume_from),
         "checkpoint_freq": args.checkpoint_freq,
         "checkpoint_dir": portable_path(args.checkpoint_dir),
