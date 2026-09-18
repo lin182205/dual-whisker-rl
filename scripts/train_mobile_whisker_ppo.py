@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import deque
 import json
 import math
 import multiprocessing
@@ -33,7 +34,6 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.callbacks import CallbackList
 from stable_baselines3.common.callbacks import CheckpointCallback
-from stable_baselines3.common.callbacks import EvalCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.utils import set_random_seed
 
@@ -73,6 +73,8 @@ class CompactTrainingInfoWrapper(gym.Wrapper):
         "whisker_reacquisition_rewarded",
         "reward_components",
         "is_success",
+        "distance_to_source",
+        "out_of_bounds",
     )
 
     @classmethod
@@ -114,6 +116,10 @@ class RewardComponentsTensorboardCallback(BaseCallback):
         self._body_assisted_reacquisition_events = 0
         self._passive_reacquisition_events = 0
         self._whisker_reacquisition_reward_events = 0
+        self._episode_successes: deque[float] = deque(maxlen=500)
+        self._episode_final_distances: deque[float] = deque(maxlen=500)
+        self._episode_out_of_bounds: deque[float] = deque(maxlen=500)
+        self._episode_lengths: deque[float] = deque(maxlen=500)
 
     def _on_training_start(self) -> None:
         self._episode_sums = [
@@ -179,6 +185,21 @@ class RewardComponentsTensorboardCallback(BaseCallback):
                 self._whisker_reacquisition_reward_events += int(
                     bool(info.get("whisker_reacquisition_rewarded", False))
                 )
+            episode_done = env_index < dones.size and bool(dones[env_index])
+            if episode_done:
+                self._episode_successes.append(
+                    float(bool(info.get("is_success", False)))
+                )
+                if "distance_to_source" in info:
+                    self._episode_final_distances.append(
+                        float(info["distance_to_source"])
+                    )
+                self._episode_out_of_bounds.append(
+                    float(bool(info.get("out_of_bounds", False)))
+                )
+                episode_info = info.get("episode")
+                if isinstance(episode_info, dict) and "l" in episode_info:
+                    self._episode_lengths.append(float(episode_info["l"]))
             components = info.get("reward_components")
             if not isinstance(components, dict):
                 continue
@@ -226,6 +247,33 @@ class RewardComponentsTensorboardCallback(BaseCallback):
                 "reward_components/total_episode_sum_mean",
                 float(np.mean(self._completed_episode_totals)),
                 exclude=self._NON_TENSORBOARD_OUTPUTS,
+            )
+        success_values = list(self._episode_successes)
+        if success_values:
+            for window in (100, 500):
+                values = success_values[-window:]
+                self.logger.record(
+                    f"rollout/success_rate_last_{window}",
+                    float(np.mean(values)),
+                )
+            self.logger.record(
+                "rollout/completed_episodes_in_window",
+                len(success_values),
+            )
+        if self._episode_final_distances:
+            self.logger.record(
+                "rollout/mean_final_distance_last_500",
+                float(np.mean(self._episode_final_distances)),
+            )
+        if self._episode_out_of_bounds:
+            self.logger.record(
+                "rollout/out_of_bounds_rate_last_500",
+                float(np.mean(self._episode_out_of_bounds)),
+            )
+        if self._episode_lengths:
+            self.logger.record(
+                "rollout/mean_episode_length_last_500",
+                float(np.mean(self._episode_lengths)),
             )
         if self._diagnostic_step_count > 0:
             blank_denominator = max(self._blank_step_count, 1)
@@ -288,8 +336,33 @@ class RewardComponentsTensorboardCallback(BaseCallback):
                 )
 
 
+class TimedCheckpointCallback(CheckpointCallback):
+    """记录每次 checkpoint 保存的实际墙钟耗时。"""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.total_event_seconds = 0.0
+        self.event_count = 0
+
+    @property
+    def average_event_seconds(self) -> float | None:
+        if self.event_count == 0:
+            return None
+        return self.total_event_seconds / self.event_count
+
+    def _on_step(self) -> bool:
+        is_due = self.save_freq > 0 and self.n_calls % self.save_freq == 0
+        if not is_due:
+            return super()._on_step()
+        started_at = time.perf_counter()
+        continue_training = super()._on_step()
+        self.total_event_seconds += max(0.0, time.perf_counter() - started_at)
+        self.event_count += 1
+        return continue_training
+
+
 class TrainingCycleEtaCallback(BaseCallback):
-    """统计完整 PPO 训练轮次耗时，并估算剩余训练时间。
+    """分别估算纯训练时间和包含 checkpoint 的实际剩余时间。
 
     一轮从 rollout 开始，到该批样本完成全部 PPO epoch 更新并准备进入下一轮为止。
     """
@@ -301,6 +374,7 @@ class TrainingCycleEtaCallback(BaseCallback):
         starting_timesteps: int,
         rollout_size: int,
         ppo_epochs: int,
+        checkpoint_callback: TimedCheckpointCallback,
         window_rollouts: int = ETA_WINDOW_ROLLOUTS,
     ) -> None:
         super().__init__(verbose=0)
@@ -308,6 +382,7 @@ class TrainingCycleEtaCallback(BaseCallback):
         self.starting_timesteps = int(starting_timesteps)
         self.rollout_size = int(rollout_size)
         self.ppo_epochs = int(ppo_epochs)
+        self.checkpoint_callback = checkpoint_callback
         self.window_rollouts = int(window_rollouts)
         self.total_rollouts = max(
             1,
@@ -317,27 +392,93 @@ class TrainingCycleEtaCallback(BaseCallback):
             ),
         )
         self.cycle_started_at: float | None = None
-        self.cycle_seconds: list[float] = []
+        self.pure_cycle_seconds: list[float] = []
         self.completed_rollouts = 0
+        self.previous_checkpoint_seconds = 0.0
+
+    @staticmethod
+    def _remaining_events(
+        callback: TimedCheckpointCallback,
+        frequency: int,
+        future_vec_steps: int,
+    ) -> int:
+        if frequency <= 0 or future_vec_steps <= 0:
+            return 0
+        current_calls = int(callback.n_calls)
+        return max(
+            0,
+            (current_calls + future_vec_steps) // frequency
+            - current_calls // frequency,
+        )
+
+    @staticmethod
+    def _format_average(seconds: float | None) -> str:
+        return "待首次实测" if seconds is None else f"{seconds:.2f}秒"
 
     def _report_completed_cycle(self, finished_at: float) -> None:
         if self.cycle_started_at is None:
             return
         elapsed = max(0.0, finished_at - self.cycle_started_at)
-        self.cycle_seconds.append(elapsed)
-        self.cycle_seconds = self.cycle_seconds[-self.window_rollouts :]
+        cycle_checkpoint_seconds = max(
+            0.0,
+            self.checkpoint_callback.total_event_seconds
+            - self.previous_checkpoint_seconds,
+        )
+        self.previous_checkpoint_seconds = (
+            self.checkpoint_callback.total_event_seconds
+        )
+        pure_elapsed = max(
+            0.0,
+            elapsed - cycle_checkpoint_seconds,
+        )
+        self.pure_cycle_seconds.append(pure_elapsed)
+        self.pure_cycle_seconds = self.pure_cycle_seconds[
+            -self.window_rollouts :
+        ]
         self.completed_rollouts += 1
-        average_seconds = float(np.mean(self.cycle_seconds))
+        pure_average_seconds = float(np.mean(self.pure_cycle_seconds))
         completed_steps = int(self.model.num_timesteps)
         remaining_steps = max(0, self.target_timesteps - completed_steps)
         remaining_rollouts = math.ceil(remaining_steps / self.rollout_size)
-        remaining_minutes = average_seconds * remaining_rollouts / 60.0
+        pure_remaining_seconds = pure_average_seconds * remaining_rollouts
+        future_vec_steps = remaining_rollouts * int(self.model.n_steps)
+        remaining_checkpoints = self._remaining_events(
+            self.checkpoint_callback,
+            int(self.checkpoint_callback.save_freq),
+            future_vec_steps,
+        )
+        average_checkpoint_seconds = (
+            self.checkpoint_callback.average_event_seconds
+        )
+        maintenance_remaining_seconds = (
+            remaining_checkpoints * (average_checkpoint_seconds or 0.0)
+        )
+        actual_remaining_seconds = (
+            pure_remaining_seconds + maintenance_remaining_seconds
+        )
+        pending_samples = (
+            remaining_checkpoints > 0 and average_checkpoint_seconds is None
+        )
+        pending_note = (
+            "，未实测的checkpoint耗时暂未计入"
+            if pending_samples
+            else ""
+        )
         print(
             f"[训练轮次] 第{self.completed_rollouts}/{self.total_rollouts}轮结束 "
-            f"本轮采样及{self.ppo_epochs}个PPO epoch耗时={elapsed:.2f}秒 "
-            f"最近{self.window_rollouts}轮平均耗时={average_seconds:.2f}秒 "
-            f"训练步数={completed_steps}/{self.target_timesteps} "
-            f"预计剩余={remaining_minutes:.2f}分钟",
+            f"本轮总耗时={elapsed:.2f}秒 "
+            f"纯训练耗时={pure_elapsed:.2f}秒 "
+            f"checkpoint={cycle_checkpoint_seconds:.2f}秒 "
+            f"最近{self.window_rollouts}轮纯训练平均={pure_average_seconds:.2f}秒 "
+            f"训练步数={completed_steps}/{self.target_timesteps}",
+            flush=True,
+        )
+        print(
+            f"[剩余时间] 纯训练预计={pure_remaining_seconds / 60.0:.2f}分钟 "
+            f"实际预计={actual_remaining_seconds / 60.0:.2f}分钟 "
+            f"未来checkpoint={remaining_checkpoints}次"
+            f"(均值={self._format_average(average_checkpoint_seconds)})"
+            f"{pending_note}",
             flush=True,
         )
 
@@ -427,8 +568,18 @@ def parse_args() -> argparse.Namespace:
         help="默认使用 mobile_whisker_<encoder>_ppo。",
     )
     parser.add_argument("--log-interval", type=int, default=1)
-    parser.add_argument("--eval-freq", type=int, default=100_000)
-    parser.add_argument("--eval-episodes", type=int, default=50)
+    parser.add_argument(
+        "--eval-freq",
+        type=int,
+        default=None,
+        help="已停用，仅兼容旧启动命令；训练期间不再执行同步 evaluation。",
+    )
+    parser.add_argument(
+        "--eval-episodes",
+        type=int,
+        default=None,
+        help="已停用，仅兼容旧启动命令；请使用独立固定场景评估脚本。",
+    )
     parser.add_argument(
         "--checkpoint-freq",
         type=int,
@@ -502,10 +653,6 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--ent-coef must be non-negative")
     if args.target_kl <= 0.0:
         raise ValueError("--target-kl must be positive")
-    if args.eval_freq < 1:
-        raise ValueError("--eval-freq must be at least 1")
-    if args.eval_episodes < 1:
-        raise ValueError("--eval-episodes must be at least 1")
     if args.checkpoint_freq < 1:
         raise ValueError("--checkpoint-freq must be at least 1")
     if args.resume_from is not None and not args.resume_from.exists():
@@ -642,29 +789,14 @@ def train(args: argparse.Namespace) -> PPO:
             f"stacked={stacked_observation_dim}, history={args.history_length}"
         )
     base_observation_dim = stacked_observation_dim // args.history_length
-    eval_env = make_vec_env(
-        [
-            lambda: make_env(
-                config,
-                args.seed + 100_000,
-                args.history_length,
-                args.log_dir / "eval",
-                optimize_training=True,
-            )
-        ],
-        args.vec_env_backend,
-    )
-    eval_callback = EvalCallback(
-        eval_env,
-        best_model_save_path=str(args.log_dir / "best_model"),
-        log_path=str(args.log_dir / "eval"),
-        eval_freq=max(args.eval_freq // args.n_envs, 1),
-        n_eval_episodes=args.eval_episodes,
-        deterministic=True,
-        render=False,
-    )
+    if args.eval_freq is not None or args.eval_episodes is not None:
+        print(
+            "注意：--eval-freq/--eval-episodes 已停用，训练期间不会执行同步评估；"
+            "请在训练后运行 evaluate_mobile_fixed_scenarios.py。",
+            flush=True,
+        )
     args.checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    checkpoint_callback = CheckpointCallback(
+    checkpoint_callback = TimedCheckpointCallback(
         save_freq=max(args.checkpoint_freq // args.n_envs, 1),
         save_path=str(args.checkpoint_dir),
         name_prefix=args.run_name,
@@ -701,7 +833,6 @@ def train(args: argparse.Namespace) -> PPO:
         environment_shape = tuple(env.observation_space.shape)
         if checkpoint_shape != environment_shape:
             env.close()
-            eval_env.close()
             raise ValueError(
                 "checkpoint observation shape does not match the current mobile "
                 f"environment: checkpoint={checkpoint_shape}, "
@@ -743,11 +874,11 @@ def train(args: argparse.Namespace) -> PPO:
         starting_timesteps=starting_num_timesteps,
         rollout_size=rollout_size,
         ppo_epochs=int(model.n_epochs),
+        checkpoint_callback=checkpoint_callback,
     )
     callbacks = CallbackList(
         [
             reward_components_callback,
-            eval_callback,
             checkpoint_callback,
             eta_callback,
         ]
@@ -765,7 +896,6 @@ def train(args: argparse.Namespace) -> PPO:
     model.save(args.model_path)
     preview_policy_command(model, config, args)
     env.close()
-    eval_env.close()
     save_run_metadata(args, config, model, starting_num_timesteps)
     return model
 
@@ -812,7 +942,6 @@ def save_run_metadata(
     metadata = {
         "seed": args.seed,
         "train_env_seeds": [args.seed + idx for idx in range(args.n_envs)],
-        "eval_seed": args.seed + 100_000,
         "n_envs": args.n_envs,
         "vec_env_backend": args.vec_env_backend,
         "subproc_start_method": (
@@ -826,10 +955,22 @@ def save_run_metadata(
             "ppo_epochs": int(model.n_epochs),
             "eta_window_rollouts": ETA_WINDOW_ROLLOUTS,
             "eta_unit": "minutes",
+            "eta_modes": {
+                "pure_training": (
+                    "recent rollout+PPO mean excluding checkpoint"
+                ),
+                "actual_wall_clock": (
+                    "pure training estimate plus measured average duration of "
+                    "remaining scheduled checkpoint events"
+                ),
+            },
         },
         "resume_from": portable_path(args.resume_from),
-        "eval_freq": args.eval_freq,
-        "eval_episodes": args.eval_episodes,
+        "synchronous_evaluation": {
+            "enabled": False,
+            "external_script": "scripts/evaluate_mobile_fixed_scenarios.py",
+            "fixed_scenarios": 100,
+        },
         "checkpoint_freq": args.checkpoint_freq,
         "checkpoint_dir": portable_path(args.checkpoint_dir),
         "runtime_optimizations": {

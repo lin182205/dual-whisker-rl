@@ -66,7 +66,10 @@ conda activate dual-whisker-rl
 | `scripts/generate_*`、`scripts/visualize_*`、`scripts/analyze_*` | 画图、动画和诊断入口 | 正式批量实验不需要 |
 | `scripts/hardware_*`、`scripts/compare_hardware_*` | 真机采集与分析入口 | 纯仿真训练排除 |
 
-不要整体排除 `scripts/`：E4 入口位于该目录。若需要旧训练/评测入口，应连同对应脚本一起上传；其中移动评测脚本还会调用 `train_whisker_only_ppo.py` 和 `visualize_mobile_whisker_env.py`。
+不要整体排除 `scripts/`：E4 入口位于该目录。若运行独立 Mobile 主线，还需上传
+`train_mobile_whisker_ppo.py`、`evaluate_mobile_fixed_scenarios.py` 和
+`train_whisker_only_ppo.py`；固定场景评估复用 `dual_whisker_rl/e4_experiments.py` 的指标与
+场景数据结构。旧的可视化评测入口还会调用 `visualize_mobile_whisker_env.py`。
 
 ## 4. 服务器启动顺序
 

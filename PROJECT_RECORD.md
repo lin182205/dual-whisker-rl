@@ -1731,3 +1731,53 @@ trajectory，跨进程 `info` 仅保留奖励分量、blank/重捕获诊断和 `
 `info` 的 pickle 体积由 1,463 B 降至 513 B。12 个 `spawn` worker、GRU、192 步 smoke 训练完成，采样约
 1,991 FPS，metadata 正确记录新默认值和运行时优化。这些数字是本机短基准，不代表服务器
 800 万步全程吞吐或最终策略效果。
+
+## 41. Mobile ETA 拆分纯训练与实际完成时间
+
+原 ETA 直接用最近 5 个完整轮次的墙钟平均值外推；当每 100,000 步同步执行 50 局
+evaluation 时，该次开销会在接下来 5 轮被误当作每轮固定开销，导致预计剩余时间周期性
+大幅跳高。现将 evaluation 和 checkpoint 回调改为分别记录每次事件的实际墙钟耗时，轮次
+统计从总耗时中扣除二者，得到不受周期任务尖峰影响的“纯训练耗时”。
+
+终端每轮同时输出两个估计：`纯训练预计` 使用最近 5 轮纯 rollout + PPO 更新耗时；
+`实际预计` 在前者基础上，根据当前 callback 调用计数、剩余 rollout 数计算未来还会触发的
+evaluation/checkpoint 次数，再乘各自已实测平均耗时进行摊销。首次周期任务尚未发生时，
+实际估计暂不计入未知耗时并明确标记“待首次实测”；第一次触发后自动转为完整墙钟估计。
+每轮还会打印本轮总耗时、纯训练耗时以及 evaluation/checkpoint 分项，便于识别服务器 I/O
+或评估性能波动。两种 ETA 的定义同步写入 `run_metadata.json`。
+
+验证使用 2 个 `spawn` worker、2 个 rollout、每轮 32 全局步，并把 evaluation/checkpoint
+都设为每轮触发。第一轮实测总耗时 0.82 秒，其中纯训练 0.13 秒、evaluation 0.69 秒；
+剩余一轮时，纯训练估计仅使用 0.13 秒，实际估计额外且仅额外计入未来 1 次 evaluation
+和 1 次 checkpoint。第二轮完成后两个 ETA 均归零，evaluation 平均值由两次事件更新为
+0.82 秒。周期评估成功率、best model、checkpoint、最终模型和 metadata 均正常生成；
+语法检查与 `git diff --check` 通过。短 smoke 数值只验证计算链路，不代表正式服务器耗时。
+
+## 42. Mobile 训练取消同步评估并新增固定场景并行复评
+
+800 万步独立训练入口已移除 `EvalCallback` 和常驻评估环境，训练期间不再为 50/100 局
+evaluation 暂停。旧 `--eval-freq`、`--eval-episodes` 参数继续接受但明确提示已停用，避免
+服务器历史启动命令直接报错。训练 ETA 保留两个口径：纯训练排除 checkpoint；实际预计在
+纯训练基础上按剩余 checkpoint 次数和已实测平均保存耗时摊销。metadata 明确记录
+`synchronous_evaluation.enabled=false` 及外部评估入口。本节替代 §40/§41 中关于同步
+evaluation 仍在训练主循环中的设计。
+
+训练进程直接从 12 个 rollout worker 的完成局 `info` 维护最近 500 局滑动窗口，TensorBoard
+新增 `rollout/success_rate_last_100`、`success_rate_last_500`、
+`mean_final_distance_last_500`、`out_of_bounds_rate_last_500`、
+`mean_episode_length_last_500` 和当前窗口完成局数。训练子进程的精简 `info` 因此额外保留
+最终距离与越界标记，但仍不传输可视化 trajectory。
+
+新增 `scripts/evaluate_mobile_fixed_scenarios.py`。首次运行根据当前配置与连续种子采样并原子
+封存默认 100 个场景，记录完整风速/风向、气源、机器人位姿、种子、配置摘要和场景摘要；
+后续运行拒绝场景数量、配置或摘要不一致的静默复用。`--prepare-only` 可在训练前建库，
+`--regenerate-scenarios` 是唯一允许覆盖题库的显式入口。每个评估 worker 只加载一次 PPO
+模型与环境，通过 `spawn` 进程池动态领取场景；默认 12 个 CPU worker、每进程限制一个
+数值计算线程。输出包含成功率及置信区间、最终/最小距离、步数、路径、气味命中、重捕获、
+奖励、终止原因和逐场景明细，并保存模型与场景 SHA-256，支持不同 checkpoint 严格配对。
+
+验证：2-worker、512-step GRU/PPO smoke 无 evaluation 输出，生成 3 个完整 episode，终端/
+TensorBoard 正常记录成功率、最终距离、越界率和局长，checkpoint 与双 ETA 正常。独立评估
+先封存 4 个场景，再分别使用 2 和 4 个 worker 复评同一 GRU 模型，两次逐场景结果 SHA-256
+均为 `1f9ffaa48e51619f9710e56ba20a40b3cc793648680d3aaf7ffb5be110a16b5c`；默认 100 场景库也已
+成功生成，摘要为 `008126e0d236866f45d3bccb9f7fc64a5f5dab03fd6276f751af903d03565536`。
