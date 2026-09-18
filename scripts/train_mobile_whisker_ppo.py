@@ -11,10 +11,23 @@ import argparse
 import json
 import math
 import multiprocessing
+import os
 from pathlib import Path
 import sys
 import time
+from typing import Any
 
+# 12 个环境子进程并行时，每个进程只使用一个数值计算线程，避免 BLAS/OpenMP
+# 再次扩线程造成过度抢占；同时覆盖无效的外部取值，避免 libgomp 警告。
+NUMERIC_THREAD_LIMITS = {
+    "OMP_NUM_THREADS": "1",
+    "MKL_NUM_THREADS": "1",
+    "OPENBLAS_NUM_THREADS": "1",
+    "NUMEXPR_NUM_THREADS": "1",
+}
+os.environ.update(NUMERIC_THREAD_LIMITS)
+
+import gymnasium as gym
 import numpy as np
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
@@ -42,6 +55,37 @@ from train_whisker_only_ppo import resolve_seed
 
 
 ETA_WINDOW_ROLLOUTS = 5
+
+
+class CompactTrainingInfoWrapper(gym.Wrapper):
+    """仅保留训练回调和成功率评估所需的 info，降低进程通信量。"""
+
+    INFO_KEYS = (
+        "odor_hit",
+        "blank_age_steps",
+        "move_action",
+        "body_moved",
+        "whisker_moved",
+        "reacquisition_event",
+        "whisker_only_reacquisition",
+        "body_assisted_reacquisition",
+        "passive_reacquisition",
+        "whisker_reacquisition_rewarded",
+        "reward_components",
+        "is_success",
+    )
+
+    @classmethod
+    def _compact(cls, info: dict[str, Any]) -> dict[str, Any]:
+        return {key: info[key] for key in cls.INFO_KEYS if key in info}
+
+    def reset(self, **kwargs):
+        obs, info = self.env.reset(**kwargs)
+        return obs, self._compact(info)
+
+    def step(self, action):
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        return obs, reward, terminated, truncated, self._compact(info)
 
 
 class RewardComponentsTensorboardCallback(BaseCallback):
@@ -383,12 +427,12 @@ def parse_args() -> argparse.Namespace:
         help="默认使用 mobile_whisker_<encoder>_ppo。",
     )
     parser.add_argument("--log-interval", type=int, default=1)
-    parser.add_argument("--eval-freq", type=int, default=2_000)
-    parser.add_argument("--eval-episodes", type=int, default=10)
+    parser.add_argument("--eval-freq", type=int, default=100_000)
+    parser.add_argument("--eval-episodes", type=int, default=50)
     parser.add_argument(
         "--checkpoint-freq",
         type=int,
-        default=10_000,
+        default=100_000,
         help="每隔多少个全局环境步保存一次 checkpoint。",
     )
     parser.add_argument(
@@ -539,9 +583,22 @@ def build_policy_kwargs(args: argparse.Namespace, base_observation_dim: int) -> 
     return policy_kwargs
 
 
-def make_env(config, seed, history_length, monitor_dir=None, monitor_name="monitor") -> Monitor:
-    env = MobileWhiskerPuffEnv(config)
+def make_env(
+    config,
+    seed,
+    history_length,
+    monitor_dir=None,
+    monitor_name="monitor",
+    *,
+    optimize_training=False,
+) -> Monitor:
+    env_config = dict(config)
+    if optimize_training:
+        env_config["record_trajectory"] = False
+    env = MobileWhiskerPuffEnv(env_config)
     env = ObservationHistoryWrapper(env, history_length=history_length)
+    if optimize_training:
+        env = CompactTrainingInfoWrapper(env)
     env.reset(seed=seed)
     monitor_file = None
     if monitor_dir is not None:
@@ -570,6 +627,7 @@ def train(args: argparse.Namespace) -> PPO:
                     args.history_length,
                     args.log_dir / "train",
                     f"monitor_{rank}",
+                    optimize_training=True,
                 )
             )
             for rank in range(args.n_envs)
@@ -591,6 +649,7 @@ def train(args: argparse.Namespace) -> PPO:
                 args.seed + 100_000,
                 args.history_length,
                 args.log_dir / "eval",
+                optimize_training=True,
             )
         ],
         args.vec_env_backend,
@@ -769,8 +828,16 @@ def save_run_metadata(
             "eta_unit": "minutes",
         },
         "resume_from": portable_path(args.resume_from),
+        "eval_freq": args.eval_freq,
+        "eval_episodes": args.eval_episodes,
         "checkpoint_freq": args.checkpoint_freq,
         "checkpoint_dir": portable_path(args.checkpoint_dir),
+        "runtime_optimizations": {
+            "numeric_thread_limits": NUMERIC_THREAD_LIMITS,
+            "record_training_trajectory": False,
+            "compact_info_fields": list(CompactTrainingInfoWrapper.INFO_KEYS),
+            "paired_dynamic_plume_sampling": True,
+        },
         "ppo": {
             "learning_rate": float(model.lr_schedule(1.0)),
             "n_steps": int(model.n_steps),

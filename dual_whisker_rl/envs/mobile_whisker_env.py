@@ -21,6 +21,7 @@ from gymnasium import spaces
 
 from dual_whisker_rl.envs.robot_model import DifferentialDriveRobot
 from dual_whisker_rl.envs.robot_model import RobotState
+from dual_whisker_rl.envs.whisker_only_env import DynamicPuffPlume
 from dual_whisker_rl.envs.whisker_only_env import WhiskerOnlyPuffEnv
 from dual_whisker_rl.envs.world_bounds import resolve_world_bounds, world_bounds_config
 
@@ -710,8 +711,14 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
             > self.whisker_motion_epsilon_rad
         )
 
-        raw_left = self.plume.concentration(*whisker_state.left_point)
-        raw_right = self.plume.concentration(*whisker_state.right_point)
+        if isinstance(self.plume, DynamicPuffPlume):
+            raw_left, raw_right = self.plume.concentration_pair(
+                whisker_state.left_point,
+                whisker_state.right_point,
+            )
+        else:
+            raw_left = self.plume.concentration(*whisker_state.left_point)
+            raw_right = self.plume.concentration(*whisker_state.right_point)
         left = self.left_sensor.update(raw_left)
         right = self.right_sensor.update(raw_right)
 
@@ -747,32 +754,33 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         reward = float(sum(reward_components.values()))
 
         self.step_count += 1
-        self.trajectory.append(
-            {
-                "x": self.robot_state.x,
-                "y": self.robot_state.y,
-                "heading": self.robot_state.heading,
-                "left": left,
-                "right": right,
-                "raw_left": raw_left,
-                "raw_right": raw_right,
-                "left_angle": whisker_state.left_angle,
-                "right_angle": whisker_state.right_angle,
-                "left_angle_delta": left_angle_delta,
-                "right_angle_delta": right_angle_delta,
-                "whisker_moved": whisker_moved,
-                "left_sector": int(left_sector),
-                "right_sector": int(right_sector),
-                "move_action": DifferentialDriveRobot.ACTIONS[move],
-                "distance_to_source": distance,
-                "best_concentration": self.best_concentration,
-                "position_displacement": position_displacement,
-                "stagnation_steps": self.stagnation_steps,
-                **odor_search_info,
-                "reward": reward,
-                "reward_components": reward_components,
-            }
-        )
+        if self.record_trajectory:
+            self.trajectory.append(
+                {
+                    "x": self.robot_state.x,
+                    "y": self.robot_state.y,
+                    "heading": self.robot_state.heading,
+                    "left": left,
+                    "right": right,
+                    "raw_left": raw_left,
+                    "raw_right": raw_right,
+                    "left_angle": whisker_state.left_angle,
+                    "right_angle": whisker_state.right_angle,
+                    "left_angle_delta": left_angle_delta,
+                    "right_angle_delta": right_angle_delta,
+                    "whisker_moved": whisker_moved,
+                    "left_sector": int(left_sector),
+                    "right_sector": int(right_sector),
+                    "move_action": DifferentialDriveRobot.ACTIONS[move],
+                    "distance_to_source": distance,
+                    "best_concentration": self.best_concentration,
+                    "position_displacement": position_displacement,
+                    "stagnation_steps": self.stagnation_steps,
+                    **odor_search_info,
+                    "reward": reward,
+                    "reward_components": reward_components,
+                }
+            )
 
         self.prev_distance = distance
         self.prev_left = left

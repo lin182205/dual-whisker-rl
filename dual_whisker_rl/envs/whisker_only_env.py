@@ -373,6 +373,10 @@ class DynamicPuffPlume:
                     "sigma_downwind": float(self.puff_init_sigma_downwind * sigma_scale),
                     "sigma_crosswind": float(self.puff_init_sigma_crosswind * sigma_scale),
                     "direction": float(self.wind_direction),
+                    # puff 释放后方向不再变化；缓存三角函数，避免每个环境步、
+                    # 每个采样点重复计算。
+                    "cos_direction": wind_x,
+                    "sin_direction": wind_y,
                     "age": 0.0,
                     # per-puff OU 湍流速度扰动（在该 puff 局部 downwind/crosswind 系下，m/s）
                     "vd": 0.0,
@@ -388,18 +392,18 @@ class DynamicPuffPlume:
         wind_y = self.wind_speed * math.sin(self.wind_direction)
         active_puffs = []
         relax = self.turbulence_vel_relax
+        decay_factor = math.exp(-self.decay_rate * self.dt)
         for puff in self.puffs:
-            direction = float(puff.get("direction", self.wind_direction))
-            downwind_x = math.cos(direction)
-            downwind_y = math.sin(direction)
+            downwind_x = puff["cos_direction"]
+            downwind_y = puff["sin_direction"]
             crosswind_x = -downwind_y
             crosswind_y = downwind_x
             # OU 速度扰动：时间相关（AR(1)），而非每步独立白噪声 →
             # 同一 filament 的扰动在时间上连贯，形成蜿蜒的相干气缕。
-            puff["vd"] = relax * float(puff.get("vd", 0.0)) + (
+            puff["vd"] = relax * puff["vd"] + (
                 self.turbulence_vel_std_downwind * float(self.rng.normal())
             )
-            puff["vc"] = relax * float(puff.get("vc", 0.0)) + (
+            puff["vc"] = relax * puff["vc"] + (
                 self.turbulence_vel_std_crosswind * float(self.rng.normal())
             )
             puff["age"] += self.dt
@@ -415,7 +419,7 @@ class DynamicPuffPlume:
             ) * self.dt
             puff["sigma_downwind"] += self.diffusion_downwind_rate * self.dt
             puff["sigma_crosswind"] += self.diffusion_crosswind_rate * self.dt
-            puff["mass"] *= math.exp(-self.decay_rate * self.dt)
+            puff["mass"] *= decay_factor
             if puff["age"] > self.max_puff_age or puff["mass"] < self.min_puff_mass:
                 continue
             if (
@@ -440,11 +444,12 @@ class DynamicPuffPlume:
         for puff in self.puffs:
             dx = x - puff["x"]
             dy = y - puff["y"]
-            direction = float(puff.get("direction", self.wind_direction))
-            downwind = dx * math.cos(direction) + dy * math.sin(direction)
-            crosswind = -dx * math.sin(direction) + dy * math.cos(direction)
-            sigma_downwind = float(puff.get("sigma_downwind", puff.get("sigma", 0.08)))
-            sigma_crosswind = float(puff.get("sigma_crosswind", puff.get("sigma", 0.04)))
+            cos_direction = puff["cos_direction"]
+            sin_direction = puff["sin_direction"]
+            downwind = dx * cos_direction + dy * sin_direction
+            crosswind = -dx * sin_direction + dy * cos_direction
+            sigma_downwind = puff["sigma_downwind"]
+            sigma_crosswind = puff["sigma_crosswind"]
             total += puff["mass"] * math.exp(
                 -(
                     downwind * downwind / (2.0 * sigma_downwind * sigma_downwind)
@@ -462,6 +467,57 @@ class DynamicPuffPlume:
             concentration += float(self.noise_rng.normal(0.0, self.gas_noise_std))
         return max(0.0, concentration)
 
+    def concentration_pair(
+        self,
+        left_point: tuple[float, float],
+        right_point: tuple[float, float],
+        add_noise: bool = True,
+    ) -> tuple[float, float]:
+        """一次遍历 puff，计算左右两个触须点的浓度。"""
+        left_x, left_y = left_point
+        right_x, right_y = right_point
+        left_total = float(self._source_core_concentration(left_x, left_y))
+        right_total = float(self._source_core_concentration(right_x, right_y))
+        for puff in self.puffs:
+            cos_direction = puff["cos_direction"]
+            sin_direction = puff["sin_direction"]
+            sigma_downwind = puff["sigma_downwind"]
+            sigma_crosswind = puff["sigma_crosswind"]
+            denominator = 2.0 * math.pi * sigma_downwind * sigma_crosswind
+
+            left_dx = left_x - puff["x"]
+            left_dy = left_y - puff["y"]
+            left_downwind = left_dx * cos_direction + left_dy * sin_direction
+            left_crosswind = -left_dx * sin_direction + left_dy * cos_direction
+            left_total += puff["mass"] * math.exp(
+                -(
+                    left_downwind * left_downwind
+                    / (2.0 * sigma_downwind * sigma_downwind)
+                    + left_crosswind * left_crosswind
+                    / (2.0 * sigma_crosswind * sigma_crosswind)
+                )
+            ) / denominator
+
+            right_dx = right_x - puff["x"]
+            right_dy = right_y - puff["y"]
+            right_downwind = right_dx * cos_direction + right_dy * sin_direction
+            right_crosswind = -right_dx * sin_direction + right_dy * cos_direction
+            right_total += puff["mass"] * math.exp(
+                -(
+                    right_downwind * right_downwind
+                    / (2.0 * sigma_downwind * sigma_downwind)
+                    + right_crosswind * right_crosswind
+                    / (2.0 * sigma_crosswind * sigma_crosswind)
+                )
+            ) / denominator
+
+        left_total += self.gas_background
+        right_total += self.gas_background
+        if add_noise:
+            left_total += float(self.noise_rng.normal(0.0, self.gas_noise_std))
+            right_total += float(self.noise_rng.normal(0.0, self.gas_noise_std))
+        return max(0.0, left_total), max(0.0, right_total)
+
     def grid(
         self,
         resolution: int = 80,
@@ -478,11 +534,12 @@ class DynamicPuffPlume:
         for puff in self.puffs:
             dx = grid_x - puff["x"]
             dy = grid_y - puff["y"]
-            direction = float(puff.get("direction", self.wind_direction))
-            downwind = dx * math.cos(direction) + dy * math.sin(direction)
-            crosswind = -dx * math.sin(direction) + dy * math.cos(direction)
-            sigma_downwind = float(puff.get("sigma_downwind", puff.get("sigma", 0.08)))
-            sigma_crosswind = float(puff.get("sigma_crosswind", puff.get("sigma", 0.04)))
+            cos_direction = puff["cos_direction"]
+            sin_direction = puff["sin_direction"]
+            downwind = dx * cos_direction + dy * sin_direction
+            crosswind = -dx * sin_direction + dy * cos_direction
+            sigma_downwind = puff["sigma_downwind"]
+            sigma_crosswind = puff["sigma_crosswind"]
             concentration += (
                 puff["mass"]
                 * np.exp(
@@ -585,6 +642,7 @@ class WhiskerOnlyPuffEnv(gym.Env):
         cfg = config or {}
         seed = int(cfg.get("seed", 0))
         self.max_steps = int(cfg.get("max_steps", 300))
+        self.record_trajectory = bool(cfg.get("record_trajectory", True))
         # 奖励阈值/系数已按改造后羽流的浓度量级重标定（传感器读数典型 0.3~1.3）。
         # hit_threshold 仍保持较低，用于观测 hit-rate 特征和初始位姿采样；
         # strong_threshold 才是“强响应” bonus 的门限，按新量级设置。
@@ -841,8 +899,14 @@ class WhiskerOnlyPuffEnv(gym.Env):
         )
 
         # raw_* 是触须采样点处的瞬时气味浓度；left/right 是慢响应传感器读数。
-        raw_left = self.plume.concentration(*whisker_state.left_point)
-        raw_right = self.plume.concentration(*whisker_state.right_point)
+        if isinstance(self.plume, DynamicPuffPlume):
+            raw_left, raw_right = self.plume.concentration_pair(
+                whisker_state.left_point,
+                whisker_state.right_point,
+            )
+        else:
+            raw_left = self.plume.concentration(*whisker_state.left_point)
+            raw_right = self.plume.concentration(*whisker_state.right_point)
         left = self.left_sensor.update(raw_left)
         right = self.right_sensor.update(raw_right)
 
@@ -855,22 +919,23 @@ class WhiskerOnlyPuffEnv(gym.Env):
 
         reward = self.get_reward(left, right)
         self.step_count += 1
-        self.trajectory.append(
-            {
-                "x": self.robot_state.x,
-                "y": self.robot_state.y,
-                "heading": self.robot_state.heading,
-                "left": left,
-                "right": right,
-                "raw_left": raw_left,
-                "raw_right": raw_right,
-                "left_angle": whisker_state.left_angle,
-                "right_angle": whisker_state.right_angle,
-                "left_sector": int(left_sector),
-                "right_sector": int(right_sector),
-                "reward": reward,
-            }
-        )
+        if self.record_trajectory:
+            self.trajectory.append(
+                {
+                    "x": self.robot_state.x,
+                    "y": self.robot_state.y,
+                    "heading": self.robot_state.heading,
+                    "left": left,
+                    "right": right,
+                    "raw_left": raw_left,
+                    "raw_right": raw_right,
+                    "left_angle": whisker_state.left_angle,
+                    "right_angle": whisker_state.right_angle,
+                    "left_sector": int(left_sector),
+                    "right_sector": int(right_sector),
+                    "reward": reward,
+                }
+            )
 
         self.prev_left = left
         self.prev_right = right
