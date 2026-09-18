@@ -328,7 +328,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--timesteps", type=int, default=8_000_000)
     parser.add_argument("--seed", type=int, default=None)
-    parser.add_argument("--n-envs", type=int, default=8)
+    parser.add_argument("--n-envs", type=int, default=12)
     parser.add_argument(
         "--vec-env-backend",
         choices=("auto", "dummy", "subproc"),

@@ -55,8 +55,8 @@ Training seeds are random by default for better policy diversity. Pass `--seed 4
 独立 PPO 训练入口默认使用 `--vec-env-backend auto`：当 `--n-envs` 大于 1 时，
 每个环境场景运行在独立 Python 进程中；单环境自动回退到同进程。调试时可显式传
 `--vec-env-backend dummy`，需要强制子进程时传 `--vec-env-backend subproc`。
-移动 GRU/PPO 独立训练默认执行 8,000,000 步；每个完整 PPO 轮次开始和结束时会打印
-时间、该轮耗时、最近 5 轮平均耗时和预计剩余分钟数。
+移动 GRU/PPO 独立训练默认使用 12 个并行环境执行 8,000,000 步；每个完整 PPO
+轮次开始和结束时会打印时间、该轮耗时、最近 5 轮平均耗时和预计剩余分钟数。
 
 ## Cloud training (Linux)
 

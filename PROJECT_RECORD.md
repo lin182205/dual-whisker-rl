@@ -1694,3 +1694,15 @@ smoke 正确输出两次开始和结束记录，最后一轮在训练结束时�
 续训 64 步，日志目标正确显示为 `192/192`；默认参数解析为 8,000,000，metadata
 记录 rollout size、实际 PPO epoch 数、5 轮 ETA 窗口和分钟单位。`git diff --check`
 通过。这些检查验证计时和恢复口径，不代表 800 万步正式训练结果。
+
+## 39. Mobile 独立训练默认使用 12 个环境
+
+面向 14 核训练服务器，`train_mobile_whisker_ppo.py` 的默认 `n_envs` 从 8 调整为 12，
+为 PPO 主进程、单 worker 周期评估和系统进程保留计算余量。默认 `n_steps=512` 时每轮
+采集 6,144 个环境步，能被默认 `batch_size=256` 整除。E4 formal 继续使用其独立配置的
+8 个 worker，不随本次独立训练入口调整。
+
+验证：默认参数解析得到 `timesteps=8,000,000`、`n_envs=12`、rollout size
+`6,144`，批大小整除检查通过；Windows `spawn` 下以 12 个训练 worker 完成一轮
+192-step smoke，终端记录 `vec_env_backend=subproc`，语法检查和
+`git diff --check` 均通过。
