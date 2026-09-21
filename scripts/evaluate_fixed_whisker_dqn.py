@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from dual_whisker_rl.envs import FixedWhiskerPlumeEnv
+from dual_whisker_rl.paths import portable_path
 from dual_whisker_rl.paths import resolve_path_args
 from dual_whisker_rl.evaluation import evaluate_policy
 from dual_whisker_rl.plotting import draw_odor_field
@@ -97,6 +98,8 @@ def main() -> None:
         deterministic=True,
     )
 
+    metrics["environment_config_path"] = portable_path(args.config)
+    metrics["environment_config"] = config
     args.metrics_path.parent.mkdir(parents=True, exist_ok=True)
     with args.metrics_path.open("w", encoding="utf-8") as f:
         json.dump(metrics, f, indent=2)

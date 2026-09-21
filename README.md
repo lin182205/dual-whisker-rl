@@ -118,6 +118,20 @@ Linux/macOS 家目录、挂载目录和 UNC 路径字面量：
 建议通过 Git 克隆或归档源码上传。若直接复制工作区，应排除 `.venv`、`results`、
 STM32 `build`、`.git` 和本地 IDE 设置目录；这些环境或生成产物可能包含本机路径，但不属于训练源码。
 
+## 独立仿真入口的场景配置
+
+独立训练与评估通过同一份 YAML 定义环境场景：静态高斯场的 Joint PPO / Fixed-whisker DQN 使用
+configs/default.yaml（10×10）；固定机器人触须实验使用 configs/whisker_only.yaml
+（1×1）；移动动态 puff 实验使用 configs/mobile_whisker.yaml（5×5，边界 [-2.5, 2.5]）。
+对应的训练、评估、固定场景复评和 Mobile 可视化入口默认读取各自配置；--config
+可显式选择另一份配置，命令行场景参数仅在显式传入时覆盖 YAML。触须采样对比的
+--steps 默认取配置中的 max_steps。
+
+Mobile 固定场景库默认按有效配置摘要、基础种子和局数命名；复用时也会核对这些参数。
+评估 JSON 保存有效环境配置，便于核对训练 run_metadata.json。已有模型仍保留训练时的场景：
+旧 Mobile checkpoint 若记录空配置，代表当时环境默认的 2×2；评估旧模型时应显式核对
+metadata，并根据实验目的传入对应的 --config。E4 使用自己的 smoke/formal 配置和固定场景库。
+
 ## E4 仿真对比实验
 
 统一入口 `scripts/run_e4_experiments.py` 管理 M/B0–B6 的场景、训练、评估、恢复和汇总。默认 smoke 只用于连通性检查；正式结果使用固定验证/测试场景和 5 个训练种子。场地边界由配置文件的 `world_bounds: [-2.5, 2.5]` 控制，E4 smoke/formal 当前均使用该范围；旧 `world_half` 仍兼容。动态 puff 会按场地半宽和最小风速自动调整寿命，羽流网格、puff 裁剪和越界判断共享同一边界。训练环境后端由 `vec_env_backend` 控制：smoke 默认 `dummy` 便于调试，formal 默认 `subproc`，在 Windows 上以 `spawn` 启动 8 个独立环境进程；可用 `--vec-env-backend` 临时覆盖。训练期间每完成一个“环境 rollout + 5 个 PPO epoch 更新”周期，终端会根据最近 5 个周期的墙钟时间打印预计剩余分钟数。

@@ -43,6 +43,7 @@ from dual_whisker_rl.e4_experiments import scenario_hash
 from dual_whisker_rl.e4_experiments import sha256_file
 from dual_whisker_rl.envs import MobileWhiskerPuffEnv
 from dual_whisker_rl.paths import portable_path
+from dual_whisker_rl.paths import project_path
 from dual_whisker_rl.paths import resolve_path_args
 from train_whisker_only_ppo import load_config
 
@@ -59,7 +60,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("results/models/mobile_whisker_gru_ppo.zip"),
     )
-    parser.add_argument("--config", type=Path, default=None)
+    parser.add_argument("--config", type=Path, default=Path("configs/mobile_whisker.yaml"))
     parser.add_argument(
         "--scenario-mode",
         choices=("randomized", "fixed"),
@@ -71,7 +72,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--scenario-file",
         type=Path,
-        default=Path("results/evaluation/mobile_fixed_100_scenarios.json"),
+        default=None,
+        help="默认按有效环境配置、种子和局数生成场景库路径。",
     )
     parser.add_argument(
         "--workers",
@@ -108,11 +110,6 @@ def parse_args() -> argparse.Namespace:
     if args.workers < 1:
         parser.error("--workers must be at least 1")
     args.workers = min(args.workers, args.episodes)
-    if args.json_path is None:
-        args.json_path = (
-            Path("results/evaluation")
-            / f"{args.model_path.stem}_fixed_{args.episodes}.json"
-        )
     return resolve_path_args(
         args,
         "model_path",
@@ -210,6 +207,8 @@ def prepare_scenario_bank(
                 f"场景库包含 {len(scenarios)} 局，但本次要求 {count} 局；"
                 "请使用一致的 --episodes，或显式传 --regenerate-scenarios。"
             )
+        if payload.get("base_seed") != int(base_seed):
+            raise ValueError("场景库的基础随机种子与本次 --scenario-seed 不一致")
         if payload.get("config_hash") != config_hash:
             raise ValueError(
                 "场景库的环境配置与本次 --config 不一致；为保证 checkpoint "
@@ -346,6 +345,17 @@ def main() -> None:
         config["scenario_mode"] = args.scenario_mode
     if args.domain_randomization:
         config["domain_randomization"] = True
+    config_id = _config_hash(config)[:12]
+    if args.scenario_file is None:
+        args.scenario_file = project_path(
+            Path("results/evaluation")
+            / f"mobile_fixed_{config_id}_seed{args.scenario_seed}_{args.episodes}.json"
+        )
+    if args.json_path is None:
+        args.json_path = project_path(
+            Path("results/evaluation")
+            / f"{args.model_path.stem}_fixed_{config_id}_{args.episodes}.json"
+        )
 
     scenarios, bank = prepare_scenario_bank(
         args.scenario_file,
@@ -388,6 +398,8 @@ def main() -> None:
     result = {
         "version": SCENARIO_BANK_VERSION,
         "model_path": portable_path(args.model_path),
+        "environment_config_path": portable_path(args.config),
+        "environment_config": config,
         "model_sha256": sha256_file(args.model_path),
         "scenario_file": portable_path(args.scenario_file),
         "scenario_hash": bank["scenario_hash"],

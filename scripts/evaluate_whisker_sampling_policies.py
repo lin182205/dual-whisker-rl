@@ -32,6 +32,7 @@ from types import SimpleNamespace
 
 import matplotlib.pyplot as plt
 import numpy as np
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -72,12 +73,13 @@ HEADLINE_METRICS = [
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", type=Path, default=Path("configs/whisker_only.yaml"))
     parser.add_argument("--model-path", type=Path, default=Path("results/models/whisker_only_ppo.zip"))
     parser.add_argument("--policies", type=str, default=DEFAULT_POLICIES)
     parser.add_argument("--episodes", type=int, default=20, help="评估回合数（= plume seed 数）。")
-    parser.add_argument("--steps", type=int, default=300, help="每回合步数。")
+    parser.add_argument("--steps", type=int, default=None, help="每回合步数；默认读取配置中的 max_steps。")
     parser.add_argument("--base-seed", type=int, default=10_000)
-    parser.add_argument("--init-pose-mode", type=str, default="plume_edge")
+    parser.add_argument("--init-pose-mode", type=str, default=None, help="覆盖配置中的初始位姿模式。")
     parser.add_argument("--domain-randomization", action="store_true")
     parser.add_argument("--dwell-steps", type=int, default=2, help="periodic 每扇区停留步数。")
     parser.add_argument("--stochastic", action="store_true", help="PPO 采样动作（默认 deterministic）。")
@@ -86,7 +88,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--diff-threshold", type=float, default=0.2)
     parser.add_argument("--trend-threshold", type=float, default=0.05)
     parser.add_argument("--output-dir", type=Path, default=Path("results/figures/whisker_policy_eval"))
-    return resolve_path_args(parser.parse_args(), "model_path", "output_dir")
+    return resolve_path_args(parser.parse_args(), "config", "model_path", "output_dir")
 
 
 def resolve_policy(name: str) -> dict:
@@ -104,15 +106,11 @@ def resolve_policy(name: str) -> dict:
     raise ValueError(f"未知策略: {name}")
 
 
-def build_env(args: argparse.Namespace) -> WhiskerOnlyPuffEnv:
-    return WhiskerOnlyPuffEnv(
-        {
-            "observation_mode": "hardware",  # 指标依赖 hardware 观测槽
-            "init_pose_mode": args.init_pose_mode,
-            "domain_randomization": args.domain_randomization,
-            "max_steps": args.steps,
-        }
-    )
+def build_env(config: dict) -> WhiskerOnlyPuffEnv:
+    """评估环境与训练共用配置，指标要求 hardware 观测。"""
+    if config.get("observation_mode", "hardware") != "hardware":
+        raise ValueError("触须采样指标要求 observation_mode=hardware")
+    return WhiskerOnlyPuffEnv(config)
 
 
 def open_loop_sequence(spec: dict, steps: int, dwell_steps: int, seed: int, sector_count: int) -> list[tuple[int, int]]:
@@ -255,6 +253,19 @@ def save_barchart(path: Path, results: dict[str, dict]) -> None:
 
 def main() -> None:
     args = parse_args()
+    with args.config.open("r", encoding="utf-8") as file:
+        config = yaml.safe_load(file) or {}
+    if args.init_pose_mode is not None:
+        config["init_pose_mode"] = args.init_pose_mode
+    if args.domain_randomization:
+        config["domain_randomization"] = True
+    if args.steps is not None:
+        config["max_steps"] = args.steps
+    args.steps = int(config.get("max_steps", 300))
+    args.init_pose_mode = str(config.get("init_pose_mode", "plume_edge"))
+    args.domain_randomization = bool(config.get("domain_randomization", False))
+    if args.episodes < 1 or args.steps < 1:
+        raise ValueError("--episodes 和 max_steps 必须为正数")
     policy_names = [p.strip() for p in args.policies.split(",") if p.strip()]
     specs = [resolve_policy(n) for n in policy_names]
     seeds = [args.base_seed + i for i in range(args.episodes)]
@@ -273,7 +284,7 @@ def main() -> None:
         from stable_baselines3 import PPO
 
         model = PPO.load(str(args.model_path))
-        probe = build_env(args)
+        probe = build_env(config)
         base_dim = int(probe.observation_space.shape[0])
         probe.close()
         stacked_dim = int(model.observation_space.shape[0])
@@ -282,7 +293,7 @@ def main() -> None:
         history_length = stacked_dim // base_dim
         print(f"loaded ppo: history_length={history_length} deterministic={not args.stochastic}")
 
-    env = build_env(args)
+    env = build_env(config)
     results: dict[str, dict] = {}
     for spec in specs:
         per_episode = []
@@ -309,6 +320,8 @@ def main() -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     payload = {
         "config": {
+            "environment_config_path": portable_path(args.config),
+            "environment_config": config,
             "policies": policy_names,
             "episodes": args.episodes,
             "steps": args.steps,

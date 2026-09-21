@@ -1,0 +1,5 @@
+world_bounds: [-0.5, 0.5]
+init_pose_mode: plume_edge
+observation_mode: hardware
+max_steps: 300
+domain_randomization: false

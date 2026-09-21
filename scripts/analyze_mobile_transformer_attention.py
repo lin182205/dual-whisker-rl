@@ -86,7 +86,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("results/models/mobile_whisker_transformer_ppo.zip"),
     )
-    parser.add_argument("--config", type=Path, default=None)
+    parser.add_argument("--config", type=Path, default=Path("configs/mobile_whisker.yaml"))
     parser.add_argument("--seed", type=int, default=10_000)
     parser.add_argument("--steps", type=int, default=200)
     parser.add_argument("--output-dir", type=Path, default=None)

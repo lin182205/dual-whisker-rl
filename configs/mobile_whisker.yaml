@@ -1,0 +1,6 @@
+plume_model: dynamic
+scenario_mode: randomized
+world_bounds: [-2.5, 2.5]
+wind_speed_range: [0.12, 0.20]
+max_steps: 400
+domain_randomization: false

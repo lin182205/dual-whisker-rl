@@ -81,7 +81,7 @@ class ObservationHistoryWrapper(gym.Wrapper):
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=Path, default=None)
+    parser.add_argument("--config", type=Path, default=Path("configs/whisker_only.yaml"))
     parser.add_argument("--timesteps", type=int, default=20_0000)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--n-envs", type=int, default=8)

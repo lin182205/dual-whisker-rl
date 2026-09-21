@@ -210,10 +210,12 @@ def base_config(args: argparse.Namespace) -> dict[str, Any]:
     )
     cfg["world_bounds"] = world_bounds_config(world_min, world_max)
     cfg.setdefault("domain_randomization", False)
-    # E4 统一使用现有动态 puff 的慢风分层，禁止纸面羽流配置混入。
+    # E4 默认使用动态 puff 的慢风分层；配置中的风速范围优先。
     if str(cfg.get("plume_model")) != "dynamic":
         raise ValueError("E4 requires plume_model=dynamic")
-    cfg["wind_speed_range"] = (0.12, 0.20)
+    cfg["wind_speed_range"] = tuple(cfg.get("wind_speed_range", (0.12, 0.20)))
+    if int(cfg.get("max_steps", 400)) != args.max_steps:
+        cfg["max_steps"] = args.max_steps
     # 将大场羽流的尺度相关默认显式写回 manifest，保证运行可追溯。
     plume_overrides = dict(cfg.get("plume_overrides") or {})
     wind_min = max(float(cfg["wind_speed_range"][0]), 1e-3)

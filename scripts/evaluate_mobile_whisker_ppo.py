@@ -23,6 +23,7 @@ if str(ROOT) not in sys.path:
 from dual_whisker_rl.agents import TransformerHistoryExtractor
 from dual_whisker_rl.envs import MobileWhiskerPuffEnv
 from dual_whisker_rl.evaluation import evaluate_policy
+from dual_whisker_rl.paths import portable_path
 from dual_whisker_rl.paths import resolve_path_args
 from train_whisker_only_ppo import ObservationHistoryWrapper
 from train_whisker_only_ppo import load_config
@@ -36,9 +37,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model-path",
         type=Path,
-        default=Path("results/models/mobile_whisker_gru_ppo_9300000_steps.zip"),
+        default=Path("results/models/mobile_whisker_gru_ppo_18848976_steps.zip"),
     )
-    parser.add_argument("--config", type=Path, default=None)
+    parser.add_argument("--config", type=Path, default=Path("configs/mobile_whisker.yaml"))
     parser.add_argument(
         "--scenario-mode",
         choices=("randomized", "fixed"),
@@ -343,6 +344,8 @@ def main() -> None:
         deterministic=True,
     )
     metrics["scenario"] = scenario
+    metrics["environment_config_path"] = portable_path(args.config)
+    metrics["environment_config"] = config
     metrics["observation"] = observation_config
     metrics["reacquisition"] = reacquisition_config
 

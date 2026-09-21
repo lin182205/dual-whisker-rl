@@ -504,7 +504,7 @@ class TrainingCycleEtaCallback(BaseCallback):
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=Path, default=None)
+    parser.add_argument("--config", type=Path, default=Path("configs/mobile_whisker.yaml"))
     parser.add_argument(
         "--scenario-mode",
         choices=("randomized", "fixed"),
