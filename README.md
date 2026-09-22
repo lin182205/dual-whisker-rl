@@ -58,6 +58,16 @@ is a separate multi-process command after checkpoints are available.
 
 Training seeds are random by default for better policy diversity. Pass `--seed 42` when you need a reproducible run. Each training run writes `run_metadata.json` under its log directory with the actual seed and config.
 
+Mobile PPO 独立训练可用 `--experiment-name` 指定实验关键词（旧参数 `--run-name` 同义）。
+默认关键词为 `mobile_whisker_<encoder>_ppo`。每次启动自动分配下一个编号，例如
+`odor_search_1`、`odor_search_2`；checkpoint、最终模型、日志与 TensorBoard 子目录
+都使用该编号。从 `--resume-from` 续训也会分配新编号，并保留来源 checkpoint。
+显式传入的 `--model-path` 或 `--log-dir` 若已存在，脚本会拒绝覆盖。
+
+```powershell
+python scripts\train_mobile_whisker_ppo.py --experiment-name odor_search
+```
+
 独立 PPO 训练入口默认使用 `--vec-env-backend auto`：当 `--n-envs` 大于 1 时，
 每个环境场景运行在独立 Python 进程中；单环境自动回退到同进程。调试时可显式传
 `--vec-env-backend dummy`，需要强制子进程时传 `--vec-env-backend subproc`。

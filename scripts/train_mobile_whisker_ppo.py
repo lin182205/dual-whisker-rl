@@ -14,6 +14,7 @@ import math
 import multiprocessing
 import os
 from pathlib import Path
+import re
 import sys
 import time
 from typing import Any
@@ -34,6 +35,7 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.callbacks import CallbackList
 from stable_baselines3.common.callbacks import CheckpointCallback
+from stable_baselines3.common.logger import configure
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.utils import set_random_seed
 
@@ -560,13 +562,14 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="默认按 temporal encoder 写入独立日志目录。",
     )
-    parser.add_argument("--tensorboard-dir", type=Path, default=Path("results/tensorboard"))
     parser.add_argument(
+        "--experiment-name",
         "--run-name",
         type=str,
         default=None,
-        help="默认使用 mobile_whisker_<encoder>_ppo。",
+        help="实验名称关键词；默认 mobile_whisker_<encoder>_ppo，每次新训练自动追加递增编号。",
     )
+    parser.add_argument("--tensorboard-dir", type=Path, default=Path("results/tensorboard"))
     parser.add_argument("--log-interval", type=int, default=1)
     parser.add_argument(
         "--eval-freq",
@@ -603,31 +606,70 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="开启羽流/传感器 episode 级域随机化，提高 sim-to-real 鲁棒性。",
     )
-    args = parser.parse_args()
-    resolve_output_paths(args)
-    return args
+    return parser.parse_args()
 
 
 def resolve_output_paths(args: argparse.Namespace) -> None:
-    """按编码器生成默认相对路径，再统一按仓库根目录解析。"""
-    experiment_name = f"mobile_whisker_{args.temporal_encoder}_ppo"
-    if args.model_path is None:
-        args.model_path = Path("results/models") / f"{experiment_name}.zip"
-    if args.log_dir is None:
-        args.log_dir = Path("results/logs") / experiment_name
-    if args.run_name is None:
+    """给新训练分配独立编号，并预留日志目录以避免并发启动时撞名。"""
+    if getattr(args, "_output_paths_resolved", False):
+        return
+    keyword = args.experiment_name or f"mobile_whisker_{args.temporal_encoder}_ppo"
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", keyword):
+        raise ValueError("--experiment-name 只能包含英文字母、数字、下划线和连字符")
+
+    logs_root = ROOT / "results" / "logs"
+    models_root = ROOT / "results" / "models"
+    tensorboard_root = args.tensorboard_dir
+    existing_numbers = []
+    for directory, suffix in (
+        (logs_root, ""),
+        (models_root, ".zip"),
+        (tensorboard_root, ""),
+    ):
+        if not directory.is_dir():
+            continue
+        pattern = re.compile(rf"{re.escape(keyword)}_(\d+){re.escape(suffix)}")
+        for child in directory.iterdir():
+            match = pattern.fullmatch(child.name)
+            if match:
+                existing_numbers.append(int(match.group(1)))
+
+    index = max(existing_numbers, default=0) + 1
+    while True:
+        experiment_name = f"{keyword}_{index}"
+        model_path = args.model_path or models_root / f"{experiment_name}.zip"
+        log_dir = args.log_dir or logs_root / experiment_name
+        checkpoint_dir = args.checkpoint_dir or log_dir / "checkpoints"
+        if model_path.exists():
+            if args.model_path is not None:
+                raise FileExistsError(f"模型文件已存在，拒绝覆盖: {model_path}")
+            index += 1
+            continue
+        if log_dir.exists():
+            if args.log_dir is not None:
+                raise FileExistsError(f"日志目录已存在，拒绝覆盖: {log_dir}")
+            index += 1
+            continue
+        if checkpoint_dir.is_dir() and any(
+            checkpoint_dir.glob(f"{experiment_name}_*_steps.zip")
+        ):
+            index += 1
+            continue
+        try:
+            log_dir.mkdir(parents=True, exist_ok=False)
+        except FileExistsError:
+            if args.log_dir is not None:
+                raise
+            index += 1
+            continue
+        args.experiment_keyword = keyword
+        args.experiment_name = experiment_name
+        args.model_path = model_path
+        args.log_dir = log_dir
+        args.checkpoint_dir = checkpoint_dir
         args.run_name = experiment_name
-    if args.checkpoint_dir is None:
-        args.checkpoint_dir = args.log_dir / "checkpoints"
-    resolve_path_args(
-        args,
-        "config",
-        "model_path",
-        "log_dir",
-        "tensorboard_dir",
-        "checkpoint_dir",
-        "resume_from",
-    )
+        args._output_paths_resolved = True
+        return
 
 
 def validate_args(args: argparse.Namespace) -> None:
@@ -755,9 +797,18 @@ def make_env(
 
 
 def train(args: argparse.Namespace) -> PPO:
-    resolve_output_paths(args)
+    resolve_path_args(
+        args,
+        "config",
+        "model_path",
+        "log_dir",
+        "tensorboard_dir",
+        "checkpoint_dir",
+        "resume_from",
+    )
     validate_args(args)
     config = load_config(args.config)
+    resolve_output_paths(args)
     if args.scenario_mode is not None:
         config["scenario_mode"] = args.scenario_mode
     if args.domain_randomization:
@@ -799,7 +850,7 @@ def train(args: argparse.Namespace) -> PPO:
     checkpoint_callback = TimedCheckpointCallback(
         save_freq=max(args.checkpoint_freq // args.n_envs, 1),
         save_path=str(args.checkpoint_dir),
-        name_prefix=args.run_name,
+        name_prefix=args.experiment_name,
         save_replay_buffer=False,
         save_vecnormalize=False,
         verbose=2,
@@ -883,11 +934,17 @@ def train(args: argparse.Namespace) -> PPO:
             eta_callback,
         ]
     )
+    # TensorBoard 目录直接使用实验编号，续训也另开目录，不追加到旧记录。
+    model.set_logger(
+        configure(
+            str(args.tensorboard_dir / args.experiment_name),
+            format_strings=["stdout", "tensorboard"],
+        )
+    )
     model.learn(
         total_timesteps=args.timesteps,
         progress_bar=False,
         callback=callbacks,
-        tb_log_name=args.run_name,
         log_interval=args.log_interval,
         reset_num_timesteps=args.resume_from is None,
     )
@@ -973,6 +1030,9 @@ def save_run_metadata(
         },
         "checkpoint_freq": args.checkpoint_freq,
         "checkpoint_dir": portable_path(args.checkpoint_dir),
+        "experiment_keyword": args.experiment_keyword,
+        "experiment_name": args.experiment_name,
+        "log_dir": portable_path(args.log_dir),
         "runtime_optimizations": {
             "numeric_thread_limits": NUMERIC_THREAD_LIMITS,
             "record_training_trajectory": False,
@@ -1060,6 +1120,9 @@ def save_run_metadata(
         ),
         "model_path": portable_path(args.model_path),
         "tensorboard_dir": portable_path(args.tensorboard_dir),
+        "tensorboard_run_dir": portable_path(
+            args.tensorboard_dir / args.experiment_name
+        ),
         "run_name": args.run_name,
         "config_path": portable_path(args.config),
         "config": config,
@@ -1075,6 +1138,7 @@ def main() -> None:
     model = train(args)
     print(f"saved_model={portable_path(args.model_path)}")
     print(f"checkpoint_dir={portable_path(args.checkpoint_dir)}")
+    print(f"experiment_name={args.experiment_name}")
     print(f"final_num_timesteps={model.num_timesteps}")
     print(f"seed={args.seed}")
     print(f"temporal_encoder={args.temporal_encoder}")

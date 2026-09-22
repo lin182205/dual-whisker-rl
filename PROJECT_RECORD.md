@@ -1811,3 +1811,21 @@ Mobile 默认训练/两种评估解析到同一配置文件，环境边界为 ±
 Mobile 奖励数值断言失败；这些测试直接构造未改动的环境类，其失败与本次入口配置修改
 无关，仍需在奖励逻辑工作中单独处理。已有 Mobile checkpoint 不会因默认配置更新而
 改变训练场景；旧模型的 metadata 必须与复评目标逐项核对。
+
+## 44. Mobile 独立训练实验名称编号与产物隔离
+
+独立 Mobile PPO 训练原来按 temporal encoder 固定 `experiment_name`，默认模型、日志目录和
+checkpoint 前缀会在同配置重复启动时重用；SB3 仅自动给 TensorBoard run 编号，导致旧
+checkpoint 和模型被新训练覆盖。现在 `--experiment-name` 接受可配置的实验关键词，
+`--run-name` 作为兼容别名。未指定时仍按 `mobile_whisker_<encoder>_ppo` 生成关键词。
+
+每次训练扫描已有日志、模型和 TensorBoard 名称，分配下一个 `<关键词>_<编号>`，
+并原子创建日志目录作为并发启动的占位。最终模型、checkpoint 前缀、日志目录和
+TensorBoard 子目录使用同一个编号；metadata 同时记录关键词、完整实验名及各产物路径。
+`--resume-from` 仍表示从指定 checkpoint 继续增加训练步数，但输出进入新的编号目录，
+避免覆盖来源。显式 `--model-path` 或 `--log-dir` 已存在时直接报错。
+
+验证：使用 `codex_naming_smoke`、MLP、单环境各运行两次 32 步训练，分别得到 `_1` 与
+`_2` 的 checkpoint、模型和 TensorBoard 目录；从 `_1` 的 32 步 checkpoint 再续训
+32 步，得到 `_3` 的 64 步 checkpoint 和模型。三次产物并存，脚本语法检查通过。
+这些 smoke 只验证输出隔离和续训连通性，不代表策略效果。
