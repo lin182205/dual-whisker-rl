@@ -1829,3 +1829,25 @@ TensorBoard 子目录使用同一个编号；metadata 同时记录关键词、�
 `_2` 的 checkpoint、模型和 TensorBoard 目录；从 `_1` 的 32 步 checkpoint 再续训
 32 步，得到 `_3` 的 64 步 checkpoint 和模型。三次产物并存，脚本语法检查通过。
 这些 smoke 只验证输出隔离和续训连通性，不代表策略效果。
+
+## 45. Mobile checkpoint 续训沿用原实验与 TensorBoard
+
+修正 §44 中“续训也分配新编号”的规则：只有从头训练才使用
+`--experiment-name` 关键词分配新编号。`--resume-from` 解析 checkpoint 文件名中的
+实验名和步数，默认继续使用来源 checkpoint 目录、原日志目录及模型路径；命令中即使
+传入 `--experiment-name`，续训仍保持来源实验名，并在终端说明该参数被忽略。
+模型继续使用 checkpoint 内的训练步数和优化器状态，`--timesteps` 仍为额外步数。
+
+新格式 metadata 中的 `tensorboard_run_dir` 精确指定原子目录，续训直接在该目录
+新增事件文件，因此同一实验曲线继续使用累计步数。旧 metadata 只有 TensorBoard
+根目录和 run 前缀时，按 SB3 旧续训规则选择前缀下编号最大的目录，并打印推断结果；
+若应使用另一条旧记录，可传 `--tensorboard-run-dir`。找不到原记录时明确报错。
+同目录若已有步数更高的 checkpoint，拒绝从较早 checkpoint 续训，避免覆盖后续文件。
+
+验证：`codex_resume_smoke_1` 从头训练 32 步后，用该 checkpoint 续训额外 32 步，
+即使传入另一 `--experiment-name`，仍产生 `codex_resume_smoke_1_64_steps.zip`，
+原 32 步 checkpoint 保留；TensorBoard 只有 `codex_resume_smoke_1` 一个目录，
+其中包含两次训练的事件文件，metadata 记录累计 64 步。对旧
+`mobile_whisker_gru_ppo` checkpoint 的只读解析选中现有 TensorBoard `_6` 目录；
+选择已有 64 步后仍存在的 32 步 checkpoint 被拒绝。随后再次从头训练得到 `_2`，
+确认续训不会占用新实验编号。语法检查和差异检查通过。

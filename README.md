@@ -58,11 +58,14 @@ is a separate multi-process command after checkpoints are available.
 
 Training seeds are random by default for better policy diversity. Pass `--seed 42` when you need a reproducible run. Each training run writes `run_metadata.json` under its log directory with the actual seed and config.
 
-Mobile PPO 独立训练可用 `--experiment-name` 指定实验关键词（旧参数 `--run-name` 同义）。
-默认关键词为 `mobile_whisker_<encoder>_ppo`。每次启动自动分配下一个编号，例如
+Mobile PPO 从头训练可用 `--experiment-name` 指定实验关键词（`--run-name` 同义）。
+默认关键词为 `mobile_whisker_<encoder>_ppo`。每次从头训练自动分配下一个编号，例如
 `odor_search_1`、`odor_search_2`；checkpoint、最终模型、日志与 TensorBoard 子目录
-都使用该编号。从 `--resume-from` 续训也会分配新编号，并保留来源 checkpoint。
-显式传入的 `--model-path` 或 `--log-dir` 若已存在，脚本会拒绝覆盖。
+使用同一编号。指定 `--resume-from` 时，脚本从 checkpoint 恢复原实验名称、checkpoint
+目录和 TensorBoard 记录，`--timesteps` 表示额外训练步数；此时忽略 `--experiment-name`。
+旧 metadata 若未记录精确的 TensorBoard 子目录，默认沿用该实验编号最大的历史记录，
+也可通过 `--tensorboard-run-dir` 显式指定。从头训练时，已存在的显式 `--model-path`
+或 `--log-dir` 会被拒绝，防止覆盖。
 
 ```powershell
 python scripts\train_mobile_whisker_ppo.py --experiment-name odor_search

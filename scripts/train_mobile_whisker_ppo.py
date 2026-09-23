@@ -47,6 +47,7 @@ from dual_whisker_rl.agents import GRUHistoryExtractor
 from dual_whisker_rl.agents import TransformerHistoryExtractor
 from dual_whisker_rl.envs import MobileWhiskerPuffEnv
 from dual_whisker_rl.paths import portable_path
+from dual_whisker_rl.paths import project_path
 from dual_whisker_rl.paths import resolve_path_args
 from dual_whisker_rl.vec_env import make_vec_env
 from dual_whisker_rl.vec_env import resolve_vec_env_backend
@@ -554,22 +555,28 @@ def parse_args() -> argparse.Namespace:
         "--model-path",
         type=Path,
         default=None,
-        help="默认按 temporal encoder 写入独立模型文件。",
+        help="从头训练按实验编号保存；续训默认更新原实验模型文件。",
     )
     parser.add_argument(
         "--log-dir",
         type=Path,
         default=None,
-        help="默认按 temporal encoder 写入独立日志目录。",
+        help="从头训练按实验编号保存；续训默认使用原实验日志目录。",
     )
     parser.add_argument(
         "--experiment-name",
         "--run-name",
         type=str,
         default=None,
-        help="实验名称关键词；默认 mobile_whisker_<encoder>_ppo，每次新训练自动追加递增编号。",
+        help="仅从头训练使用：实验名称关键词，自动追加递增编号；续训沿用 checkpoint 的实验名。",
     )
-    parser.add_argument("--tensorboard-dir", type=Path, default=Path("results/tensorboard"))
+    parser.add_argument("--tensorboard-dir", type=Path, default=None, help="TensorBoard 根目录；续训默认读取原实验 metadata。")
+    parser.add_argument(
+        "--tensorboard-run-dir",
+        type=Path,
+        default=None,
+        help="旧 checkpoint 未记录精确 TensorBoard 子目录时，可在续训中显式指定。",
+    )
     parser.add_argument("--log-interval", type=int, default=1)
     parser.add_argument(
         "--eval-freq",
@@ -593,13 +600,13 @@ def parse_args() -> argparse.Namespace:
         "--checkpoint-dir",
         type=Path,
         default=None,
-        help="默认保存到 <log-dir>/checkpoints。",
+        help="从头训练默认保存到 <log-dir>/checkpoints；续训默认使用来源目录。",
     )
     parser.add_argument(
         "--resume-from",
         type=Path,
         default=None,
-        help="从指定 PPO checkpoint 继续训练；--timesteps 表示额外训练步数。",
+        help="从指定 PPO checkpoint 继续原实验；--timesteps 表示额外训练步数。",
     )
     parser.add_argument(
         "--domain-randomization",
@@ -610,9 +617,15 @@ def parse_args() -> argparse.Namespace:
 
 
 def resolve_output_paths(args: argparse.Namespace) -> None:
-    """给新训练分配独立编号，并预留日志目录以避免并发启动时撞名。"""
+    """从头训练分配新编号；续训恢复 checkpoint 对应的实验和日志目录。"""
     if getattr(args, "_output_paths_resolved", False):
         return
+    if args.resume_from is not None:
+        resolve_resume_output_paths(args)
+        return
+    if args.tensorboard_run_dir is not None:
+        raise ValueError("--tensorboard-run-dir 仅用于 --resume-from 续训")
+    args.tensorboard_dir = args.tensorboard_dir or ROOT / "results" / "tensorboard"
     keyword = args.experiment_name or f"mobile_whisker_{args.temporal_encoder}_ppo"
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", keyword):
         raise ValueError("--experiment-name 只能包含英文字母、数字、下划线和连字符")
@@ -667,9 +680,132 @@ def resolve_output_paths(args: argparse.Namespace) -> None:
         args.model_path = model_path
         args.log_dir = log_dir
         args.checkpoint_dir = checkpoint_dir
+        args.tensorboard_run_dir = tensorboard_root / experiment_name
         args.run_name = experiment_name
         args._output_paths_resolved = True
         return
+
+
+def infer_legacy_tensorboard_run_dir(root: Path, experiment_name: str) -> Path:
+    """旧 metadata 未记录精确子目录时，沿用 SB3 选择最新编号的规则。"""
+    direct = root / experiment_name
+    if direct.is_dir():
+        return direct
+    candidates = []
+    if root.is_dir():
+        pattern = re.compile(rf"{re.escape(experiment_name)}_(\d+)")
+        for child in root.iterdir():
+            match = pattern.fullmatch(child.name)
+            if child.is_dir() and match:
+                candidates.append((int(match.group(1)), child))
+    if not candidates:
+        raise FileNotFoundError(
+            f"找不到实验 {experiment_name} 的 TensorBoard 记录；"
+            "可通过 --tensorboard-run-dir 指定原目录"
+        )
+    selected = max(candidates, key=lambda item: item[0])[1]
+    print(
+        f"注意：旧 metadata 未记录精确 TensorBoard 子目录，续训使用 {portable_path(selected)}；"
+        "如需指定其他旧记录，请传 --tensorboard-run-dir。",
+        flush=True,
+    )
+    return selected
+
+
+def resolve_resume_output_paths(args: argparse.Namespace) -> None:
+    """从 checkpoint 和原运行 metadata 恢复所有输出路径。"""
+    checkpoint = args.resume_from
+    match = re.fullmatch(r"(?P<name>.+)_(?P<step>\d+)_steps\.zip", checkpoint.name)
+    if match is None:
+        raise ValueError(
+            "--resume-from 必须指向以 <实验名>_<步数>_steps.zip 命名的 checkpoint"
+        )
+    experiment_name = match.group("name")
+    default_log_dir = checkpoint.parent.parent
+    if (
+        not (default_log_dir / "run_metadata.json").is_file()
+        and default_log_dir.name != experiment_name
+    ):
+        default_log_dir = ROOT / "results" / "logs" / experiment_name
+    log_dir = args.log_dir or default_log_dir
+    if not log_dir.is_dir():
+        raise FileNotFoundError(f"找不到原实验日志目录: {log_dir}")
+    metadata_path = log_dir / "run_metadata.json"
+    metadata = (
+        json.loads(metadata_path.read_text(encoding="utf-8"))
+        if metadata_path.is_file()
+        else {}
+    )
+    recorded_name = metadata.get("experiment_name")
+    if recorded_name is not None and recorded_name != experiment_name:
+        raise ValueError(
+            f"checkpoint 实验名 {experiment_name} 与 metadata 实验名 {recorded_name} 不一致"
+        )
+    recorded_root = project_path(metadata.get("tensorboard_dir"))
+    if (
+        args.tensorboard_dir is not None
+        and recorded_root is not None
+        and args.tensorboard_dir.resolve() != recorded_root.resolve()
+    ):
+        raise ValueError("--tensorboard-dir 与原实验 metadata 不一致")
+    tensorboard_root = (
+        recorded_root
+        or args.tensorboard_dir
+        or (args.tensorboard_run_dir.parent if args.tensorboard_run_dir else None)
+        or ROOT / "results" / "tensorboard"
+    )
+    recorded_run_dir = project_path(metadata.get("tensorboard_run_dir"))
+    if (
+        args.tensorboard_run_dir is not None
+        and recorded_run_dir is not None
+        and args.tensorboard_run_dir.resolve() != recorded_run_dir.resolve()
+    ):
+        raise ValueError("--tensorboard-run-dir 与原实验 metadata 不一致")
+    tensorboard_run_dir = (
+        recorded_run_dir
+        or args.tensorboard_run_dir
+        or infer_legacy_tensorboard_run_dir(tensorboard_root, experiment_name)
+    )
+    if tensorboard_run_dir.parent.resolve() != tensorboard_root.resolve():
+        raise ValueError("TensorBoard 子目录与原实验的根目录不一致")
+    if not tensorboard_run_dir.is_dir():
+        raise FileNotFoundError(f"找不到原实验 TensorBoard 记录: {tensorboard_run_dir}")
+    if args.experiment_name is not None:
+        print(
+            f"注意：--experiment-name 仅用于从头训练；续训沿用 {experiment_name}。",
+            flush=True,
+        )
+    keyword = metadata.get("experiment_keyword")
+    if keyword is None:
+        keyword = re.sub(r"_\d+$", "", experiment_name)
+    args.experiment_keyword = keyword
+    args.experiment_name = experiment_name
+    args.model_path = (
+        args.model_path
+        or project_path(metadata.get("model_path"))
+        or ROOT / "results" / "models" / f"{experiment_name}.zip"
+    )
+    checkpoint_dir = args.checkpoint_dir or checkpoint.parent
+    if checkpoint_dir.resolve() == checkpoint.parent.resolve():
+        source_step = int(match.group("step"))
+        pattern = re.compile(rf"{re.escape(experiment_name)}_(\d+)_steps\.zip")
+        later_checkpoints = [
+            child.name
+            for child in checkpoint_dir.glob(f"{experiment_name}_*_steps.zip")
+            if (step_match := pattern.fullmatch(child.name))
+            and int(step_match.group(1)) > source_step
+        ]
+        if later_checkpoints:
+            raise ValueError(
+                "原实验已有更晚的 checkpoint，不能从较早步数续训到同一目录："
+                f"{later_checkpoints[0]}"
+            )
+    args.log_dir = log_dir
+    args.checkpoint_dir = checkpoint_dir
+    args.tensorboard_dir = tensorboard_root
+    args.tensorboard_run_dir = tensorboard_run_dir
+    args.run_name = experiment_name
+    args._output_paths_resolved = True
 
 
 def validate_args(args: argparse.Namespace) -> None:
@@ -803,6 +939,7 @@ def train(args: argparse.Namespace) -> PPO:
         "model_path",
         "log_dir",
         "tensorboard_dir",
+        "tensorboard_run_dir",
         "checkpoint_dir",
         "resume_from",
     )
@@ -934,10 +1071,10 @@ def train(args: argparse.Namespace) -> PPO:
             eta_callback,
         ]
     )
-    # TensorBoard 目录直接使用实验编号，续训也另开目录，不追加到旧记录。
+    # 新训练使用新编号；续训继续写入原 TensorBoard 子目录。
     model.set_logger(
         configure(
-            str(args.tensorboard_dir / args.experiment_name),
+            str(args.tensorboard_run_dir),
             format_strings=["stdout", "tensorboard"],
         )
     )
@@ -1120,9 +1257,7 @@ def save_run_metadata(
         ),
         "model_path": portable_path(args.model_path),
         "tensorboard_dir": portable_path(args.tensorboard_dir),
-        "tensorboard_run_dir": portable_path(
-            args.tensorboard_dir / args.experiment_name
-        ),
+        "tensorboard_run_dir": portable_path(args.tensorboard_run_dir),
         "run_name": args.run_name,
         "config_path": portable_path(args.config),
         "config": config,
