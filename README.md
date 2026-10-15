@@ -183,3 +183,25 @@ bash scripts/run_e4_formal_conda.sh --background
 ```
 
 脚本用文件锁阻止同一输出目录被重复启动，自动保存日志和运行 PID。只续训可执行 `bash scripts/run_e4_formal_conda.sh train --background`，只补评测可执行 `... evaluate --background`。需要完全独立的新实验时传入新的 `--output-dir`；不要删除旧 checkpoint。正式校准产物也带场景、配置和代码签名，恢复时匹配则跳过 B1/B2 已完成搜索，不兼容时明确拒绝复用。首次校准会持续打印 B1/B2 候选进度、验证场景进度和预计剩余分钟。
+
+
+## 仿真对比实验入口
+
+当前阶段只执行E3训练稳定性、E4仿真主对比、E5消融和E6扰动仿真，详见
+[仿真对比实验流程](docs/RED_EXPERIMENT_WORKFLOW.md)。配置为configs/red_experiments.yaml，
+scope固定为simulation_only，结果默认保存在results/simulation_experiments。
+
+~~~powershell
+.\.venv\Scripts\python.exe scripts\run_red_experiments.py plan --profile smoke
+.\.venv\Scripts\python.exe scripts\run_red_experiments.py run --profile smoke --resume
+.\.venv\Scripts\python.exe scripts\run_red_experiments.py run --profile formal --group core --resume
+~~~
+
+smoke检验仿真链路；formal使用5个独立训练种子和648个共享测试场景。传感器和舵机
+扰动均在软件模型中施加。E0真实标定与E7实机验证暂存于延期设计，不属于当前流程。
+
+评估会自动打印已完成场景、百分比、本次新增/复用数、已用时间和预计剩余时间，无需额外参数。
+run_red_experiments.py的evaluate/robustness覆盖本轮选中的全部方法、种子及故障组合；
+首个新场景后开始估时，之后在场景完成时按20场景或10秒刷新。--resume只用新运行场景
+估计速度，全部复用时剩余为零。run_e4_experiments.py显示当前组估时；触须采样对比入口
+也显示总进度。详情见[评估进度说明](docs/RED_EXPERIMENT_WORKFLOW.md#21-评估进度与预计剩余时间)。

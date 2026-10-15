@@ -45,6 +45,7 @@ from dual_whisker_rl.e4_experiments import (  # noqa: E402
     choose_mlp_width,
 )
 from dual_whisker_rl.paths import project_path, portable_path
+from scripts.experiment_progress import EvaluationProgress
 from dual_whisker_rl.envs.world_bounds import resolve_world_bounds, world_bounds_config  # noqa: E402
 
 
@@ -221,6 +222,13 @@ def base_config(args: argparse.Namespace) -> dict[str, Any]:
     wind_min = max(float(cfg["wind_speed_range"][0]), 1e-3)
     plume_overrides.setdefault("max_puff_age", max(16.0, 2.2 * world_half / wind_min))
     plume_overrides.setdefault("puff_bounds_margin", max(1.1, 0.20 * world_half))
+    # 无独立 YAML 时，formal/smoke profile 也使用与 5×5 配置一致的宽羽流。
+    if world_half >= 2.5:
+        plume_overrides.setdefault("puff_warmup_steps", 180)
+        plume_overrides.setdefault("diffusion_crosswind_rate", 0.008)
+        plume_overrides.setdefault("puff_init_mass", 0.020)
+        plume_overrides.setdefault("puff_release_per_step", 2)
+        plume_overrides.setdefault("max_puffs", 500)
     cfg["plume_overrides"] = plume_overrides
     cfg.setdefault("progress_reward_scale", 3.0 / max(world_half, 1e-6))
     cfg.setdefault("b1_hit_threshold", 0.08)
@@ -751,32 +759,29 @@ def evaluate_method(args: argparse.Namespace, root: Path, method: str, seed: int
     eval_state_path = task_dir / f"evaluation_{split}.json"
     eval_state = {"version": VERSION, "method": method, "seed": seed, "split": split, "signature": signature, "status": "running", "total": len(scenarios), "completed": 0}
     atomic_write_json(eval_state_path, eval_state)
-    evaluation_started = time.monotonic()
-    progress_interval = max(1, min(50, len(scenarios)))
-
-    def report_evaluation_progress() -> None:
-        if len(rows) % progress_interval != 0 and len(rows) != len(scenarios):
-            return
-        elapsed_seconds, remaining_minutes = progress_timing(evaluation_started, len(rows), len(scenarios))
-        print(
-            f"[评估进度] 数据集={split} 方法={method} 随机种子={seed} "
-            f"场景={len(rows)}/{len(scenarios)} 已耗时={elapsed_seconds / 60.0:.2f}分钟 "
-            f"预计剩余={remaining_minutes:.2f}分钟",
-            flush=True,
-        )
+    # 缓存只增加已完成数量；速度由本次实际执行的场景估计。
+    cached_rows = {}
+    if args.resume:
+        for scenario in scenarios:
+            output = episodes_dir / f"{scenario.scenario_id}.json"
+            if output.exists():
+                try:
+                    row = json.loads(output.read_text(encoding="utf-8"))
+                    if row.get("scenario_id") == scenario.scenario_id and row.get("signature") == signature:
+                        cached_rows[scenario.scenario_id] = row
+                except (OSError, json.JSONDecodeError):
+                    pass
+    progress = EvaluationProgress(len(scenarios), cached=len(cached_rows), every=50)
+    progress_label = f"[评估进度] 数据集={split} 方法={method} 随机种子={seed} 本组"
+    progress.report(progress_label, force=True)
 
     for scenario in scenarios:
         output = episodes_dir / f"{scenario.scenario_id}.json"
-        if args.resume and output.exists():
-            try:
-                row = json.loads(output.read_text(encoding="utf-8"))
-                if row.get("scenario_id") == scenario.scenario_id and row.get("signature") == signature:
-                    rows.append(row)
-                    atomic_write_json(eval_state_path, {**eval_state, "completed": len(rows)})
-                    report_evaluation_progress()
-                    continue
-            except (OSError, json.JSONDecodeError):
-                pass
+        if scenario.scenario_id in cached_rows:
+            rows.append(cached_rows[scenario.scenario_id])
+            atomic_write_json(eval_state_path, {**eval_state, "completed": len(rows)})
+            continue
+        episode_started = time.perf_counter()
         policy_seed = int(scenario.seed + 7001 + 1000003 * int(seed)) if method == "b0_random" else int(seed)
         if method == "b0_random":
             controller = RandomController(policy_seed)
@@ -790,7 +795,8 @@ def evaluate_method(args: argparse.Namespace, root: Path, method: str, seed: int
         atomic_write_json(output, row)
         rows.append(row)
         atomic_write_json(eval_state_path, {**eval_state, "completed": len(rows)})
-        report_evaluation_progress()
+        progress.finish_episode(time.perf_counter() - episode_started)
+        progress.report(progress_label)
     env.close()
     atomic_write_json(task_dir / f"metrics_{split}.json", aggregate(rows))
     atomic_write_json(eval_state_path, {**eval_state, "status": "completed", "completed": len(rows)})

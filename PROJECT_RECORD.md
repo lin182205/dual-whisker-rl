@@ -1851,3 +1851,153 @@ TensorBoard 子目录使用同一个编号；metadata 同时记录关键词、�
 `mobile_whisker_gru_ppo` checkpoint 的只读解析选中现有 TensorBoard `_6` 目录；
 选择已有 64 步后仍存在的 32 步 checkpoint 被拒绝。随后再次从头训练得到 `_2`，
 确认续训不会占用新实验编号。语法检查和差异检查通过。
+
+## 46. 5×5 Mobile 羽流覆盖与预热修正
+
+5×5 独立 Mobile 训练的既有 50 局评估成功率为 0.06，平均羽流接触比例约
+0.099，失败中 35 局越界、12 局超时。场地扩到 ±2.5 后，随机机器人起点距气源
+下风 1.875～3.625 m，但动态 puff 原来只预热 80 步（16 s）；最低风速 0.12 m/s
+下最远起点的名义输运时间约 30 s。原本针对 1m 固定基座调出的细、稀疏羽流，
+在 5m 场地的可探测面积偏小。
+
+本轮只对 5×5 Mobile 与 E4 动态 puff 配置扩大覆盖：puff_warmup_steps
+80→180（36 s）、diffusion_crosswind_rate 0.003→0.008、
+puff_init_mass 0.012→0.020、puff_release_per_step 1→2，
+并把 max_puffs 360→500，避免双倍释放使远端 puff 被数量上限提前裁掉。
+这些值写入 configs/mobile_whisker.yaml、configs/e4_formal.yaml 和
+configs/e4_smoke.yaml；E4 不传 YAML 的 5×5 profile 也用相同默认值。
+已有按场地/最低风速推算的 max_puff_age≈45.8 s 保持不变。1×1 固定基座
+WhiskerOnlyPuffEnv 参数保持原值。配置显式覆盖仍优先于 E4 默认值。
+
+用相同 30 个种子和 0.2 浓度命中阈值作前后配对诊断：reset 时 41×41 网格的
+有效浓度占比均值由 0.0314 升至 0.1308；机器人停在原位、触须固定扇区
+[5,5] 的前 100 步，实际传感器命中比例由 0.003 升至 0.327，
+100 步内完全无命中的场景由 28/30 降至 6/30。另一组 30 种子、
+每局最多 100 步的随机动作检查中，传感器命中比例由 0.004 升至 0.372；
+传感器输出 p50/p90/p99 由 0.069/0.131/0.192 变为
+0.172/0.310/0.388，硬件化观测前四个浓度槽没有达到 clip=5。
+固定测点短诊断中，新羽流中心/0.75m 横风偏移处命中时间占比约
+0.42/0.25，仍有明显 blank；这只验证没有变成持续饱和气幕，
+不是与真实羽流分布相符的证明。
+
+同种子羽流场图和传感器响应图保存于
+results/figures/plume_5x5_before_after.png、
+results/figures/sensor_5x5_before_after.png（均被 Git 忽略）。
+Mobile/E4 初始化相关 21 项单元测试通过，E4 传入/不传 YAML 的
+formal profile 解析出相同羽流参数；独立 Mobile MLP/PPO
+64 步 smoke 训练完成。相同机器上 10 种子各 100 步的环境短基准，
+原羽流用时 0.439 s，新羽流用时 1.072 s（约 2.44 倍）；这是扩大
+puff 数量带来的训练吞吐成本，不能外推为服务器全程速度。
+git diff --check 通过。
+这些验证不能证明训练成功率已恢复。羽流分布和奖励可见信号均已变化，
+应新开训练实验，用多 seed 和同一批固定场景复评成功率、越界率、
+首次命中时间及主动触须增益；不要把旧 checkpoint 在新场景下的表现
+当作新羽流训练结果，也不要把旧 E4 校准产物直接复用。
+
+
+## 47. 七项红字实验脚本与执行流程
+
+按已核验的DOCX红字范围增加实验代码：E0静态标定、重复性与漂移，E3训练稳定性，
+E4主对比复用，E5消融，E6故障退化，E7实机排程和结果导入。研究解释继续围绕主动触须
+的信息获取，不把浓度梯度爬升当作新主张。项目已有E4链路及工作区原先修改保留，
+新增适配不进入原Mobile或WhiskerOnly默认构造路径。
+
+### 47.1 设计与文件
+
+configs/red_experiments.yaml定义smoke/formal、35个策略配置和故障参数。
+scripts/run_red_experiments.py统一plan/prepare/train/evaluate/robustness/summarize/status/run，
+并通过e4阶段委托原运行器；hardware-plan生成108个标定平台、9条漂移记录、
+正式360次（受限配置240次）的实机排程。
+
+dual_whisker_rl/experiment_env.py继承当前Mobile与DynamicPuff，提供特征屏蔽、
+H1/5/10/20/40、几何、奖励配置、DR幅度及传感器/风/执行故障。名义配置和DR幅度1
+保持原随机过程；固定触须首帧只构建一次观测，避免重复推进有状态预处理。
+
+新增协议成功条件为半径内持续1秒，计时从首次检测到源开始；进入前的步长不计入保持时间。失败惩罚时间统一取完整时限，越界不是普通删失。
+原E4仍是瞬时到源，结果不得混合。严格重捕获沿用项目1秒门限，奖励语义未暗改。
+训练用封存验证集选checkpoint，按已完成PPO更新的轮次边界保存恢复点；
+selected/final/last模型分开。记录PPO诊断、动作头熵、梯度、七个奖励分量及信息获取指标。
+
+dual_whisker_rl/experiment_protocol.py提供代码/配置封存、排程、共享场景与训练seed
+交叉bootstrap、种子级符号置换检验和Holm校正。场景文件被篡改时拒绝静默覆盖。
+所有seed与缺失事件保留，5seed双侧符号置换检验最小p=0.0625，不能把大量episode当训练重复。
+
+### 47.2 硬件与分析
+
+scripts/collect_sensor_experiment.py逐条保存原始双ADC、命令/响应时间、实际周期、
+目标扇区、元数据与失败状态。fixed/periodic/random可采集；PPO只接受固定基座
+12维单帧、双扇区动作模型，要求冻结预处理、实测左右基线及匹配训练采样周期。
+扇区回显不是角度反馈，日志明确记为command_estimate。未接入底盘接口，因此不声称
+新增完整Mobile实机控制；E7是匹配块排程与真实数据导入。
+
+scripts/analyze_sensor_experiments.py以平台/完整日期做静态验证，支持独立参考表合并，
+不把释放档位当ppm；漂移按残差时间块分析并比较冻结、门控、放宽基线。
+scripts/analyze_experiment_learning.py输出seed级学习曲线、观察区间AUC和故障退化。
+真实规则法没有训练seed，不能构成种子配对时明确返回unpaired，仍需按真实日期/条件块
+完成正式统计模型。全部输入摘要与原始数据保留，不自动生成硬件测量值。
+流程、样本安排、文件格式、命令、时钟和统计边界见docs/RED_EXPERIMENT_WORKFLOW.md。
+
+### 47.3 验证
+
+- 18项新增unittest通过，覆盖35配置构造、名义/默认DR等价、持续到源、特征屏蔽、
+  故障复现、固定触须单次首帧构建、封存冲突/题库篡改、排程计数、伪重复和分析公式。
+- 原E4 15项、Mobile场景初始化6项回归检查通过，共39项相关测试。
+- 六核心方法各256步的smoke训练、每方法8个共享场景评估完成；恢复复用与
+  main/noDR×5故障×3场景（30次）链路完成。随后短预算检查验证更新后的封存保护。
+- 2个spawn worker、64步GRU训练及8场景评估完成，验证新的多进程环境可序列化。
+- 构造数据的静态标定/外部参考合并、漂移和真实结果导入CLI完成，输出明确属于
+  synthetic检查，不是真实传感器结果。学习曲线与故障退化CLI、硬件排程、
+  不连接设备的采集dry-run通过。
+- 路径可移植性、语法及差异空白检查通过。模型与验证产物均在results下，不提交。
+
+以上只验证代码和记录链路。未执行正式200万步多seed实验，未连接STM32或进行
+真实气体/底盘试验，不能据此宣称主动采样或sim-to-real效果已经得到验证。
+
+
+## 48. 当前阶段收敛为仿真对比实验
+
+按用户明确要求，当前只开展E3训练稳定性、E4仿真主对比、E5消融与敏感性、
+E6域外扰动仿真。E0真实静态标定/漂移与E7实机验证延期，不作为当前仿真执行的前置任务。
+
+configs/red_experiments.yaml明确scope=simulation_only，统一入口移除hardware-plan阶段，
+默认输出改为results/simulation_experiments。计划输出列出active_experiments和
+deferred_experiments，范围进入新版封存签名。旧输出继续保留，不迁移或覆盖。
+sensor组的measured_gru/measured_mlp改名为nominal_gru/nominal_mlp，澄清0.6/3.0秒
+是当前标称仿真假设，不是本阶段得到的实测参数；模型数和物理数值保持一致。
+
+docs/RED_EXPERIMENT_WORKFLOW.md与README改为纯仿真流程。E0/E7原设计移入
+docs/DEFERRED_HARDWARE_EXPERIMENTS.md，相关已有脚本保留供后续阶段使用。
+E6中的传感器、舵机、命令延迟和丢包均在软件模型中施加，不进行串口或真实执行器测试。
+
+本轮只执行仿真检查：9项实验环境检查与15项E4回归检查通过；main/fixed/periodic
+各64步短训练、各8个共享场景评估和汇总完成。CLI help、formal计划、语法与差异检查通过。
+没有执行任何真实设备测试；短仿真仅确认流程可运行，正式5seed对比需按formal配置执行。
+
+## 49. 仿真对比评估打印进度与剩余时间
+
+按用户要求，为scripts/run_red_experiments.py的evaluate/robustness以及run评估阶段
+增加总进度、百分比、方法/训练seed/故障组、本次新增、复用、已耗时与预计剩余时间。
+总工作量覆盖本轮选中的全部方法×seed×故障×场景。先校验缓存并计数，首个新场景
+完成后用本次新场景平均实际耗时估算剩余；不把读取旧结果的耗时当作评估速度。
+首次、首个新场景、最后一个场景输出，之后在场景结束时每20场景或满10秒刷新，
+并立即flush；长场景过程中不另起计时线程。全部复用显示100%和剩余零，无需加载模型。
+
+scripts/experiment_progress.py集中实现计时和格式化。scripts/run_e4_experiments.py
+采用同样的缓存处理，显示当前方法×seed×split的“本组”估时，阈值50场景/10秒。
+scripts/evaluate_whisker_sampling_policies.py显示选中策略×回合的总进度。
+重定向输出统一UTF-8，交互式Windows终端保持本地编码。估时采用真实运行耗时，
+不是仿真dt；后续模型加载、训练和汇总不算入待运行场景的平均耗时。
+
+由于新入口原封存包含整个运行器的SHA-256，单纯加入显示也会改变代码签名。
+为避免要求重新训练，兼容路径仅绑定升级前/后两个精确运行器摘要，并逐字段验证
+全部原配置、其他代码摘要、场景和manifest原签名；只在完全匹配时保留原manifest
+与模型签名，另写reporting_upgrade.json记录当前运行器。预算、物理配置、场景、
+其他源代码及未来运行器改动继续拒绝混用。不修改环境、动作、奖励或统计定义。
+README与docs/RED_EXPERIMENT_WORKFLOW.md补充了估时范围和恢复规则。
+
+验证：8项估时/恢复/封存兼容检查、15项原E4检查、9项实验环境检查通过，共32项。
+复制旧smoke产物到results/eta_verification验证全部24场景复用和缺2场景的恢复；
+原manifest逐字节不变，2场景重跑后除evaluation_wall_s外所有实验字段与旧结果一致。
+另完成2方法×2软件故障×2场景的8次扰动仿真、E4规则基线4场景新评估及全缓存恢复、
+2种触须采样策略各2回合的仿真。语法、路径可移植性和差异空白检查通过。
+所有验证产物在results下；没有进行真实硬件测试或长预算正式训练。

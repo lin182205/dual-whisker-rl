@@ -28,6 +28,7 @@ import argparse
 import json
 from pathlib import Path
 import sys
+import time
 from types import SimpleNamespace
 
 import matplotlib.pyplot as plt
@@ -40,6 +41,7 @@ if str(ROOT) not in sys.path:
 
 from dual_whisker_rl.envs.whisker_only_env import WhiskerOnlyPuffEnv
 from dual_whisker_rl.paths import portable_path
+from scripts.experiment_progress import EvaluationProgress, configure_output_encoding
 from dual_whisker_rl.paths import resolve_path_args
 
 # 复用硬件脚本的指标与动作序列定义，保证 sim / 硬件评估口径一致。
@@ -252,6 +254,7 @@ def save_barchart(path: Path, results: dict[str, dict]) -> None:
 
 
 def main() -> None:
+    configure_output_encoding()
     args = parse_args()
     with args.config.open("r", encoding="utf-8") as file:
         config = yaml.safe_load(file) or {}
@@ -295,9 +298,12 @@ def main() -> None:
 
     env = build_env(config)
     results: dict[str, dict] = {}
+    progress = EvaluationProgress(len(specs) * len(seeds))
+    progress.report("[采样对比评估] 本轮", force=True)
     for spec in specs:
         per_episode = []
         for seed in seeds:
+            episode_started = time.perf_counter()
             obs_mat, sectors, t_axis, total_reward = rollout_episode(
                 env, spec, seed, args.steps, args.dwell_steps,
                 model, history_length, deterministic=not args.stochastic,
@@ -305,6 +311,8 @@ def main() -> None:
             per_episode.append(
                 episode_metrics(obs_mat, sectors, t_axis, total_reward, metric_args, env.whiskers.sector_count)
             )
+            progress.finish_episode(time.perf_counter() - episode_started)
+            progress.report(f"[采样对比评估] 策略={spec['name']}")
         results[spec["name"]] = aggregate(per_episode)
         agg = results[spec["name"]]
         print(

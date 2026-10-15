@@ -6,6 +6,13 @@ domain_randomization: false
 vec_env_backend: dummy
 wind_speed_range: [0.12, 0.20]
 max_steps: 400
+plume_overrides:
+  # 5×5 场地：先让羽流传播到远端，再增加横风覆盖；保持间歇性。
+  puff_warmup_steps: 180
+  diffusion_crosswind_rate: 0.008
+  puff_init_mass: 0.020
+  puff_release_per_step: 2
+  max_puffs: 500
 b1_hit_threshold: 0.08
 b1_trend_threshold: -0.02
 b1_contrast_threshold: 0.03

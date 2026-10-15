@@ -1,0 +1,118 @@
+# 当前只执行E3/E4/E5/E6仿真；E0真实标定与E7实机延期。
+scope: simulation_only
+base_config: configs/mobile_whisker.yaml
+selection: success_then_penalized_time
+profiles:
+  smoke:
+    seeds: [11]
+    timesteps: 256
+    n_envs: 1
+    n_steps: 32
+    batch_size: 32
+    eval_every: 128
+    validation_scenarios: 4
+    test_scenarios: 8
+    max_steps: 40
+    device: cpu
+    backend: dummy
+    save_step_logs: true
+  formal:
+    seeds: [1, 2, 3, 4, 5]
+    timesteps: 2000000
+    n_envs: 8
+    n_steps: 512
+    batch_size: 256
+    eval_every: 50000
+    validation_scenarios: 200
+    test_scenarios: 648
+    max_steps: 400
+    device: auto
+    backend: subproc
+    save_step_logs: true
+common:
+  success_hold_s: 1.0
+  dt: 0.2
+  reacquisition_min_blank_s: 1.0
+variants:
+  main: {method: main, history_length: 20, encoder: gru, config: {domain_randomization: true}}
+  fixed: {method: b2_fixed, history_length: 20, encoder: gru, fixed_sector: 5, config: {domain_randomization: true}}
+  periodic: {method: b3_scan, history_length: 20, encoder: gru, scan_hold: 2, config: {domain_randomization: true}}
+  single_frame: {method: b4_single_frame, history_length: 1, encoder: mlp, config: {domain_randomization: true}}
+  history_mlp: {method: b5_history_mlp, history_length: 20, encoder: mlp, config: {domain_randomization: true}}
+  single_left: {method: b6_left, history_length: 20, encoder: gru, config: {domain_randomization: true}}
+  single_right: {method: b6_right, history_length: 20, encoder: gru, config: {domain_randomization: true}}
+  no_dr: {method: main, history_length: 20, encoder: gru, config: {domain_randomization: false}}
+  h1: {history_length: 1, encoder: gru, config: {domain_randomization: true}}
+  h5: {history_length: 5, encoder: gru, config: {domain_randomization: true}}
+  h10: {history_length: 10, encoder: gru, config: {domain_randomization: true}}
+  h40: {history_length: 40, encoder: gru, config: {domain_randomization: true}}
+  no_trend: {history_length: 20, encoder: gru, feature_mask: no_trend, config: {domain_randomization: true}}
+  no_difference: {history_length: 20, encoder: gru, feature_mask: no_difference, config: {domain_randomization: true}}
+  no_blank_age: {history_length: 20, encoder: gru, feature_mask: no_blank_age, config: {domain_randomization: true}}
+  no_angles: {history_length: 20, encoder: gru, feature_mask: no_angles, config: {domain_randomization: true}}
+  raw_only: {history_length: 20, encoder: gru, feature_mask: raw_only, config: {domain_randomization: true}}
+  no_reacquisition_reward: {history_length: 20, encoder: gru, config: {domain_randomization: true, whisker_reacquisition_bonus: 0.0}}
+  no_best_reward: {history_length: 20, encoder: gru, config: {domain_randomization: true, best_concentration_reward_scale: 0.0}}
+  no_stagnation: {history_length: 20, encoder: gru, config: {domain_randomization: true, stagnation_penalty: 0.0}}
+  sparse_reward: {history_length: 20, encoder: gru, config: {domain_randomization: true, progress_reward_scale: 0.0, best_concentration_reward_scale: 0.0, whisker_reacquisition_bonus: 0.0, stagnation_penalty: 0.0, mobile_time_penalty: 0.0}}
+  length0: {history_length: 20, encoder: gru, config: {domain_randomization: true, whisker_length: 0.0}}
+  length075: {history_length: 20, encoder: gru, config: {domain_randomization: true, whisker_length: 0.075}}
+  length225: {history_length: 20, encoder: gru, config: {domain_randomization: true, whisker_length: 0.225}}
+  sectors3: {history_length: 20, encoder: gru, config: {domain_randomization: true, whisker_sector_count: 3}}
+  sectors5: {history_length: 20, encoder: gru, config: {domain_randomization: true, whisker_sector_count: 5}}
+  sectors15: {history_length: 20, encoder: gru, config: {domain_randomization: true, whisker_sector_count: 15}}
+  ideal_sensor: {history_length: 20, encoder: gru, config: {domain_randomization: false, sensor_response_tau: 0.0, sensor_recovery_tau: 0.0, sensor_noise_std: 0.0}}
+  ideal_mlp: {history_length: 20, encoder: mlp, config: {domain_randomization: false, sensor_response_tau: 0.0, sensor_recovery_tau: 0.0, sensor_noise_std: 0.0}}
+  nominal_gru: {history_length: 20, encoder: gru, config: {domain_randomization: false}}
+  nominal_mlp: {history_length: 20, encoder: mlp, config: {domain_randomization: false}}
+  tau_half: {history_length: 20, encoder: gru, config: {domain_randomization: false, sensor_response_tau: 0.3, sensor_recovery_tau: 1.5}}
+  tau_one_half: {history_length: 20, encoder: gru, config: {domain_randomization: false, sensor_response_tau: 0.9, sensor_recovery_tau: 4.5}}
+  dr_narrow: {history_length: 20, encoder: gru, dr_spread: 0.5, config: {domain_randomization: true}}
+  dr_wide: {history_length: 20, encoder: gru, dr_spread: 2.0, config: {domain_randomization: true}}
+groups:
+  core: [main, fixed, periodic, single_frame, history_mlp, no_dr]
+  history: [main, h1, h5, h10, h40, history_mlp]
+  features: [main, no_trend, no_difference, no_blank_age, no_angles, raw_only]
+  rewards: [main, no_reacquisition_reward, no_best_reward, no_stagnation, sparse_reward]
+  geometry: [main, length0, length075, length225, sectors3, sectors5, sectors15]
+  sensor: [ideal_sensor, ideal_mlp, nominal_gru, nominal_mlp, tau_half, tau_one_half]
+  randomization: [main, no_dr, dr_narrow, dr_wide]
+faults:
+  nominal: {}
+  wind08: {wind_speed: 0.08}
+  wind24: {wind_speed: 0.24}
+  wind28: {wind_speed: 0.28}
+  turn15: {start_s: 10.0, wind_turn_deg: 15.0}
+  turn30: {start_s: 10.0, wind_turn_deg: 30.0}
+  turn45: {start_s: 10.0, wind_turn_deg: 45.0}
+  source25: {source_factor: 0.25}
+  source50: {source_factor: 0.5}
+  source200: {source_factor: 2.0}
+  intermittent50: {release_duty: 0.5, release_period_s: 8.0}
+  intermittent25: {release_duty: 0.25, release_period_s: 8.0}
+  gain90: {left_gain: 0.9}
+  gain80: {left_gain: 0.8}
+  gain70: {left_gain: 0.7}
+  gain110: {left_gain: 1.1}
+  gain120: {left_gain: 1.2}
+  gain130: {left_gain: 1.3}
+  tau150: {sensor_tau_factor: 1.5}
+  tau200: {sensor_tau_factor: 2.0}
+  noise200: {sensor_noise_factor: 2.0}
+  drift: {left_drift_per_s: 0.001}
+  saturation: {sensor_saturation: 0.3}
+  samples01: {sample_drop_probability: 0.01}
+  samples05: {sample_drop_probability: 0.05}
+  samples10: {sample_drop_probability: 0.10}
+  servo125: {servo_time_factor: 1.25}
+  servo150: {servo_time_factor: 1.5}
+  delay1: {action_delay_steps: 1}
+  delay2: {action_delay_steps: 2}
+  delay4: {action_delay_steps: 4}
+  packets01: {command_drop_probability: 0.01}
+  packets05: {command_drop_probability: 0.05}
+  packets10: {command_drop_probability: 0.10}
+  heading10: {heading_noise_deg: 10.0}
+  low_source_gain: {source_factor: 0.5, left_gain: 0.8}
+  turn_tau: {start_s: 10.0, wind_turn_deg: 30.0, sensor_tau_factor: 1.5}
+  servo_delay: {servo_time_factor: 1.5, action_delay_steps: 2}
