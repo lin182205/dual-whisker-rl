@@ -7,7 +7,9 @@ set -Eeuo pipefail
 ENV_NAME="${DUAL_WHISKER_CONDA_ENV:-dual-whisker-rl}"
 PYTHON_VERSION="${DUAL_WHISKER_PYTHON_VERSION:-3.11}"
 TORCH_INDEX_URL="${DUAL_WHISKER_TORCH_INDEX_URL:-}"
+CUDA_VERSION="${DUAL_WHISKER_CUDA_VERSION:-}"
 CPU_ONLY=0
+USE_EXISTING_TORCH=0
 REQUIRE_CUDA=0
 WITH_HARDWARE=0
 WITH_FFMPEG=0
@@ -21,6 +23,8 @@ usage() {
   --env-name NAME          Conda 环境名，默认 dual-whisker-rl
   --python VERSION         Python 版本，默认 3.11
   --cpu-only              强制安装 CPU 版 PyTorch
+  --cuda-version VERSION  选择 PyTorch 的 CUDA 版本，如 12.8；已有版本须匹配
+  --use-existing-torch    仅复用目标环境中已安装的 PyTorch，缺少时直接报错
   --require-cuda          检测到 torch.cuda 不可用时部署失败
   --torch-index-url URL   使用指定 PyTorch wheel 源
   --with-hardware         额外安装真机串口依赖
@@ -32,6 +36,10 @@ usage() {
   DUAL_WHISKER_CONDA_ENV
   DUAL_WHISKER_PYTHON_VERSION
   DUAL_WHISKER_TORCH_INDEX_URL
+  DUAL_WHISKER_CUDA_VERSION
+
+默认保留目标环境已有的 PyTorch；GPU 环境缺少 PyTorch 时必须指定
+--cuda-version 或 --torch-index-url。脚本不安装系统 CUDA Toolkit 或驱动。
 EOF
 }
 
@@ -54,6 +62,15 @@ while (($# > 0)); do
             ;;
         --cpu-only)
             CPU_ONLY=1
+            shift
+            ;;
+        --cuda-version)
+            (($# >= 2)) || die "--cuda-version 缺少参数"
+            CUDA_VERSION="$2"
+            shift 2
+            ;;
+        --use-existing-torch)
+            USE_EXISTING_TORCH=1
             shift
             ;;
         --require-cuda)
@@ -90,6 +107,11 @@ done
 [[ "$ENV_NAME" =~ ^[A-Za-z0-9._-]+$ ]] || die "Conda 环境名只能包含字母、数字、点、下划线和连字符"
 [[ "$PYTHON_VERSION" =~ ^[0-9]+([.][0-9]+){1,2}$ ]] || die "Python 版本格式无效：$PYTHON_VERSION"
 ((CPU_ONLY == 0)) || [[ -z "$TORCH_INDEX_URL" ]] || die "--cpu-only 与 --torch-index-url 不能同时使用"
+((CPU_ONLY == 0)) || [[ -z "$CUDA_VERSION" ]] || die "--cpu-only 与 --cuda-version 不能同时使用"
+((CPU_ONLY == 0 || REQUIRE_CUDA == 0)) || die "--cpu-only 与 --require-cuda 不能同时使用"
+[[ -z "$CUDA_VERSION" || "$CUDA_VERSION" =~ ^[0-9]+[.][0-9]+$ ]] || die "CUDA 版本格式无效，请使用如 12.8 的主次版本"
+[[ -z "$CUDA_VERSION" || -z "$TORCH_INDEX_URL" ]] || die "--cuda-version 与 --torch-index-url 不能同时使用"
+((USE_EXISTING_TORCH == 0)) || { ((CPU_ONLY == 0)) && [[ -z "$TORCH_INDEX_URL" ]]; } || die "--use-existing-torch 不能与 --cpu-only 或 --torch-index-url 同时使用"
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
@@ -115,6 +137,7 @@ echo "[2/6] Conda 环境：$ENV_NAME，Python：$PYTHON_VERSION"
 if conda_env_exists; then
     echo "环境已存在，将复用并补齐依赖。"
 else
+    ((USE_EXISTING_TORCH == 0)) || die "环境 $ENV_NAME 不存在；请用 --env-name 指定预装 PyTorch 的环境"
     conda create --yes --name "$ENV_NAME" "python=$PYTHON_VERSION" pip
 fi
 if ! run_env python -c "import sys; expected=tuple(map(int, '$PYTHON_VERSION'.split('.')[:2])); raise SystemExit(0 if sys.version_info[:2] == expected else 1)"; then
@@ -129,18 +152,40 @@ if ((CPU_ONLY == 1)); then
     run_env python -m pip install --upgrade --index-url https://download.pytorch.org/whl/cpu "torch>=2.2"
 elif [[ -n "$TORCH_INDEX_URL" ]]; then
     run_env python -m pip install --upgrade --index-url "$TORCH_INDEX_URL" "torch>=2.2"
+elif run_env python -c 'import importlib.util; raise SystemExit(0 if importlib.util.find_spec("torch") is not None else 1)'; then
+    echo "复用目标 Conda 环境已有的 PyTorch，不自动升级或更换 CUDA 构建。"
+elif ((USE_EXISTING_TORCH == 1)); then
+    die "环境 $ENV_NAME 未安装 PyTorch；请指定正确的 --env-name，或去掉 --use-existing-torch 并指定 --cuda-version"
+elif [[ -n "$CUDA_VERSION" ]]; then
+    run_env python -m pip install --index-url "https://download.pytorch.org/whl/cu${CUDA_VERSION//./}" "torch>=2.2"
 elif command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
-    echo "检测到 NVIDIA GPU，使用 requirements-server.txt 配置的 PyTorch 包。"
-    echo "如需指定 CUDA wheel，请传入 --torch-index-url。"
+    die "检测到 NVIDIA GPU，但目标环境没有 PyTorch。请指定 --cuda-version（如 12.8）或 --torch-index-url；若镜像已预装 PyTorch，请用 --env-name 指定它所在的环境"
 else
     echo "未检测到 NVIDIA GPU，安装 CPU 版 PyTorch。"
     run_env python -m pip install --upgrade --index-url https://download.pytorch.org/whl/cpu "torch>=2.2"
 fi
-run_env python -m pip install -r requirements-server.txt
+
+# 在安装 SB3 等依赖前核对构建，并锁定 PyTorch，避免依赖解析更换用户选定的版本。
+run_env env EXPECTED_CUDA_VERSION="$CUDA_VERSION" python -c '
+import os
+import torch
+
+expected = os.environ.get("EXPECTED_CUDA_VERSION")
+print(f"使用 PyTorch: {torch.__version__}，构建 CUDA: {torch.version.cuda}")
+if expected and torch.version.cuda != expected:
+    raise SystemExit(
+        f"现有 PyTorch 的 CUDA 构建为 {torch.version.cuda}，与所选 {expected} 不一致。"
+        "为保留预装环境，未替换 PyTorch；请指定匹配的环境，或使用新的 --env-name 安装。"
+    )
+'
+mkdir -p results/deployment
+TORCH_CONSTRAINTS="results/deployment/${ENV_NAME}-torch-constraints.txt"
+run_env python -c 'from importlib.metadata import version; print("torch==" + version("torch"))' > "$TORCH_CONSTRAINTS"
+run_env python -m pip install --constraint "$TORCH_CONSTRAINTS" -r requirements-server.txt
 
 if ((WITH_HARDWARE == 1)); then
     echo "安装真机串口依赖。"
-    run_env python -m pip install -r requirements-hardware.txt
+    run_env python -m pip install --constraint "$TORCH_CONSTRAINTS" -r requirements-hardware.txt
 fi
 if ((WITH_FFMPEG == 1)); then
     echo "通过 conda-forge 安装 FFmpeg。"
@@ -164,6 +209,7 @@ print(f"NumPy: {numpy.__version__}")
 print(f"Gymnasium: {gymnasium.__version__}")
 print(f"PyYAML: {yaml.__version__}")
 print(f"PyTorch: {torch.__version__}")
+print(f"PyTorch 构建 CUDA: {torch.version.cuda}")
 print(f"Stable-Baselines3: {stable_baselines3.__version__}")
 print(f"TensorBoard: {tensorboard.__version__}")
 print(f"Matplotlib: {matplotlib.__version__}")
@@ -187,7 +233,6 @@ else
     echo "已按要求跳过项目检查。"
 fi
 
-mkdir -p results/deployment
 run_env python -m pip freeze > "results/deployment/${ENV_NAME}-pip-freeze.txt"
 
 cat <<EOF

@@ -89,7 +89,16 @@ bash scripts/setup_server_conda.sh
 conda activate dual-whisker-rl
 ```
 
-脚本会创建或复用 Conda 环境，安装 PyTorch、SB3、TensorBoard 和仿真依赖，随后检查核心包、CUDA、E4 单元测试、路径可移植性及 formal dry-run。无 NVIDIA GPU 时默认安装 CPU 版 PyTorch；GPU 服务器可加 `--require-cuda`，自定义 PyTorch wheel 源可传 `--torch-index-url URL`。真机或动画环境分别加 `--with-hardware`、`--with-ffmpeg`。
+脚本会创建或复用 Conda 环境，安装 SB3、TensorBoard 和仿真依赖，随后检查核心包、CUDA、E4 单元测试、路径可移植性及 formal dry-run。默认保留目标环境已有的 PyTorch，并在安装其他依赖时锁定其版本。GPU 环境缺少 PyTorch 时，需用 `--cuda-version VERSION` 明确选择 CUDA wheel，或传入 `--torch-index-url URL`；无 NVIDIA GPU 且未指定 CUDA 时才默认安装 CPU 版。脚本不安装系统 CUDA Toolkit 或 NVIDIA 驱动。
+
+已在服务器选择 CUDA 12.8 时：
+
+```bash
+bash scripts/setup_server_conda.sh --cuda-version 12.8 --require-cuda
+conda activate dual-whisker-rl
+```
+
+`--cuda-version 12.8` 对应 [PyTorch 官方 CUDA 12.8 wheel 源](https://pytorch.org/get-started/previous-versions/)。若目标环境已有 PyTorch，脚本会核对 `torch.version.cuda`，版本不匹配时停止并保留现有安装。镜像预装的 PyTorch 只在它所在的 Conda 环境可用；可用 `--env-name NAME --python VERSION --use-existing-torch --cuda-version 12.8 --require-cuda` 指定该环境及其实际 Python 主次版本，此时缺少 PyTorch 会直接报错。`--require-cuda` 仅要求最终 GPU 检查通过。真机或动画环境分别加 `--with-hardware`、`--with-ffmpeg`。
 
 All CLI paths are repository-relative by default. The scripts resolve them against the
 repository root, so they work both from the repository directory and when invoked by an
@@ -100,7 +109,7 @@ a cloud-machine home directory. Explicit absolute paths remain supported for mou
 ```bash
 git clone https://github.com/lin182205/dual-whisker-rl.git
 cd dual-whisker-rl
-bash scripts/setup_server_conda.sh --require-cuda
+bash scripts/setup_server_conda.sh --cuda-version 12.8 --require-cuda
 conda activate dual-whisker-rl
 
 mkdir -p results/logs
