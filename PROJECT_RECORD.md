@@ -2001,28 +2001,3 @@ README与docs/RED_EXPERIMENT_WORKFLOW.md补充了估时范围和恢复规则。
 另完成2方法×2软件故障×2场景的8次扰动仿真、E4规则基线4场景新评估及全缓存恢复、
 2种触须采样策略各2回合的仿真。语法、路径可移植性和差异空白检查通过。
 所有验证产物在results下；没有进行真实硬件测试或长预算正式训练。
-
-
-## 50. 服务器部署显式选择 CUDA 并保留预装 PyTorch
-
-服务器镜像已选择 CUDA 12.8 时，原部署脚本仍可能在新 Conda 环境中通过
-`torch>=2.2` 从默认源安装另一种 CUDA 构建。系统 CUDA、镜像预装 PyTorch
-和新建 Conda 环境中的 PyTorch 是三个不同层次；脚本原本也不安装系统 Toolkit 或驱动。
-
-`scripts/setup_server_conda.sh` 新增 `--cuda-version 12.8`，映射到官方
-`https://download.pytorch.org/whl/cu128`；也支持 `DUAL_WHISKER_CUDA_VERSION`。
-默认复用目标环境已有的 PyTorch，并在指定 CUDA 版本时检查 `torch.version.cuda`，
-不匹配就停止、保留原安装。GPU 环境未安装 PyTorch 且未指定来源时，改为要求明确选择
-CUDA 版本或 wheel 源；CPU 服务器的默认回退保留。`--require-cuda` 继续仅负责设备验收。
-
-新增 `--use-existing-torch`，目标环境或 PyTorch 缺失时直接报错，不创建环境或下载
-PyTorch。镜像预装包须通过 `--env-name` 指向它所在的环境，并用 `--python` 声明
-该环境实际 Python 主次版本。安装 SB3 等项目依赖时，用
-`results/deployment/<环境名>-torch-constraints.txt` 锁定 PyTorch 的完整分发版本，
-依赖冲突时失败而不静默更换构建。README 与服务器文件清单已同步 CUDA 12.8 命令。
-
-验证：Bash 语法及 help 检查通过；用隔离的 Conda/pip 替身跑通 23 个分支场景，覆盖
-cu128 首次安装、已有版本复用、版本不符拒绝、严格复用缺失拒绝、GPU 未选版本拒绝、
-CPU 回退、自定义源、参数冲突、环境变量、指定预装环境及项目检查入口。验证输出位于
-`results/setup_cuda_validation/`，不进入版本库。替身仅验证部署控制流程和约束参数，
-没有安装软件、连接服务器或实测 CUDA 12.8 GPU；环境动力学、奖励和训练逻辑均未改动。

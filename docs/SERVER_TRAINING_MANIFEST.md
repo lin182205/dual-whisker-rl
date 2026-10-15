@@ -11,19 +11,7 @@ bash scripts/setup_server_conda.sh
 conda activate dual-whisker-rl
 ```
 
-默认 Python 3.11、环境名 `dual-whisker-rl`。脚本重复执行会复用环境并补齐依赖，不会删除已有环境。默认保留该环境已安装的 PyTorch，并用约束文件锁定它，避免安装 SB3 等依赖时更换 CUDA 构建。
-
-服务器已选择 CUDA 12.8 时运行：
-
-```bash
-bash scripts/setup_server_conda.sh --cuda-version 12.8 --require-cuda
-```
-
-该参数只选择 [PyTorch 官方的 cu128 wheel](https://pytorch.org/get-started/previous-versions/)，不安装系统 CUDA Toolkit 或驱动。已有 PyTorch 必须满足 `torch.version.cuda == "12.8"`，不匹配时停止并保留现有安装。GPU 环境缺少 PyTorch 且未指定 wheel 来源时，脚本会提示明确选择版本；无 NVIDIA GPU 且未指定 CUDA 时才安装 CPU 版。
-
-若镜像已预装 PyTorch，须用 `--env-name NAME --python VERSION` 指定它所在的 Conda 环境和实际 Python 主次版本，再加 `--use-existing-torch --cuda-version 12.8 --require-cuda`。`--use-existing-torch` 在目标环境或 PyTorch 缺失时直接失败，避免意外重新下载。默认新建的 `dual-whisker-rl` 环境不会继承其他环境中的 PyTorch。
-
-常用选项：`--env-name NAME`、`--python VERSION`、`--cuda-version VERSION`、`--use-existing-torch`、`--cpu-only`、`--require-cuda`、`--torch-index-url URL`、`--with-hardware`、`--with-ffmpeg`。`--cuda-version` 与 `--torch-index-url` 二选一，前者也可通过 `DUAL_WHISKER_CUDA_VERSION` 设置。`--require-cuda` 仅要求最终 GPU 检查通过。
+默认 Python 3.11、环境名 `dual-whisker-rl`。脚本重复执行会复用环境并补齐依赖，不会删除已有环境。常用选项：`--env-name NAME`、`--python VERSION`、`--cpu-only`、`--require-cuda`、`--torch-index-url URL`、`--with-hardware`、`--with-ffmpeg`。
 
 | 依赖 | 用途 | E4 正式实验 |
 |---|---|---|
@@ -86,7 +74,7 @@ bash scripts/setup_server_conda.sh --cuda-version 12.8 --require-cuda
 ## 4. 服务器启动顺序
 
 ```bash
-bash scripts/setup_server_conda.sh --cuda-version 12.8 --require-cuda
+bash scripts/setup_server_conda.sh --require-cuda
 conda activate dual-whisker-rl
 python scripts/run_e4_experiments.py prepare --profile smoke
 python scripts/run_e4_experiments.py run --profile smoke --resume
@@ -109,6 +97,6 @@ git status --short
 
 服务器启动后先完成 smoke，再开启 formal。恢复训练时保留同一输出目录（默认 `results/e4/`）并添加 `--resume`；运行器会核对版本、配置、场景摘要和代码摘要，不兼容的产物不会被静默复用。smoke 与 formal 若需要长期并存，应分别通过 `--output-dir results/e4_smoke` 和 `--output-dir results/e4_formal` 指定目录，避免共用 manifest。
 
-部署脚本会把最终 Python 包版本写入 `results/deployment/<环境名>-pip-freeze.txt`，并将锁定的 PyTorch 版本写入同目录的 `<环境名>-torch-constraints.txt`。若依赖与该版本冲突，安装会报错而不会静默升级 PyTorch。需要自定义 wheel 源时传入 `--torch-index-url`；脚本不会从 `nvidia-smi` 的驱动信息猜测 CUDA wheel 版本。
+部署脚本会把最终 Python 包版本写入 `results/deployment/<环境名>-pip-freeze.txt`，用于记录服务器实际安装状态。若服务器 CUDA 驱动需要特定 PyTorch wheel，请按服务商或 PyTorch 对应版本说明传入 `--torch-index-url`；脚本不会猜测 CUDA wheel 版本。
 
 正式启动器始终启用 `--resume`。PPO 从最近完整 checkpoint 继续并按“目标总步数－已完成步数”计算剩余预算；已完成模型直接跳过，逐场景评测跳过签名一致的 JSON。B1/B2 校准完成文件保存独立签名，匹配时整段跳过；首次搜索会打印候选/任务编号、阶段指标、累计耗时和预计剩余分钟。`stop` 会核对 PID 后发送 SIGINT，使运行器进入中断保存路径。恢复签名不一致时应指定新的 `--output-dir`，不要覆盖旧实验。
