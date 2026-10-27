@@ -2,10 +2,11 @@
 
 当前统一协议和服务器命令见[随机动作正式重评指南](docs/STOCHASTIC_REEVALUATION_ZH.md)。
 先完成现有15M训练，再按修复后的物理参数和随机动作评估全部方法；旧模型、训练与结果保留。
+E4每模型目标800万步，校准与正式训练默认先测实际吞吐，再选择最多两个模型并行。
 
 # Dual Whisker RL
 
-当前75M主方法主对比请使用[快速对比指南](docs/FAST_COMPARISON_ZH.md)：进入0.1米半径即成功，转换旧轨迹并只补缺项，不启动完整E3–E6训练。下文完整实验协议继续保留，历史结果不覆盖。
+旧轨迹转换流程见[快速对比历史指南](docs/FAST_COMPARISON_ZH.md)。当前修正物理与随机采样协议使用上方正式重评指南，旧轨迹保留供溯源。
 
 Minimal Python project for dual-whisker active olfaction reinforcement learning.
 

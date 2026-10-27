@@ -63,6 +63,8 @@ def parser():
     p.add_argument('--e4-dir', type=Path, default=Path('results/e4/formal'))
     p.add_argument('--e4-timesteps', type=int, default=8_000_000, help='新随机评估流水线的E4每方法每seed目标总步数')
     p.add_argument('--e4-training-dir', type=Path, help='新预算E4训练目录，末级为formal；默认按预算独立建目录')
+    p.add_argument('--e4-concurrency', choices=('auto','1','2'), default='auto', help='E4训练并行模型数；auto先短测再选择')
+    p.add_argument('--e4-probe-seconds', type=float, default=150., help='E4五种吞吐短测的采样总计时预算，不含初始化和预热')
     p.add_argument('--episode-store', type=Path, help='显式复用同一科学协议的共享逐局缓存')
     p.add_argument('--primary-model', type=Path, default=Path('results/models/mobile_whisker_gru_ppo_1.zip'))
     p.add_argument('--sealed-source', type=Path, help='含原封存源码与E4辅助文件的根目录')

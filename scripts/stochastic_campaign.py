@@ -109,11 +109,12 @@ def context(args):
     if len(stages)!=len(set(stages)) or set(stages)-set(allowed):raise ValueError('阶段未知或重复')
     args.stages=[s for s in allowed if s in stages]
     if args.e4_timesteps<1:raise ValueError('E4训练预算必须为正整数')
+    if args.e4_concurrency=='auto' and not 0<args.e4_probe_seconds<=300:raise ValueError('自动并行短测采样预算须为0至300秒之间')
     for key in ('source_dir','e4_dir','primary_model','adopt_training_run','output_dir','sealed_source','e4_training_dir','episode_store'):
         value=getattr(args,key)
         if value is not None:setattr(args,key,path(value))
     suffix=f'{args.e4_timesteps//1_000_000}m' if args.e4_timesteps%1_000_000==0 else str(args.e4_timesteps)
-    args.output_dir = args.output_dir or path(f'results/reevaluation_stochastic_v2_e4_{suffix}')
+    args.output_dir = args.output_dir or path(f'results/reevaluation_stochastic_v2_e4_{suffix}_parallel')
     args.e4_training_dir=args.e4_training_dir or path(f'results/e4_{suffix}/formal')
     if args.e4_training_dir.name!='formal':raise ValueError('E4训练目录末级必须为formal')
     validate_output(args.e4_training_dir,[args.source_dir,args.e4_dir,args.adopt_training_run,args.primary_model.parent])
@@ -137,12 +138,13 @@ def context(args):
     signed=dict(protocol=PROTOCOL,sampling=sampling,source_sha=sha(args.source_dir/'manifest.json'),
         e4_sha=sha(args.e4_dir/'manifest.json'),primary=model_header(args.primary_model),
         e4_training=dict(target_steps_per_seed=args.e4_timesteps,directory=str(args.e4_training_dir)),
+        e4_parallel=dict(concurrency=args.e4_concurrency,probe_seconds=args.e4_probe_seconds,scope='calibration_and_training'),
         episode_store=str(episode_store(args)),
         adopted_mlp={k:training[k] for k in ('seed','model_path','target_total_steps','training_config')},
         original_training_sources={n:sha(p) for n,p in files.items()},science=scientific_hashes(),
         controller_sha={n:sha(ROOT/n) for n in ('scripts/stochastic_campaign.py','dual_whisker_rl/stochastic_runtime.py',
             'scripts/run_remaining_formal.py','scripts/remaining_formal_support.py','scripts/experiment_reports.py',
-            'dual_whisker_rl/arrival_reports.py')},groups=spec['groups'])
+            'dual_whisker_rl/arrival_reports.py','scripts/e4_parallel.py','scripts/e4_task_queue.py','scripts/e4_parallel_worker.py')},groups=spec['groups'])
     return dict(old=old,e4=e4,files=files,spec=spec,native=native,completed=completed,
                 sampling=sampling,signed=signed,training=training)
 
@@ -166,6 +168,7 @@ def preview(args,ctx):
         e4_total_target_steps=sum(len(seeds) for n,seeds in ctx['e4']['method_seeds'].items()
                                  if n not in ('b0_random','b1_reactive'))*args.e4_timesteps,
         e4_training_dir=str(args.e4_training_dir),e4_calibration_budget_unchanged=True,
+        e4_concurrency=getattr(args,'e4_concurrency','auto'),e4_parallel_scope='calibration_and_training',
         comparison_episodes=main_count,e4_report_episodes=e4_count,
         e5_report_episodes=len(e5)*len(old['settings']['seeds'])*len(old['scenarios']['test'])*r,
         e6_report_episodes=len(ctx['spec']['groups']['core'])*len(old['settings']['seeds'])*5*min(200,len(old['scenarios']['test']))*r,
@@ -319,6 +322,30 @@ def native_report(args,ctx,experiment,models,*,faults=None):
     atomic_json(out/'state.json',dict(receipt,status='completed',report=report))
 
 
+def wait_e4_handoff(args):
+    """旧串行校准先完成当前模型，接管不丢弃其已有checkpoint和验证。"""
+    import psutil
+    p=args.output_dir/'handoff_parallel.json'
+    if not p.exists():return
+    receipt=read(p)
+    if receipt.get('status')=='adopted':return
+    while True:
+        try:
+            child=psutil.Process(receipt['child_pid'])
+            if child.create_time()!=receipt['child_created'] or child.status()==psutil.STATUS_ZOMBIE:break
+            if child.cmdline()!=receipt['child_command']:raise RuntimeError('旧校准进程身份改变')
+        except psutil.NoSuchProcess:break
+        print(f'[E4接管等待] 保留校准PID={child.pid}的当前任务，等待安全边界',flush=True)
+        time.sleep(min(60,args.monitor_interval))
+    try:
+        parent=psutil.Process(receipt['parent_pid'])
+        if parent.create_time()!=receipt['parent_created'] or parent.cmdline()!=receipt['parent_command'] or parent.status()!=psutil.STATUS_STOPPED:
+            raise RuntimeError('旧E4父调度器身份或暂停状态改变')
+        parent.kill()
+    except psutil.NoSuchProcess:pass
+    receipt.update(status='adopted',adopted_at=time.time());atomic_json(p,receipt)
+
+
 def e4_evaluate(args,ctx):
     from dual_whisker_rl.e4_experiments import method_metadata,scenario_hash,E4Scenario
     from scripts.experiment_reports import export_report
@@ -418,10 +445,14 @@ def run(args):
                         stream.write('\nE3保持原训练内部验证口径；本轮修正后的随机动作协议只用于独立正式重评。\n')
                     if report['status']!='complete':raise RuntimeError('E3训练日志覆盖不全，保留缺项并停止后续阶段')
                 elif stage=='e4':
+                    from scripts.e4_parallel import run_e4_parallel
+                    wait_e4_handoff(args)
                     validate_e4_training_manifest(args,ctx['e4'])
-                    train(e4_training_command(args,bundle,'calibrate'),'e4_calibrate')
+                    if not (args.e4_training_dir/'manifest.json').exists():
+                        prepare=e4_training_command(args,bundle,'train');prepare[2]='prepare'
+                        train(prepare,'e4_prepare')
                     trained_manifest=validate_e4_training_manifest(args,ctx['e4'],required=True)
-                    train(e4_training_command(args,bundle,'train'),'e4_train')
+                    run_e4_parallel(args,bundle,trained_manifest)
                     sub=copy.copy(args);sub.e4_dir=args.e4_training_dir
                     e4_evaluate(sub,{**ctx,'e4':trained_manifest})
                 elif stage=='e5':

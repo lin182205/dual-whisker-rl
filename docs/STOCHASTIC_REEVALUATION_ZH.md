@@ -30,8 +30,9 @@ bash scripts/run_remaining_formal_conda.sh run --background \
   --evaluation-protocol stochastic-arrival-v2 \
   --sealed-source results/remaining_formal_sources_20261027 \
   --adopt-training-run results/remaining_formal_15m \
-  --output-dir results/reevaluation_stochastic_v2_e4_8m \
+  --output-dir results/reevaluation_stochastic_v2_e4_8m_parallel \
   --e4-timesteps 8000000 --e4-training-dir results/e4_8m/formal \
+  --e4-concurrency auto --e4-probe-seconds 150 \
   --episode-store results/reevaluation_stochastic_v2/episodes \
   --workers auto --device auto --eval-seed 20261027 --eval-repeats 1
 ```
@@ -59,7 +60,7 @@ bash scripts/run_fast_comparison_conda.sh run --background \
 旧父调度器并接管。若训练失败则停止后续阶段，不擅自从checkpoint恢复或增加预算。
 原工作目录在当前训练完成后才同步；部署前差异保留备份及Git stash。
 
-当前新输出根目录为`results/reevaluation_stochastic_v2_e4_8m`；先前调度封存保留。
+当前新输出根目录为`results/reevaluation_stochastic_v2_e4_8m_parallel`；先前调度封存保留。
 通过--episode-store继续共享原`results/reevaluation_stochastic_v2/episodes`，避免预算
 调度更新导致相同科学协议的主对比/E5/E6重复评估。episodes保存共享逐局JSON与
 压缩轨迹；main、e4、e5、e6、long_faults保存各自视图与报告；index.md提供报告索引。
@@ -75,6 +76,29 @@ bash scripts/run_fast_comparison_conda.sh run --background \
 不能放宽旧签名。中断恢复前检查processes，存活子进程会阻止重复调度。
 
 ## 资源与报告解释
+
+E4并行覆盖B1规则搜索、B2的20个102,400步短校准任务、7方法×5seed的35个正式模型。
+`--e4-concurrency auto|1|2`默认auto；auto在独立诊断目录测量单GRU、单历史MLP、双GRU、
+双MLP及混合组合。`--e4-probe-seconds 150`平均分配为每配置30秒；初始化和一个完整
+rollout预热不计时，计时包括后续采样和PPO更新，并允许完整rollout收尾。因此总墙钟
+时间会超过150秒。只看吞吐，不使用正式测试场景或成功率选择配置。
+
+同类双模型合计吞吐至少超过对应单模型10%，混合组合至少超过两个单模型吞吐的
+调和平均10%，才允许该组合并行。最大两模型，各自仍用8环境、512步及原PPO参数，
+Torch和数学库线程数均为1。80%容器内存上限及至少1GiB显存余量约束第二任务启动。
+资源不足则等待；吞吐不达标的组合串行。B1按CPU配额、内存及--workers限制分配候选。
+显式1/2可覆盖吞吐选择，资源余量约束仍然有效。正式评估与训练分阶段执行。
+
+E4调度记录在`results/e4_8m/formal/parallel/`：`concurrency_probe.json`保存硬件、软件、
+计时、实际步数及允许组合；`processes/`保存每任务PID、创建时间、命令及状态，
+`logs/`保存独立日志，`queue_state.json`保存当前队列。正式模型、TensorBoard和
+checkpoint仍在原方法/seed目录。诊断模型不计入正式35个模型。校准按原候选、扇区和
+seed顺序汇总，完成顺序不影响均值、优先级或平局规则；两项校准完成后才能正式训练。
+
+E4根目录使用独占调度锁；恢复先识别存活任务，避免重复训练。硬件或训练/诊断实现改变
+需要重测时，先等存活任务完成再测。失败会停止派发，继续监控健康任务，不自动重试；
+人工查明失败原因并保存原收据后才可恢复失败任务。已有checkpoint恢复至800万总目标，
+不是再追加800万。切换父调度保留B1结果、已完成校准模型及验证缓存；新调度仅补缺项。
 
 长训练与正式评估串行。评估按亲和性、配额、内存和显存选择上限，比较CPU多进程与
 集中GPU批量推理吞吐；预热只使用验证片段，采样预算最多60秒，不按成功率选设备。
