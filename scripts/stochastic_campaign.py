@@ -241,8 +241,17 @@ def synchronize_original(output):
     root=Path(deployment['original_checkout']).resolve()
     expected=deployment['release_commit']
     def git(*argv):
-        return subprocess.check_output(['git',*argv],cwd=root,text=True,stderr=subprocess.STDOUT).strip()
-    git('fetch','origin','main')
+        return subprocess.check_output(['git',*argv],cwd=root,text=True,stderr=subprocess.STDOUT,timeout=60).strip()
+    source='origin'
+    bundle=deployment.get('verified_git_bundle')
+    if bundle:
+        source=str(Path(bundle['path']).resolve())
+        if bundle['commit']!=expected or sha(source)!=bundle['sha256']:
+            raise ValueError('Git同步包摘要或提交不符，拒绝同步原目录')
+        git('bundle','verify',source)
+        git('fetch',source,'main:refs/remotes/origin/main')
+    else:
+        git('fetch','origin','main')
     if git('rev-parse','origin/main')!=expected:raise RuntimeError('远端main变化，保留旧目录并停止自动同步')
     changes=git('ls-files','--modified','--others','--exclude-standard').splitlines()
     actual={n:sha(root/n) for n in changes if (root/n).is_file()}
@@ -251,9 +260,9 @@ def synchronize_original(output):
         git('stash','push','--include-untracked','--message',f'pre-stochastic-v2-{expected[:12]}')
         deployment['preserved_stash']=git('rev-parse','refs/stash')
         atomic_json(receipt,deployment)
-    git('pull','--ff-only','origin','main')
+    git('pull','--ff-only',source,'main')
     if git('rev-parse','HEAD')!=expected:raise RuntimeError('原目录提交号核对失败')
-    deployment.update(original_checkout_synchronized=True)
+    deployment.update(original_checkout_synchronized=True,synchronization_transport='verified_git_bundle' if bundle else 'origin')
     atomic_json(receipt,deployment)
 
 

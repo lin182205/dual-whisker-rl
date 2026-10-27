@@ -4,11 +4,11 @@ from types import SimpleNamespace
 import tempfile
 import unittest
 from unittest.mock import patch
-from dual_whisker_rl.arrival_protocol import atomic_json,read
+from dual_whisker_rl.arrival_protocol import atomic_json,read,sha
 from scripts.run_remaining_formal import parser
 from scripts.run_e4_experiments import ppo_rollout_settings
 from scripts.stochastic_campaign import (e4_training_command,validate_e4_training_manifest,
-    e4_training_completed,episode_store,preview)
+    e4_training_completed,episode_store,preview,synchronize_original)
 
 
 class E4BudgetOverrideTests(unittest.TestCase):
@@ -90,6 +90,29 @@ class E4BudgetOverrideTests(unittest.TestCase):
         self.assertEqual(result['e4_target_steps_each'],8_000_000)
         self.assertEqual(result['e4_total_target_steps'],280_000_000)
         self.assertTrue(result['e4_calibration_budget_unchanged'])
+
+    def test_verified_bundle_transport_requires_exact_commit_and_preserves_ff_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out=Path(tmp);bundle=out/'commit.bundle';bundle.write_bytes(b'software test fixture')
+            receipt=dict(original_checkout=str(out/'checkout'),release_commit='expected',original_uncommitted_sha256={},
+                verified_git_bundle=dict(path=str(bundle),sha256=sha(bundle),commit='expected'))
+            atomic_json(out/'deployment.json',receipt);calls=[]
+            def git(argv,**kwargs):
+                calls.append(argv)
+                return 'expected\n' if argv[1]=='rev-parse' else ''
+            with patch('subprocess.check_output',side_effect=git):synchronize_original(out)
+            self.assertIn(['git','bundle','verify',str(bundle.resolve())],calls)
+            self.assertIn(['git','pull','--ff-only',str(bundle.resolve()),'main'],calls)
+            self.assertNotIn(['git','fetch','origin','main'],calls)
+            self.assertEqual(read(out/'deployment.json')['synchronization_transport'],'verified_git_bundle')
+
+    def test_tampered_bundle_rejected_before_git_or_stash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out=Path(tmp);bundle=out/'commit.bundle';bundle.write_bytes(b'wrong content')
+            atomic_json(out/'deployment.json',dict(original_checkout=str(out/'checkout'),release_commit='expected',
+                verified_git_bundle=dict(path=str(bundle),sha256='not_actual',commit='expected')))
+            with patch('subprocess.check_output',side_effect=AssertionError('不得执行Git')),self.assertRaises(ValueError):
+                synchronize_original(out)
 
 
 if __name__=='__main__':unittest.main()
