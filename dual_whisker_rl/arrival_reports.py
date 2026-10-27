@@ -25,27 +25,34 @@ def write_table(path, rows, fields=None):
 def make_report(spec, jobs, output, draws=2000):
     import numpy as np
     from dual_whisker_rl.arrival_protocol import cached
-    names = ('main', *BASELINES)
+    names = tuple(dict.fromkeys(m['variant'] for m in spec['models']))
     labels = dict(LABELS)
     primary_millions = spec['models'][0]['evaluated_checkpoint_steps']/1e6
     labels['main'] = f'主动策略{primary_millions:.2f}M（单模型）'
+    labels.update(spec.get('labels', {}))
     directory = Path(output) / 'reports' / datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
     directory.mkdir(parents=True)
     rows, inputs = [], []
     for job in jobs:
         if cached(job):
-            rows.append(read(job['output']))
-            inputs.append(dict(path=str(Path(job['output']).relative_to(output)), sha256=sha(job['output'])))
+            rows.append({**read(job['output']), 'variant':job['model']['variant']})
+            path = Path(job['output']).resolve()
+            try:
+                source_path = str(path.relative_to(Path(output).resolve()))
+            except ValueError:
+                source_path = str(path)
+            inputs.append(dict(path=source_path, sha256=sha(path)))
     by_method = defaultdict(list)
     for r in rows:
         by_method[r['variant']].append(r)
     seed_counts = {n: sum(m['variant'] == n for m in spec['models']) for n in names}
+    repeats = spec.get('sampling', {}).get('eval_repeats', 1)
     scenes = [s['scenario_id'] for s in spec['scenarios']['test']]
     coverage, summaries, seeds, vectors = [], [], [], {}
     rng = np.random.default_rng(73)
     for name in names:
         items = by_method[name]
-        expected = len(scenes)*seed_counts[name]
+        expected = len(scenes)*seed_counts[name]*repeats
         coverage.append(dict(variant=name, label=labels[name], actual=len(items), expected=expected,
                              complete=len(items) == expected, training_models=seed_counts[name]))
         for model in (m for m in spec['models'] if m['variant'] == name):
@@ -62,7 +69,7 @@ def make_report(spec, jobs, output, draws=2000):
             per_scene[r['scenario_id']].append(r)
         for metric in METRICS:
             vector = {sid: float(np.mean([float(r[metric]) for r in group]))
-                      for sid, group in per_scene.items() if len(group) == seed_counts[name]}
+                      for sid, group in per_scene.items() if len(group) == seed_counts[name]*repeats}
             vectors[name, metric] = vector
             values = np.array(list(vector.values()))
             interval = [None, None]
@@ -75,7 +82,7 @@ def make_report(spec, jobs, output, draws=2000):
                 available_episodes=len(items), expected_episodes=expected, training_models=seed_counts[name],
                 uncertainty_scope='conditional_on_frozen_models'))
     differences = []
-    for name in BASELINES:
+    for name in names[1:]:
         for metric in METRICS:
             left, right = vectors['main', metric], vectors[name, metric]
             common = sorted(set(left) & set(right))
@@ -114,17 +121,18 @@ def make_report(spec, jobs, output, draws=2000):
             'pdf.fonttype': 42, 'svg.fonttype': 'none'})
         fig, axes = plt.subplots(1, 2, figsize=(7.2, 3.4))
         fig.subplots_adjust(left=.27, right=.97, bottom=.25, top=.86, wspace=.42)
+        default_english = dict(zip(BASELINES, ('Fixed', 'Periodic', 'Single frame', 'History MLP', 'No DR 2M')))
         english = [f'Active {primary_millions:.2f}M (1 model)'] + [
-            f"{label} ({seed_counts[name]} models)" for name, label in zip(BASELINES,
-            ('Fixed', 'Periodic', 'Single frame', 'History MLP', 'No DR 2M'))]
+            f"{spec.get('english_labels', {}).get(name, default_english.get(name, name))} ({seed_counts[name]} models)"
+            for name in names[1:]]
         for ax, metric, title in zip(axes, ('success', 'odor_hit_ratio'), ('Success (%)', 'Odor hit ratio (%)')):
             values = [next(r for r in summaries if r['variant'] == n and r['metric'] == metric) for n in names]
             for i, r in enumerate(values):
                 color = '#217A68' if i == 0 else '#7C8792'
                 ax.hlines(i, r['ci95_low']*100, r['ci95_high']*100, color=color, lw=1.2)
                 ax.plot(r['mean']*100, i, 'o', color=color, ms=4)
-            ax.set_yticks(range(6), english if ax is axes[0] else ['']*6)
-            ax.set_ylim(5.6, -.6)
+            ax.set_yticks(range(len(names)), english if ax is axes[0] else ['']*len(names))
+            ax.set_ylim(len(names)-.4, -.6)
             ax.set_xlabel(title)
             upper = max(max(r['ci95_high']*100 for r in values)*1.15, 1.)
             ax.set_xlim(-.03*upper, upper)
@@ -146,11 +154,15 @@ def make_report(spec, jobs, output, draws=2000):
                 for metric in ('success', 'odor_hit_ratio')]
         display = ['缺失' if value is None else f'{value:.2%}' for value in vals]
         text.append(f"| {c['label']} | {c['actual']}/{c['expected']} | {c['training_models']} | {display[0]} | {display[1]} |")
-    text += ['', '所有差值为75M主方法减对照；每个场景的对照值先对真实训练seed取均值，再按共享场景配对。区间仅描述现有模型集合在场景上的不确定性，不提供训练seed级p值。', '',
+    text += ['', '所有差值为主方法减对照；每个场景的对照值先对真实训练seed取均值，再按共享场景配对。区间仅描述现有模型集合在场景上的不确定性，不提供训练seed级p值。', '',
              '缺项不填零；完整主图仅在全部模型×场景完成时生成。逐场景、逐seed、覆盖率、模型训练信息和五类分层表保存在tables。']
     text += ['', *[f'![主对比]({f})' for f in figures]]
+    if spec.get('sampling'):
+        text[3:3] = [f"评估协议：{spec['protocol']}，随机采样动作；eval_seed={spec['sampling']['eval_seed']}，每模型/场景{repeats}次。", '',
+            '羽流继承移动环境完整解析参数；当前标称气团寿命约45.83秒（以逐局effective_physics为准）。',
+            '旧10.2%为7秒气团、确定性动作的历史结果，不与本轮直接合并。训练物理与预算差异仍须披露。', '']
     (directory/'report.md').write_text('\n'.join(text)+'\n', encoding='utf-8')
-    atomic_json(directory/'report_manifest.json', dict(protocol=PROTOCOL, status=status, inputs=inputs,
+    atomic_json(directory/'report_manifest.json', dict(protocol=spec.get('protocol',PROTOCOL), sampling=spec.get('sampling'), status=status, inputs=inputs,
         source_manifest_sha256=spec['source_manifest_sha256'], config=spec['config'], models=spec['models'],
         bootstrap_draws=draws, uncertainty_scope='conditional_on_frozen_models', figures=figures))
     atomic_json(Path(output)/'latest_report.json', dict(status=status, report=str(directory/'report.md')))

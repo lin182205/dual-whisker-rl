@@ -692,7 +692,7 @@ class WhiskerOnlyPuffEnv(gym.Env):
             "world_half": self.world_half,
         }
         if self.plume_model == "dynamic":
-            self.plume = DynamicPuffPlume(
+            self.plume = self._make_dynamic_plume(
                 gas_field_mode=str(cfg.get("gas_field_mode", "puff")),
                 **plume_common,
             )
@@ -820,6 +820,10 @@ class WhiskerOnlyPuffEnv(gym.Env):
         self.sensor_noise_std = n["noise_std"] * float(r.uniform(0.5, 2.0))
         # DR 下引入随机基线漂移，模拟真实 MQ-3 每次上电基线不一致。
         self.sensor_baseline_drift_std = float(r.uniform(0.0, 0.010))
+
+    def _make_dynamic_plume(self, **kwargs) -> DynamicPuffPlume:
+        """子类复用完整解析参数；在构造时选择羽流类型，避免事后重建丢参。"""
+        return DynamicPuffPlume(**kwargs)
 
     def _build_sensor(self, side: str) -> FirstOrderGasSensor | AsymmetricGasSensor:
         """按配置构造单个气体传感器，并使用侧别独立随机流。"""

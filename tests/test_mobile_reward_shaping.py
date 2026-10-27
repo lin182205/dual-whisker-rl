@@ -6,7 +6,11 @@ import unittest
 from dual_whisker_rl.envs import MobileWhiskerPuffEnv
 
 
-FAST_CONFIG = {"plume_overrides": {"puff_warmup_steps": 1}}
+# 这些数值用于验证奖励公式，显式固定测试系数，避免绑定已调整过的生产默认值。
+FAST_CONFIG = {"plume_overrides": {"puff_warmup_steps": 1},
+               "progress_reward_scale": 1.0, "best_concentration_reward_scale": 5.0,
+               "stagnation_window": 5, "stagnation_penalty": 0.1,
+               "whisker_reacquisition_bonus": 0.0}
 
 
 class MobileRewardShapingTests(unittest.TestCase):

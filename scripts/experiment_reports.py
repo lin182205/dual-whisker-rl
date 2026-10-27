@@ -207,6 +207,11 @@ def export_report(experiment, root, out, args, names, spec, profile, manifest, *
     out.mkdir(parents=True, exist_ok=True)
     sources, figures, tables, notes = set(), [], [], []
     source = manifest.get("external_model")
+    corrected = manifest.get('evaluation_protocol') == 'stochastic-arrival-v2'
+    if corrected:
+        notes += ['修正评估协议：首次进入0.1米、额外DR关闭、逐场景独立随机采样动作。',
+                  '训练保持原封存；历史模型可能在7秒气团下训练，测试使用修正后的移动羽流。训练预算与目标差异须一并解释。',
+                  '重复采样先按模型/场景取均值，不作为额外独立训练seed。']
     status = "complete"
     if (root / "manifest.json").exists():
         sources.add(root / "manifest.json")
@@ -253,14 +258,14 @@ def export_report(experiment, root, out, args, names, spec, profile, manifest, *
                 expected = int(sealed["scenario_counts"]["test"])
                 coverage = [dict(experiment="e4",variant=n,actual_episodes=sum(r["variant"]==n for r in rows),
                     expected_episodes=expected*len(sealed["method_seeds"][n])) for n in selected]
-                notes.append("原E4：瞬时进入气源半径；其训练预算和场景协议独立，不能与持续1秒判据混合。")
+                notes.append('E4按新统一随机动作协议重评；训练预算和题库仍保留原安排。' if corrected else "原E4：瞬时进入气源半径；其训练预算和场景协议独立，不能与持续1秒判据混合。")
             else:
                 rows, coverage = [], []
         else:
             rows = native_rows(root, names, profile["seeds"], sources)
             expected = len(json.loads((root/"scenarios_test.json").read_text(encoding="utf-8")))
             coverage = coverage_rows(names,profile["seeds"],rows,expected,"e4")
-            notes.append("已有模型采用当前持续1秒成功判据复评；单模型结果不构成完整方法对比。")
+            notes.append('已有模型按新首次到源协议复评；单模型结果不构成完整方法对比。' if corrected else "已有模型采用当前持续1秒成功判据复评；单模型结果不构成完整方法对比。")
         summary, per_seed = aggregate_rows(rows, args.bootstrap)
         table(out,"episodes",rows,["variant","training_seed","scenario_id",*METRICS])
         table(out,"method_metrics",summary,["variant","metric","mean","ci95_low","ci95_high","training_seeds","episodes"])
@@ -338,7 +343,7 @@ def export_report(experiment, root, out, args, names, spec, profile, manifest, *
     text += [f"- [{n}](figures/{n}.png)：PNG预览、PDF/SVG向量版及同名图注。" for n in figures] or ["没有足够的真实数据绘图，缺项已写入状态表。"]
     (out/"report.md").write_text("\n".join(text)+"\n",encoding="utf-8")
     write_json(out/"report_manifest.json",dict(experiment=experiment,status=status,profile=args.profile,
-        experiment_signature=manifest["signature"],external_model=source,backend="python_matplotlib",
+        experiment_signature=manifest["signature"],evaluation_protocol=manifest.get('evaluation_protocol'),external_model=source,backend="python_matplotlib",
         inputs=[dict(path=portable_path(p),sha256=sha256_file(p)) for p in sorted(sources)],
         figures=figures,tables=tables,bootstrap_draws=args.bootstrap,notes=notes,
         figure_contract=dict(question={"e3":"训练学习表现是否稳定？","e4":"方法在共享场景上有何差异？",

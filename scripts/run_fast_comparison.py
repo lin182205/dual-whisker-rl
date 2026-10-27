@@ -26,7 +26,12 @@ def parser():
     p.add_argument('phase', choices=('plan', 'run', 'status', 'summarize'), nargs='?', default='plan')
     p.add_argument('--model-path', type=Path, default=Path('results/models/mobile_whisker_gru_ppo_1.zip'))
     p.add_argument('--reuse-from', type=Path, default=Path('results/simulation_experiments/formal'))
-    p.add_argument('--output-dir', type=Path, default=Path('results/simulation_experiments/arrival_75m'))
+    p.add_argument('--output-dir', type=Path)
+    p.add_argument('--evaluation-protocol', choices=('legacy-v1','stochastic-arrival-v2'), default='stochastic-arrival-v2')
+    p.add_argument('--sealed-source', type=Path, help='与历史训练manifest逐文件匹配的原源码封存')
+    p.add_argument('--episode-store', type=Path, help='新协议共享逐局缓存目录')
+    p.add_argument('--eval-seed', type=int, default=20261027)
+    p.add_argument('--eval-repeats', type=int, default=1)
     p.add_argument('--workers', default='auto', help='auto或正整数；受CPU配额和可用内存约束')
     p.add_argument('--device', default='auto', help='auto/cpu/cuda/cuda:N；auto比较CPU与集中CUDA批量推理')
     p.add_argument('--calibration-seconds', type=float, default=32., help='性能预热采样总预算，0–60秒，不含初始化')
@@ -36,6 +41,8 @@ def parser():
 
 
 def resolve(args):
+    if args.output_dir is None:
+        args.output_dir = Path('results/simulation_experiments/arrival_75m')
     for key in ('model_path', 'reuse_from', 'output_dir'):
         value = getattr(args, key)
         setattr(args, key, value.resolve() if value.is_absolute() else (ROOT/value).resolve())
@@ -184,6 +191,11 @@ def execute(args, spec):
 def main(argv=None):
     configure_output_encoding()
     args = parser().parse_args(argv)
+    if args.evaluation_protocol == 'stochastic-arrival-v2':
+        from scripts.stochastic_campaign import fast
+        result = fast(args)
+        print(json.dumps(result, ensure_ascii=False, indent=2), flush=True)
+        return result
     spec = resolve(args)
     if args.phase == 'plan':
         result = preview(spec, args.output_dir)

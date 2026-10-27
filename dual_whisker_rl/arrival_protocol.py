@@ -187,8 +187,19 @@ def cached(job):
         if checksum != digest(d):
             return False
         trace = p.with_name(p.stem + '.steps.jsonl.gz')
-        return trace.is_file() and sha(trace) == d['trace_sha256']
-    except (json.JSONDecodeError, KeyError, OSError):
+        if not trace.is_file() or sha(trace) != d['trace_sha256']:
+            return False
+        if job.get('sampling'):
+            # 摘要不能替代压缩日志完整性与逐局标识检查。
+            if (d.get('protocol') != job['sampling']['protocol'] or d.get('sampling') != job['sampling']
+                    or d.get('model_sha256') != job['model']['sha256']
+                    or d.get('scenario_id') != job['scene']['scenario_id'] or d.get('repeat') != job.get('repeat', 0)):
+                return False
+            with gzip.open(trace, 'rt', encoding='utf-8') as stream:
+                count = sum(1 for line in stream if json.loads(line))
+            return count == d['steps']
+        return True
+    except (json.JSONDecodeError, KeyError, OSError, EOFError):
         return False
 
 
@@ -237,7 +248,14 @@ def persist(job, rows, initial_distance, origin, **extra):
     d.update(variant=m['variant'], training_seed=m['training_seed'], model_sha256=m['sha256'],
              evaluated_checkpoint_steps=m['evaluated_checkpoint_steps'], training_budget_steps=m['training_budget_steps'],
              training_config=m['variant_config'], training_config_verified=m['training_config_verified'],
-             result_origin=origin, source=job['source'], protocol=PROTOCOL, job_signature=job['signature'], **extra)
+             result_origin=origin, source=job['source'], protocol=job.get('sampling', {}).get('protocol', PROTOCOL),
+             job_signature=job['signature'], **extra)
+    if job.get('sampling'):
+        from dual_whisker_rl.stochastic_sampling import policy_seed
+        d.update(sampling=job['sampling'], repeat=job.get('repeat', 0),
+                 policy_seed=policy_seed(job['sampling'], m['sha256'], job['scene'], job.get('repeat', 0)),
+                 evaluation_config=job['config'], fault=job.get('fault_label', 'nominal'),
+                 effective_physics=job.get('effective_physics'), training_provenance=m.get('training_provenance'))
     p = Path(job['output'])
     trace_path = p.with_name(p.stem + '.steps.jsonl.gz')
     atomic_trace(trace_path, rows)

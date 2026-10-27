@@ -82,7 +82,12 @@ def bounded_map(function, jobs, workers, initializer=None, initargs=()):
 
 def make_env(config, variant, seed):
     from dual_whisker_rl.experiment_env import make_experiment_env
-    env = make_experiment_env(config, variant, seed=seed, evaluating=True)
+    if variant.get('_e4_method'):
+        from dual_whisker_rl.e4_experiments import make_env as e4_env
+        env = e4_env(variant['_e4_method'], {**config, 'seed': seed, 'domain_randomization': False},
+                     fixed_sector=variant.get('fixed_sector', 5))
+    else:
+        env = make_experiment_env(config, variant, seed=seed, evaluating=True, fault=variant.get('_fault'))
     env.unwrapped.record_trajectory = True
     return env
 
@@ -121,10 +126,12 @@ def step_record(env, action, info):
 
 _CPU_MODEL = None
 _CPU_ENV = None
+_CPU_DESCRIPTOR = None
 
 
 def cpu_init(model, config, variant, barrier=None):
-    global _CPU_MODEL, _CPU_ENV
+    global _CPU_MODEL, _CPU_ENV, _CPU_DESCRIPTOR
+    _CPU_DESCRIPTOR = model
     if sha(model['path']) != model['sha256']:
         raise ValueError('加载前模型内容发生变化')
     _CPU_MODEL = load_policy(model['path'], 'cpu')
@@ -140,8 +147,15 @@ def cpu_episode(job):
     obs, info = _CPU_ENV.reset(seed=job['scene']['seed'], options={'scenario': job['scene']})
     initial_distance = float(info['distance_to_source'])
     trace = []
+    sampler = None
+    if job.get('sampling'):
+        from dual_whisker_rl.stochastic_sampling import EpisodeSampler, sampled_actions
+        sampler = EpisodeSampler(job['sampling'], job['model']['sha256'], job['scene'], job.get('repeat', 0))
     while True:
-        action, _ = _CPU_MODEL.predict(obs, deterministic=True)
+        if sampler is None:
+            action, _ = _CPU_MODEL.predict(obs, deterministic=True)
+        else:
+            action = sampled_actions(_CPU_MODEL, np.asarray([obs]), [sampler])[0]
         obs, _, terminated, truncated, info = _CPU_ENV.step(action)
         trace.append(step_record(_CPU_ENV, np.asarray(action), info))
         if terminated or truncated:
@@ -151,10 +165,18 @@ def cpu_episode(job):
 
 
 def cpu_probe(scene):
+    import numpy as np
     obs, _ = _CPU_ENV.reset(seed=scene['seed'], options={'scenario': scene})
+    sampler = None
+    if _CPU_DESCRIPTOR.get('sampling'):
+        from dual_whisker_rl.stochastic_sampling import EpisodeSampler, sampled_actions
+        sampler = EpisodeSampler(_CPU_DESCRIPTOR['sampling'], _CPU_DESCRIPTOR['sha256'], scene)
     steps = 0
     for _ in range(16):
-        action, _ = _CPU_MODEL.predict(obs, deterministic=True)
+        if sampler is None:
+            action, _ = _CPU_MODEL.predict(obs, deterministic=True)
+        else:
+            action = sampled_actions(_CPU_MODEL, np.asarray([obs]), [sampler])[0]
         obs, _, terminated, truncated, _ = _CPU_ENV.step(action)
         steps += 1
         if terminated or truncated:
@@ -288,11 +310,22 @@ def cuda_consistency(model, cfg, variant, scenes, device):
                 obs, _, term, trunc, _ = env.step(action)
                 if term or trunc:
                     break
-        per_frame = np.stack([cpu.predict(obs, deterministic=True)[0] for obs in samples])
-        batch_cpu = cpu.predict(np.stack(samples), deterministic=True)[0]
+        if model.get('sampling'):
+            from dual_whisker_rl.stochastic_sampling import probabilities, from_uniforms
+            heads = probabilities(cpu, np.stack(samples))
+            uniforms = np.random.default_rng(model['sampling']['eval_seed']).random((len(samples), len(heads)))
+            per_frame = np.concatenate([from_uniforms(probabilities(cpu, np.asarray([obs])), uniforms[i:i+1])
+                                        for i, obs in enumerate(samples)])
+            batch_cpu = from_uniforms(heads, uniforms)
+        else:
+            per_frame = np.stack([cpu.predict(obs, deterministic=True)[0] for obs in samples])
+            batch_cpu = cpu.predict(np.stack(samples), deterministic=True)[0]
         del cpu
         cuda = load_policy(model['path'], device)
-        batch_cuda = cuda.predict(np.stack(samples), deterministic=True)[0]
+        if model.get('sampling'):
+            batch_cuda = from_uniforms(probabilities(cuda, np.stack(samples)), uniforms)
+        else:
+            batch_cuda = cuda.predict(np.stack(samples), deterministic=True)[0]
         equal = bool(np.array_equal(per_frame, batch_cpu) and np.array_equal(per_frame, batch_cuda))
         del cuda
         return dict(equal=equal, observations=len(samples), device=device)
@@ -315,7 +348,7 @@ def gpu_evaluate(jobs, model, cfg, variant, workers, device, callback=None, prob
     if count == 0:
         return dict(steps=0, elapsed_s=0, steps_per_second=0)
     farm = EnvFarm(cfg, variant, min(workers, math.ceil(count/slots)), slots, model['training_seed'])
-    active, observations, initial, traces = {}, {}, {}, {}
+    active, observations, initial, traces, samplers = {}, {}, {}, {}, {}
     iterator = iter(jobs)
     probe_index = 0
 
@@ -324,13 +357,16 @@ def gpu_evaluate(jobs, model, cfg, variant, workers, device, callback=None, prob
         if probe_seconds is not None:
             scene = probe_scenes[probe_index % len(probe_scenes)]
             probe_index += 1
-            return dict(scene=scene)
+            return dict(scene=scene, sampling=model.get('sampling'), repeat=0)
         return next(iterator, None)
 
     def reset(assignments):
         result = farm.call('reset', [(slot, job['scene']) for slot, job in assignments])
         for slot, job in assignments:
             active[slot], traces[slot] = job, []
+            if job.get('sampling'):
+                from dual_whisker_rl.stochastic_sampling import EpisodeSampler
+                samplers[slot] = EpisodeSampler(job['sampling'], model['sha256'], job['scene'], job.get('repeat', 0))
         for slot, obs, distance in result:
             observations[slot], initial[slot] = obs, distance
 
@@ -338,11 +374,18 @@ def gpu_evaluate(jobs, model, cfg, variant, workers, device, callback=None, prob
     try:
         reset([(slot, get_job()) for slot in range(count)])
         # 一次预热不计入采样预算；正式评估不推进环境、不丢弃任何动作。
-        policy.predict(np.stack([observations[s] for s in sorted(active)]), deterministic=True)
+        if model.get('sampling'):
+            from dual_whisker_rl.stochastic_sampling import probabilities, sampled_actions
+            probabilities(policy, np.stack([observations[s] for s in sorted(active)]))
+        else:
+            policy.predict(np.stack([observations[s] for s in sorted(active)]), deterministic=True)
         start = time.perf_counter()
         while active:
             keys = sorted(active)
-            actions, _ = policy.predict(np.stack([observations[k] for k in keys]), deterministic=True)
+            if model.get('sampling'):
+                actions = sampled_actions(policy, np.stack([observations[k] for k in keys]), [samplers[k] for k in keys])
+            else:
+                actions, _ = policy.predict(np.stack([observations[k] for k in keys]), deterministic=True)
             response = farm.call('step', list(zip(keys, actions)))
             reset_jobs = []
             for slot, obs, done, row in response:
@@ -351,6 +394,7 @@ def gpu_evaluate(jobs, model, cfg, variant, workers, device, callback=None, prob
                 observations[slot] = obs
                 if done or (probe_seconds is not None and len(traces[slot]) >= 16):
                     job = active.pop(slot)
+                    samplers.pop(slot, None)
                     if probe_seconds is None:
                         path = persist(job, traces[slot], initial[slot], 'evaluated_cuda', execution_device=device)
                         if callback:

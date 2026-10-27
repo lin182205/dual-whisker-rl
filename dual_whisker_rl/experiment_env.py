@@ -82,6 +82,9 @@ class FaultSensor:
 
 class ExperimentMobileEnv(MobileWhiskerPuffEnv):
     """仅实验入口使用的继承环境：特征消融、持续到源和可控故障。"""
+    def _make_dynamic_plume(self, **kwargs):
+        return ExperimentPuff(**kwargs)
+
     def __init__(self, config):
         cfg = dict(config)
         self.fixed_initial_sector = cfg.pop("fixed_initial_sector", None)
@@ -115,14 +118,6 @@ class ExperimentMobileEnv(MobileWhiskerPuffEnv):
         self._goal_dwell = 0.0
         self._previous_reached = False
         super().__init__(cfg)
-        old = self.plume
-        self.plume = ExperimentPuff(seed=int(cfg.get("seed",0)),source_position=cfg.get("source_position"),
-            dt=self.dt,gas_field_mode=str(cfg.get("gas_field_mode","puff")),
-            wind_speed_range=tuple(cfg.get("wind_speed_range",(.12,.20))),
-            wind_sampling_mode=old.wind_sampling_mode,plume_overrides=cfg.get("plume_overrides"),
-            world_bounds=(self.world_min,self.world_max))
-        for key in ("wind_direction_range","source_distance_range","far_source_crosswind_range","require_source_in_world"):
-            setattr(self.plume,key,getattr(old,key))
         self.plume.domain_randomization = self.domain_randomization
         self.plume.spread = self.dr_spread
         self.plume.fault = self.fault
