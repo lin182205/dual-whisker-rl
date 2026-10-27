@@ -97,7 +97,6 @@ class ReportingCompatibilityTests(unittest.TestCase):
         compatible = reporting_compatible_payload(current, saved)
         self.assertEqual(compatible, previous)
         self.assertEqual(current["code_sha256"][RUNNER_PATH], ETA_RUNNER_SHA256)
-        self.assertEqual(sha256_file(ROOT / RUNNER_PATH), ETA_RUNNER_SHA256)
 
     def test_changed_science_budget_scene_or_runner_rejected(self):
         for change in ("env", "budget", "scene", "future_runner", "tampered_saved"):
@@ -114,9 +113,20 @@ class ReportingCompatibilityTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     seal(path, reporting_compatible_payload(current, saved))
 
+    def test_new_feature_runner_does_not_reuse_display_upgrade_exception(self):
+        args = runner.parser().parse_args(["prepare", "--variants", "main"])
+        *_, current = runner.resolve(args)
+        self.assertNotIn(sha256_file(ROOT / RUNNER_PATH), [ETA_RUNNER_SHA256, PRE_ETA_RUNNER_SHA256])
+        previous = copy.deepcopy(current)
+        previous["code_sha256"][RUNNER_PATH] = PRE_ETA_RUNNER_SHA256
+        saved = {**previous, "signature": digest(previous)}
+        self.assertIs(reporting_compatible_payload(current, saved), current)
+
     def test_real_prepare_retains_old_signature_and_checks_scenes(self):
         args = runner.parser().parse_args(["prepare", "--variants", "main"])
         _, profile, cfg, _, _, current = runner.resolve(args)
+        # 固定模拟当时的显示版本；当前已有模型入口升级不能继承这个兼容例外。
+        current["code_sha256"][RUNNER_PATH] = ETA_RUNNER_SHA256
         previous = copy.deepcopy(current)
         previous["code_sha256"][RUNNER_PATH] = PRE_ETA_RUNNER_SHA256
         with tempfile.TemporaryDirectory() as tmp:

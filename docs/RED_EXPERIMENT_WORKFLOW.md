@@ -1,5 +1,9 @@
 # 仿真对比实验流程
 
+当前75M主方法主对比请使用[快速对比指南](FAST_COMPARISON_ZH.md)：进入0.1米半径即成功，转换旧轨迹并只补缺项，不启动完整E3–E6训练。下文完整实验协议继续保留，历史结果不覆盖。
+
+最新命令与图表说明见[中文使用指南](SIMULATION_EXPERIMENT_GUIDE_ZH.md)。现在省略--experiments时默认运行E3–E6全部；可用--experiments e3 e6选择。每次执行自动创建独立的reports/<UTC时间戳>图表目录。
+
 当前阶段只开展E3训练稳定性、E4仿真主对比、E5消融与敏感性、E6域外扰动仿真。研究重点是主动触须在间歇羽流和慢响应传感器模型下的信息获取收益，移动找源指标作为任务终点同时报告。
 
 配置scope固定为simulation_only。全部命令通过Gymnasium环境运行，无需真实传感器、舵机、底盘或串口。传感器模型采用现有标称参数0.6/3.0秒及其敏感性范围，这些数值属于仿真假设，当前阶段不要求完成实测标定，也不据此宣称实机迁移有效。
@@ -29,7 +33,7 @@
 # 固定验证/测试场景与代码、配置摘要
 .\.venv\Scripts\python.exe scripts\run_red_experiments.py prepare --profile smoke
 
-# 跑六个核心方法的短训练、评估、汇总
+# 跑全部E3–E6的短训练、评估与图表报告
 .\.venv\Scripts\python.exe scripts\run_red_experiments.py run --profile smoke --resume
 
 # 查看任务状态
@@ -58,6 +62,43 @@ formal默认：5个独立训练seed、每配置200万环境步、8个spawn worke
 
 本次已知、仅增加显示的运行器升级支持旧仿真封存：逐字段校验全部配置、代码、场景和旧签名后保留manifest与模型原签名，另写reporting_upgrade.json记录当前运行器摘要。该例外只绑定升级前后两个精确运行器SHA-256；任何其他代码、配置、场景或预算变更仍拒绝混用旧结果。
 
+### 2.2 直接复评已有训练模型
+
+--model-path接受已有SB3 PPO模型，可用绝对路径或相对仓库根目录的路径；.zip后缀可省略。
+run传入它后跳过训练，按--experiments选择复评与报告；普通复评用--experiments e4，扰动用--experiments e6。缺少日志或重训对照时，E3/E5输出缺项表。robustness仅执行E6。
+未指定--variants时只评估main；其他方法须显式指定单个variant，例如history_mlp。一个路径不能
+用于整组或多个variant。train和原E4委托阶段不接受该参数。
+
+~~~powershell
+# 先检查计划：training_tasks为0，训练seed从模型读取
+.\.venv\Scripts\python.exe scripts\run_red_experiments.py plan --profile formal --model-path results/models/size_5-gru_3.zip
+
+# 快速验证已有模型的评估链路，不重新训练
+.\.venv\Scripts\python.exe scripts\run_red_experiments.py run --experiments e4 --profile smoke --model-path results/models/size_5-gru_3.zip --resume
+
+# 648个正式共享测试场景，只评估这个模型
+.\.venv\Scripts\python.exe scripts\run_red_experiments.py run --experiments e4 --profile formal --model-path results/models/size_5-gru_3.zip --resume
+
+# 同一模型、同一批扰动测试场景；默认每故障200场景
+.\.venv\Scripts\python.exe scripts\run_red_experiments.py robustness --profile formal --model-path results/models/size_5-gru_3.zip --faults nominal,wind24,gain80,servo150,delay2 --resume
+~~~
+
+默认输出为results/simulation_experiments/pretrained/<模型名>/<profile>；--output-dir可指定
+独立目录，仍自动附加profile。即使formal配置有5个seed，已有模型也只按文件保存的真实训练
+seed执行一次，不把同一模型伪装成5次独立训练。未保存seed时须以--model-seed声明；已保存
+的seed不能改写。模型原文件只读，不复制或生成selected/final/last模型，不创建训练完成状态
+或学习曲线。status在该模式下显示来源信息。
+
+manifest封存模型路径、SHA-256、训练seed、实际训练步数和当前评估配置；逐场景JSON和汇总
+同样保留来源。--resume只有在模型、代码、配置和场景均匹配时复用，全缓存不加载策略。
+改换模型、改动文件内容或评估配置后用新输出目录。此次新增模型导入功能不属于§2.1的显示
+兼容例外，不会放宽旧实验封存；旧目录中的selected_model.zip可通过--model-path在新目录复评。
+
+观测/动作空间、GRU历史长度/单帧维度和编码器均需匹配所选variant；旧15维Mobile模型不能
+直接用于当前16维观测。接口匹配只证明能执行，training_config_verified始终记录false：用户仍需
+核对原训练场地、羽流、观测语义和传感器参数。新入口仍采用持续1秒成功判据，旧模型复评
+不是统一200万步重训或验证集选择结果，也不补出训练稳定性或消融证据。
+
 ## 3 实验定义与复现规则
 
 新增实验采用0.2秒物理/观测周期，H20名义4秒历史。成功要求进入goal_radius并连续保持1秒，奖励到源项只在合格后发放。搜索时间为实际步数乘dt；失败惩罚时间在任何失败时均取max_steps乘dt，不让快速越界得到较短搜索时间。
@@ -79,15 +120,15 @@ manifest.json封存完整配置、物理参数、全部策略与故障定义、�
 
 ~~~powershell
 # 主方法与核心对照
-.\.venv\Scripts\python.exe scripts\run_red_experiments.py train --profile formal --group core --resume
+.\.venv\Scripts\python.exe scripts\run_red_experiments.py train --experiments e3 --profile formal --group core --resume
 
 # 各因素逐组执行，共享封存场景
-.\.venv\Scripts\python.exe scripts\run_red_experiments.py run --profile formal --group history --resume
-.\.venv\Scripts\python.exe scripts\run_red_experiments.py run --profile formal --group features --resume
-.\.venv\Scripts\python.exe scripts\run_red_experiments.py run --profile formal --group rewards --resume
-.\.venv\Scripts\python.exe scripts\run_red_experiments.py run --profile formal --group geometry --resume
-.\.venv\Scripts\python.exe scripts\run_red_experiments.py run --profile formal --group sensor --resume
-.\.venv\Scripts\python.exe scripts\run_red_experiments.py run --profile formal --group randomization --resume
+.\.venv\Scripts\python.exe scripts\run_red_experiments.py run --experiments e5 --profile formal --group history --resume
+.\.venv\Scripts\python.exe scripts\run_red_experiments.py run --experiments e5 --profile formal --group features --resume
+.\.venv\Scripts\python.exe scripts\run_red_experiments.py run --experiments e5 --profile formal --group rewards --resume
+.\.venv\Scripts\python.exe scripts\run_red_experiments.py run --experiments e5 --profile formal --group geometry --resume
+.\.venv\Scripts\python.exe scripts\run_red_experiments.py run --experiments e5 --profile formal --group sensor --resume
+.\.venv\Scripts\python.exe scripts\run_red_experiments.py run --experiments e5 --profile formal --group randomization --resume
 ~~~
 
 core：main、fixed、periodic、single_frame、history_mlp、no_dr。history包含H1/5/10/20/40；features包含趋势、显式差分、blank_age、角度屏蔽与原始读数；rewards包含去重捕获、最佳浓度、停滞和稀疏奖励；geometry包含四种长度与3/5/10/15扇区；sensor包含GRU/MLP×理想/标称动态的2×2（ideal_sensor、ideal_mlp、nominal_gru、nominal_mlp）以及tau扫参；randomization包含无、窄、默认、宽。

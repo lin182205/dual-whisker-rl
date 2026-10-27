@@ -1,5 +1,7 @@
 # Dual Whisker RL
 
+当前75M主方法主对比请使用[快速对比指南](docs/FAST_COMPARISON_ZH.md)：进入0.1米半径即成功，转换旧轨迹并只补缺项，不启动完整E3–E6训练。下文完整实验协议继续保留，历史结果不覆盖。
+
 Minimal Python project for dual-whisker active olfaction reinforcement learning.
 
 For project goals, method route, current progress, and recommended next steps, see [PROJECT_RECORD.md](PROJECT_RECORD.md).
@@ -187,21 +189,26 @@ bash scripts/run_e4_formal_conda.sh --background
 
 ## 仿真对比实验入口
 
-当前阶段只执行E3训练稳定性、E4仿真主对比、E5消融和E6扰动仿真，详见
-[仿真对比实验流程](docs/RED_EXPERIMENT_WORKFLOW.md)。配置为configs/red_experiments.yaml，
-scope固定为simulation_only，结果默认保存在results/simulation_experiments。
+统一入口支持E3训练稳定性、E4主对比、E5消融和E6扰动测试。**未指定实验时默认全部运行**；
+使用--experiments或--experiment选择一项或多项。详细命令、输出与统计说明见
+[实验脚本中文使用指南](docs/SIMULATION_EXPERIMENT_GUIDE_ZH.md)。
 
 ~~~powershell
+# 默认全部；plan只检查计划
 .\.venv\Scripts\python.exe scripts\run_red_experiments.py plan --profile smoke
 .\.venv\Scripts\python.exe scripts\run_red_experiments.py run --profile smoke --resume
-.\.venv\Scripts\python.exe scripts\run_red_experiments.py run --profile formal --group core --resume
+
+# 手动选择；支持空格或逗号分隔
+.\.venv\Scripts\python.exe scripts\run_red_experiments.py run --experiments e3 e6 --profile formal --resume
+
+# 已有模型只评估，不训练
+.\.venv\Scripts\python.exe scripts\run_red_experiments.py run --experiments e4 e6 --profile formal --model-path results/models/size_5-gru_3.zip --resume
 ~~~
 
-smoke检验仿真链路；formal使用5个独立训练种子和648个共享测试场景。传感器和舵机
-扰动均在软件模型中施加。E0真实标定与E7实机验证暂存于延期设计，不属于当前流程。
+每次执行在结果根目录的reports/<UTC时间戳>下保存独立报告，包含各实验的CSV、PNG预览、
+PDF/SVG矢量图、图注与输入摘要；缺少真实证据时明确输出缺项状态表，不生成虚假曲线。
+已有模型缺训练日志时不能重建E3，单个模型也不能替代E5的独立重训对照。
 
-评估会自动打印已完成场景、百分比、本次新增/复用数、已用时间和预计剩余时间，无需额外参数。
-run_red_experiments.py的evaluate/robustness覆盖本轮选中的全部方法、种子及故障组合；
-首个新场景后开始估时，之后在场景完成时按20场景或10秒刷新。--resume只用新运行场景
-估计速度，全部复用时剩余为零。run_e4_experiments.py显示当前组估时；触须采样对比入口
-也显示总进度。详情见[评估进度说明](docs/RED_EXPERIMENT_WORKFLOW.md#21-评估进度与预计剩余时间)。
+原生实验默认结果根为results/simulation_experiments/<profile>；已有模型默认根为
+results/simulation_experiments/pretrained/<模型名>/<profile>。原E4保持独立协议，group/variants
+只限制E3/E5/E6，原E4用--e4-methods选择方法。所有结果均为仿真，E0/E7真实实验延期。

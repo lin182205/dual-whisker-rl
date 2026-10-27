@@ -11,6 +11,7 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
 import numpy as np
@@ -23,11 +24,17 @@ from dual_whisker_rl.experiment_protocol import digest, seal, write_json, write_
 
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("phase",choices=["plan","prepare","train","evaluate","robustness","summarize","status","run","e4"])
+    p.add_argument("phase",nargs="?",default="run",choices=["plan","prepare","train","evaluate","robustness","summarize","status","run","e4"])
+    p.add_argument("--experiments","--experiment",nargs="+",help="选择e3 e4 e5 e6，支持逗号；省略时运行全部")
+    p.add_argument("--e4-methods",help="原E4方法列表，逗号分隔；group/variants仅限制E3/E5/E6")
+    p.add_argument("--learning-dir",type=Path,help="已有模型配套日志根目录，含<variant>/seed_<seed>/validation_history.json")
+    p.add_argument("--bootstrap",type=int,default=2000,help="论文报告bootstrap次数，默认2000")
     p.add_argument("--config",default="configs/red_experiments.yaml")
     p.add_argument("--profile",choices=["smoke","formal"],default="smoke")
-    p.add_argument("--output-dir",default="results/simulation_experiments")
-    p.add_argument("--group",default="core")
+    p.add_argument("--output-dir",help="默认results/simulation_experiments；已有模型默认放入pretrained/<模型名>子目录")
+    p.add_argument("--model-path",type=Path,help="已训练PPO模型；跳过训练，仅评估一个variant，未指定variants时使用main")
+    p.add_argument("--model-seed",type=int,help="仅当模型未保存训练seed时声明；已保存的seed不能改写")
+    p.add_argument("--group",help="限制E3/E5/E6的配置组；默认E3/E6为core、E5为六类消融全部")
     p.add_argument("--variants",help="逗号分隔；覆盖group")
     p.add_argument("--faults",default="nominal,wind24,gain80,servo150,delay2")
     p.add_argument("--timesteps",type=int)
@@ -39,7 +46,70 @@ def parser():
     p.add_argument("--e4-stage",choices=["prepare","calibrate","train","evaluate","summarize","run","status"],default="run")
     return p
 
+def pretrained_source(args, names, profile):
+    """读取已有模型的来源；一个模型只对应一次训练，不复制成profile中的多个seed。"""
+    if args.phase in ("train", "e4"):
+        raise ValueError("--model-path用于run/evaluate/robustness等复评阶段，不支持train或原E4委托")
+    if len(names) != 1:
+        raise ValueError("--model-path一次只接受一个variant，请用--variants指定模型对应的方法")
+    path = project_path(args.model_path).resolve()
+    if not path.exists() and path.suffix.lower() != ".zip":
+        path = Path(str(path) + ".zip")
+    if not path.is_file():
+        raise FileNotFoundError(f"找不到已有模型：{path}")
+    model_sha = sha256_file(path)
+    try:
+        with zipfile.ZipFile(path) as archive:
+            data = json.loads(archive.read("data"))
+    except (zipfile.BadZipFile, KeyError, ValueError) as exc:
+        raise ValueError(f"不是有效的SB3模型文件：{path}") from exc
+    seed = data.get("seed")
+    seed_origin = "saved_model"
+    if seed is None:
+        seed = args.model_seed
+        seed_origin = "user_declared"
+    elif args.model_seed is not None and args.model_seed != seed:
+        raise ValueError("--model-seed与模型已保存的训练seed不一致，不能把同一模型重标为独立训练")
+    if type(seed) is not int or not 0 <= seed < 2**32:
+        raise ValueError("模型没有有效训练seed，请用--model-seed声明真实训练seed（0到2**32-1）")
+    timesteps = data.get("num_timesteps")
+    if type(timesteps) is not int or timesteps < 1:
+        raise ValueError("模型没有已完成的训练步数，不能作为已训练模型导入")
+    profile["seeds"] = [seed]
+    args.model_path = path
+    return dict(path=portable_path(path), sha256=model_sha, variant=names[0],
+                training_seed=seed, seed_origin=seed_origin, actual_timesteps=timesteps,
+                selection="user_supplied_pretrained", training_config_verified=False)
+
+
+def check_pretrained_contract(model, env, variant):
+    """维度一致仍不足以证明历史堆叠和编码器语义一致。"""
+    from dual_whisker_rl.agents import GRUHistoryExtractor
+    from stable_baselines3.common.torch_layers import FlattenExtractor
+    if env.observation_space != model.observation_space or env.action_space != model.action_space:
+        raise ValueError("已有模型与评估环境接口不匹配："
+                         f"模型观测={model.observation_space}，环境观测={env.observation_space}；"
+                         f"模型动作={model.action_space}，环境动作={env.action_space}。"
+                         "请核对单帧特征、历史长度和variant，旧15维模型不能直接用于当前16维观测")
+    extractor = model.policy.features_extractor
+    encoder = variant.get("encoder", "gru")
+    if encoder == "gru":
+        if not isinstance(extractor, GRUHistoryExtractor):
+            raise ValueError("variant要求GRU编码器，与已有模型不匹配")
+        if (extractor.history_length != int(variant.get("history_length", 20)) or
+                extractor.base_observation_dim != env.base_observation_dim):
+            raise ValueError("已有模型的历史长度或单帧特征维度与variant不一致")
+    elif not isinstance(extractor, FlattenExtractor):
+        raise ValueError("variant要求普通MLP编码器，与已有模型不匹配")
+
+
 def resolve(args):
+    from scripts.experiment_suite import selected_experiments, suite_plan
+    args.experiments = selected_experiments(args)
+    if args.bootstrap < 1:
+        raise ValueError("--bootstrap必须为正")
+    if args.model_path and args.e4_methods:
+        raise ValueError("已有模型只按指定variant复评，不接受原E4方法列表")
     spec = yaml.safe_load(project_path(args.config).read_text(encoding="utf-8"))
     scope = spec.get("scope", "simulation_only")
     if scope != "simulation_only":
@@ -55,15 +125,26 @@ def resolve(args):
         raise ValueError("rollout步数必须能整除batch_size")
     if len(profile["seeds"])!=len(set(profile["seeds"])) or not profile["seeds"]:
         raise ValueError("训练种子不能为空或重复")
-    if args.group not in spec["groups"] and not args.variants:
+    group = args.group or "core"
+    if group not in spec["groups"] and not args.variants:
         raise ValueError("未知实验组")
-    names = args.variants.split(",") if args.variants else spec["groups"][args.group]
+    names = args.variants.split(",") if args.variants else (["main"] if args.model_path else spec["groups"][group])
     names = [n.strip() for n in names]
     if not names or len(set(names))!=len(names) or set(names)-set(spec["variants"]):
         raise ValueError(f"未知或重复变体：{names}")
+    if args.model_seed is not None and args.model_path is None:
+        raise ValueError("--model-seed必须与--model-path一起使用")
+    if args.model_path and not args.variants and args.group not in (None,"core"):
+        raise ValueError("--model-path只评估一个方法，请用--variants指定，不使用--group")
+    source = pretrained_source(args, names, profile) if args.model_path else None
+    if args.output_dir is None:
+        args.output_dir = (f"results/simulation_experiments/pretrained/{args.model_path.stem}"
+                           if source else "results/simulation_experiments")
     faults = [n.strip() for n in args.faults.split(",")]
     if set(faults)-set(spec["faults"]) or len(faults)!=len(set(faults)):
         raise ValueError(f"未知或重复故障：{faults}")
+    if "e6" in args.experiments and "nominal" not in faults:
+        faults.insert(0,"nominal")
     args.faults = ",".join(faults)
     if args.limit is not None and args.limit<1:
         raise ValueError("limit必须为正")
@@ -72,12 +153,17 @@ def resolve(args):
     cfg["max_steps"] = int(profile["max_steps"])
     if cfg.get("plume_model","dynamic")!="dynamic":
         raise ValueError("红字实验只支持dynamic Puff")
-    code_paths = sorted((ROOT/"dual_whisker_rl").rglob("*.py")) + [Path(__file__)]
+    code_paths = sorted((ROOT/"dual_whisker_rl").rglob("*.py")) + [Path(__file__),
+        ROOT/"scripts/experiment_suite.py", ROOT/"scripts/experiment_reports.py",
+        ROOT/"scripts/analyze_experiment_learning.py"]
     code = {portable_path(p):sha256_file(p) for p in code_paths}
-    payload = dict(version=2,scope=scope,profile=args.profile,settings=profile,base_config=cfg,
+    payload = dict(version=3,scope=scope,profile=args.profile,settings=profile,base_config=cfg,
                    variants=spec["variants"],faults=spec["faults"],code_sha256=code,
                    selection="validation_success_then_penalized_time",
                    success="radius_and_continuous_hold",time_unit="seconds")
+    if source:
+        payload.update(external_model=source, selection="user_supplied_pretrained")
+    suite_plan(args,spec,profile,names)  # 在任何写盘前验证全部实验选择。
     return spec,profile,cfg,names,faults,payload
 
 def prepare(root,profile,cfg,payload):
@@ -273,17 +359,22 @@ def evaluate(root,names,spec,profile,cfg,manifest,args,*,robust=False):
         rng = np.random.default_rng(20261016)
         entries = [entries[i] for i in sorted(rng.choice(len(entries),limit,replace=False))]
     faults = args.faults.split(",") if robust else ["nominal"]
+    source = manifest.get("external_model")
     # 先校验本轮所有缓存，剩余工作量包含全部方法、种子和故障。
     jobs = []
     for name in names:
         variant = spec["variants"][name]
         for seed in profile["seeds"]:
             task = root/name/f"seed_{seed}"
-            model_path = task/"selected_model.zip"
+            model_path = project_path(source["path"]) if source else task/"selected_model.zip"
             model_sha = sha256_file(model_path)
-            state = json.loads((task/"state.json").read_text(encoding="utf-8"))
-            if state["status"]!="completed" or state["signature"]!=manifest["signature"] or model_sha!=state["selected_model_sha256"]:
-                raise ValueError(f"模型尚未完成或签名不匹配：{task}")
+            if source:
+                if name != source["variant"] or seed != source["training_seed"] or model_sha != source["sha256"]:
+                    raise ValueError("已有模型来源或SHA-256与封存不一致，使用新的输出目录")
+            else:
+                state = json.loads((task/"state.json").read_text(encoding="utf-8"))
+                if state["status"]!="completed" or state["signature"]!=manifest["signature"] or model_sha!=state["selected_model_sha256"]:
+                    raise ValueError(f"模型尚未完成或签名不匹配：{task}")
             for label in faults:
                 fault = spec["faults"][label]
                 folder = task/("robustness" if robust else "episodes")/label
@@ -312,13 +403,19 @@ def evaluate(root,names,spec,profile,cfg,manifest,args,*,robust=False):
             continue
         name, seed, label = job["name"], job["seed"], job["label"]
         if loaded_path != job["model_path"]:
+            import torch
+            torch.set_num_threads(1)
+            if sha256_file(job["model_path"]) != job["model_sha"]:
+                raise ValueError("加载前模型文件发生变化，拒绝继续评估")
             model = PPO.load(job["model_path"],device="cpu")
             loaded_path = job["model_path"]
         env = make_experiment_env(cfg,job["variant"],seed=seed,evaluating=True,fault=job["fault"])
         prefix = f"[{stage}] 组={index}/{len(jobs)} {name} seed={seed} fault={label}"
         progress.report(prefix, force=True)
         try:
-            if env.observation_space!=model.observation_space or env.action_space!=model.action_space:
+            if source:
+                check_pretrained_contract(model,env,job["variant"])
+            elif env.observation_space!=model.observation_space or env.action_space!=model.action_space:
                 raise ValueError("模型与故障环境的观测/动作契约不一致")
             for scene in entries:
                 if scene.scenario_id in job["cached"]:
@@ -327,6 +424,9 @@ def evaluate(root,names,spec,profile,cfg,manifest,args,*,robust=False):
                 row,steps = rollout(model,env,scene,save_steps=profile["save_step_logs"])
                 row.update(variant=name,training_seed=seed,fault=label,model_sha256=job["model_sha"],
                            evaluation_signature=job["signature"], evaluation_scene_count=len(entries))
+                if source:
+                    row.update(model_origin="pretrained", source_model_path=source["path"],
+                               training_timesteps=source["actual_timesteps"], training_config_verified=False)
                 folder = job["folder"]
                 if steps:
                     folder.mkdir(parents=True,exist_ok=True)
@@ -352,6 +452,10 @@ def summarize(root,names,profile,*,robust=False):
         result = summarize_episodes(rows)
         result["expected_episodes_per_variant"] = len(scenarios(root,"test"))*len(profile["seeds"]) if not robust else None
         result["independent_training_seed_count"] = len(profile["seeds"])
+        manifest = json.loads((root/"manifest.json").read_text(encoding="utf-8"))
+        if manifest.get("external_model"):
+            result["external_model"] = manifest["external_model"]
+            result["inference_scope"] = "单个已有模型的复评；不是统一预算重训、训练稳定性或训练消融结论"
         counts = {name:sum(r["variant"] == name for r in rows) for name in names}
         expected = (rows[0].get("evaluation_scene_count", len(scenarios(root, "test"))) if robust else len(scenarios(root, "test"))) * len(profile["seeds"])
         result["coverage"] = {name:{"actual":count,"expected":expected,"complete":count == expected} for name,count in counts.items()}
@@ -364,26 +468,25 @@ def main():
     args = parser().parse_args()
     spec,profile,cfg,names,faults,payload = resolve(args)
     root = project_path(args.output_dir)/args.profile
-    if args.phase=="e4":
-        command = [sys.executable,str(ROOT/"scripts/run_e4_experiments.py"),args.e4_stage,"--profile",args.profile,
-                   "--config",str(ROOT/f"configs/e4_{args.profile}.yaml"),"--output-dir",str(root/"e4")]
-        if args.resume: command.append("--resume")
-        if args.dry_run:
-            print(json.dumps(command,ensure_ascii=False)); return
-        subprocess.run(command,cwd=ROOT,check=True); return
+    from scripts.experiment_suite import suite_plan
     if args.phase=="plan" or args.dry_run:
-        print(json.dumps(dict(output=portable_path(root),profile=profile,variants=names,
-                              faults=faults,training_tasks=len(names)*len(profile["seeds"]),
-                              simulation_only=True,active_experiments=["E3","E4","E5","E6"],deferred_experiments=["E0","E7"],signature=digest(payload)),ensure_ascii=False,indent=2)); return
+        print(json.dumps(dict(output=portable_path(root),profile=profile,variants=names,faults=faults,
+            external_model=payload.get("external_model"),simulation_only=True,
+            active_experiments=["E3","E4","E5","E6"],deferred_experiments=["E0","E7"],
+            signature=digest(payload),**suite_plan(args,spec,profile,names)),ensure_ascii=False,indent=2))
+        return
     manifest = prepare(root,profile,cfg,payload)
     if args.phase=="prepare": return
     if args.phase=="status":
+        if args.model_path:
+            print(json.dumps(dict(status="pretrained_ready", **manifest["external_model"]),ensure_ascii=False,indent=2))
+            return
         for name in names:
             for seed in profile["seeds"]:
                 path = root/name/f"seed_{seed}"/"state.json"
                 print(name,seed,json.loads(path.read_text(encoding="utf-8")) if path.exists() else "pending")
         return
-    if args.phase in ("train","evaluate","robustness","run"):
+    if args.phase in ("train","evaluate","robustness","run","summarize","e4"):
         lock = root / ".run.lock"
         try:
             handle = lock.open("x", encoding="utf-8")
@@ -400,16 +503,9 @@ def main():
             lock.unlink(missing_ok=True)
 
 def execute(args, root, names, spec, profile, cfg, manifest):
-    if args.phase in ("train","run"):
-        for name in names:
-            for seed in profile["seeds"]:
-                print(f"[训练] {name} seed={seed}",flush=True)
-                train_one(root,name,spec["variants"][name],seed,profile,cfg,manifest,args)
-    if args.phase in ("evaluate","run","robustness"):
-        evaluate(root,names,spec,profile,cfg,manifest,args,robust=args.phase=="robustness")
-    if args.phase in ("summarize","run","robustness"):
-        summarize(root,names,profile)
-        summarize(root,names,profile,robust=True)
+    from scripts.experiment_suite import run_suite
+    return run_suite(args,root,names,spec,profile,cfg,manifest,
+                     train_one=train_one,evaluate=evaluate,summarize=summarize)
 
 if __name__=="__main__":
     from multiprocessing import freeze_support

@@ -10,7 +10,7 @@ import numpy as np
 from dual_whisker_rl.paths import project_path
 from dual_whisker_rl.experiment_protocol import write_json,write_csv,paired_interval
 
-def learning(root,names,draws):
+def learning(root,names,draws,*,seeds=None):
     curves,seed_rows = [],[]
     rng = np.random.default_rng(73)
     for name in names:
@@ -19,9 +19,14 @@ def learning(root,names,draws):
             state_path = task/"state.json"
             if not state_path.exists() or json.loads(state_path.read_text(encoding="utf-8"))["status"]!="completed":
                 continue
-            items = json.loads((task/"validation_history.json").read_text(encoding="utf-8"))
-            if not items: continue
             seed = int(task.name.removeprefix("seed_"))
+            if seeds is not None and seed not in seeds:
+                continue
+            history_path = task/"validation_history.json"
+            if not history_path.exists():
+                continue
+            items = json.loads(history_path.read_text(encoding="utf-8"))
+            if not items: continue
             histories[seed] = {r["timesteps"]:r for r in items}
             steps = np.array(sorted(histories[seed]),dtype=float)
             success = np.array([histories[seed][int(s)]["success_rate"] for s in steps])

@@ -1,3 +1,4 @@
 torch>=2.2
 stable-baselines3>=2.3
 tensorboard>=2.16
+psutil>=5.9
