@@ -17,6 +17,12 @@ PPO从其Categorical/MultiCategorical策略概率采样动作，不增加温度�
 75M与历史模型不重新训练。训练保留原封存、目标总步数和checkpoint选择规则，训练内的
 历史验证不改写成新正式评估。旧2M模型的训练物理与75M不同，报告须继续披露。
 
+2026-10-28起，E4暂定每种需训练方法、每个seed **8,000,000步**，7种方法×5seed，
+主体预算280,000,000步；随机/反应式规则不训练。固定触须扇区校准仍为原短预算。
+8环境×512步rollout取整时，每模型预计8,003,584步，以实际模型头记录为准。
+原100万步E4准备目录只读保留，新预算训练写入results/e4_8m/formal，不改写旧封存。
+预算修改不改变现有模型选择规则、PPO参数、15M训练或E5预算。
+
 在部署好的服务器发布目录中运行：
 
 ```bash
@@ -24,7 +30,9 @@ bash scripts/run_remaining_formal_conda.sh run --background \
   --evaluation-protocol stochastic-arrival-v2 \
   --sealed-source results/remaining_formal_sources_20261027 \
   --adopt-training-run results/remaining_formal_15m \
-  --output-dir results/reevaluation_stochastic_v2 \
+  --output-dir results/reevaluation_stochastic_v2_e4_8m \
+  --e4-timesteps 8000000 --e4-training-dir results/e4_8m/formal \
+  --episode-store results/reevaluation_stochastic_v2/episodes \
   --workers auto --device auto --eval-seed 20261027 --eval-repeats 1
 ```
 
@@ -51,7 +59,9 @@ bash scripts/run_fast_comparison_conda.sh run --background \
 旧父调度器并接管。若训练失败则停止后续阶段，不擅自从checkpoint恢复或增加预算。
 原工作目录在当前训练完成后才同步；部署前差异保留备份及Git stash。
 
-新输出根目录为`results/reevaluation_stochastic_v2`。episodes保存共享逐局JSON与
+当前新输出根目录为`results/reevaluation_stochastic_v2_e4_8m`；先前调度封存保留。
+通过--episode-store继续共享原`results/reevaluation_stochastic_v2/episodes`，避免预算
+调度更新导致相同科学协议的主对比/E5/E6重复评估。episodes保存共享逐局JSON与
 压缩轨迹；main、e4、e5、e6、long_faults保存各自视图与报告；index.md提供报告索引。
 旧manifest、旧轨迹、旧报告均保留，不将旧轨迹截断或重标为新物理条件下的轨迹。
 

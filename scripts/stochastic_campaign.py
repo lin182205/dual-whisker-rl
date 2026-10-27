@@ -36,6 +36,42 @@ def validate_output(output, sources):
             raise ValueError('新评估目录必须与旧结果和模型目录分离')
 
 
+def episode_store(args):
+    return getattr(args,'episode_store',None) or args.output_dir/'episodes'
+
+
+def e4_training_command(args,bundle,phase):
+    """预算通过每次子进程参数显式传递，不依赖封存入口的旧默认值。"""
+    if phase not in ('calibrate','train'):raise ValueError('E4训练入口仅允许校准或训练')
+    return [sys.executable,Path(bundle)/'scripts/run_e4_experiments.py',phase,'--profile','formal',
+        '--config',Path(bundle)/'configs/e4_formal.yaml','--output-dir',args.e4_training_dir.parent,
+        '--timesteps',str(args.e4_timesteps),'--resume']
+
+
+def validate_e4_training_manifest(args,reference,required=False):
+    """新预算单独封存，不把旧100万步任务改标成800万步完成。"""
+    p=args.e4_training_dir/'manifest.json'
+    if not p.exists():
+        if required:raise FileNotFoundError('E4校准未创建新预算封存')
+        return None
+    target=read(p)
+    if target.get('timesteps')!=args.e4_timesteps:raise ValueError('E4输出预算不一致，请使用独立训练目录')
+    for key in ('profile','methods','method_seeds','seeds','n_envs','vec_env_backend','checkpoint_rollouts',
+                'config','scenario_counts','scenario_hashes','code_hashes'):
+        if target.get(key)!=reference.get(key):raise ValueError(f'E4新预算改变了原封存条件：{key}')
+    return target
+
+
+def e4_training_completed(task,target):
+    state_path,metadata_path=task/'state.json',task/'metadata.json'
+    if not state_path.exists() or not metadata_path.exists() or not (task/'model.zip').exists():return False
+    state,metadata=read(state_path),read(metadata_path)
+    if (state.get('status')!='completed' or metadata.get('requested_timesteps')!=target
+            or state.get('actual_timesteps',0)<target):return False
+    head=model_header(task/'model.zip')
+    return head['evaluated_checkpoint_steps']>=target and head['evaluated_checkpoint_steps']==metadata.get('actual_timesteps')
+
+
 def fast(args):
     from dual_whisker_rl.arrival_reports import make_report
     from scripts.remaining_formal_support import campaign_lock
@@ -72,15 +108,22 @@ def context(args):
     stages=args.stages.split(',') if isinstance(args.stages,str) else args.stages
     if len(stages)!=len(set(stages)) or set(stages)-set(allowed):raise ValueError('阶段未知或重复')
     args.stages=[s for s in allowed if s in stages]
-    for key in ('source_dir','e4_dir','primary_model','adopt_training_run','output_dir','sealed_source'):
+    if args.e4_timesteps<1:raise ValueError('E4训练预算必须为正整数')
+    for key in ('source_dir','e4_dir','primary_model','adopt_training_run','output_dir','sealed_source','e4_training_dir','episode_store'):
         value=getattr(args,key)
         if value is not None:setattr(args,key,path(value))
-    args.output_dir = args.output_dir or path('results/reevaluation_stochastic_v2')
+    suffix=f'{args.e4_timesteps//1_000_000}m' if args.e4_timesteps%1_000_000==0 else str(args.e4_timesteps)
+    args.output_dir = args.output_dir or path(f'results/reevaluation_stochastic_v2_e4_{suffix}')
+    args.e4_training_dir=args.e4_training_dir or path(f'results/e4_{suffix}/formal')
+    if args.e4_training_dir.name!='formal':raise ValueError('E4训练目录末级必须为formal')
+    validate_output(args.e4_training_dir,[args.source_dir,args.e4_dir,args.adopt_training_run,args.primary_model.parent])
     validate_output(args.output_dir,[args.source_dir,args.e4_dir,args.adopt_training_run,args.primary_model.parent])
+    if args.episode_store:validate_output(args.episode_store,[args.source_dir,args.e4_dir,args.adopt_training_run,args.primary_model.parent])
     old = source_manifest(args.source_dir,args.sealed_source)
     if old['version'] != 2:
         raise ValueError('剩余原训练只支持已核验的第2版封存')
     e4 = read(args.e4_dir/'manifest.json')
+    validate_e4_training_manifest(args,e4)
     files = bundle_inputs(old,[args.sealed_source],e4)
     spec = yaml.safe_load((ROOT/'configs/red_experiments.yaml').read_text(encoding='utf8'))
     groups=('history','features','rewards','geometry','sensor','randomization')
@@ -93,6 +136,8 @@ def context(args):
         raise ValueError('接管MLP训练目标不一致，拒绝重启或增加训练')
     signed=dict(protocol=PROTOCOL,sampling=sampling,source_sha=sha(args.source_dir/'manifest.json'),
         e4_sha=sha(args.e4_dir/'manifest.json'),primary=model_header(args.primary_model),
+        e4_training=dict(target_steps_per_seed=args.e4_timesteps,directory=str(args.e4_training_dir)),
+        episode_store=str(episode_store(args)),
         adopted_mlp={k:training[k] for k in ('seed','model_path','target_total_steps','training_config')},
         original_training_sources={n:sha(p) for n,p in files.items()},science=scientific_hashes(),
         controller_sha={n:sha(ROOT/n) for n in ('scripts/stochastic_campaign.py','dual_whisker_rl/stochastic_runtime.py',
@@ -105,7 +150,7 @@ def context(args):
 def preview(args,ctx):
     old=ctx['old'];r=args.eval_repeats
     e5=list(dict.fromkeys(n for g in ('history','features','rewards','geometry','sensor','randomization') for n in ctx['spec']['groups'][g]))
-    e4_pending=sum(not (args.e4_dir/n/f'seed_{s}'/'model.zip').is_file()
+    e4_pending=sum(not e4_training_completed(args.e4_training_dir/n/f'seed_{s}',args.e4_timesteps)
         for n,seeds in ctx['e4']['method_seeds'].items() if n not in ('b0_random','b1_reactive') for s in seeds)
     main_count=(1+5*len(old['settings']['seeds'])+1)*len(old['scenarios']['test'])*r
     e5_count=len(e5)*len(old['settings']['seeds'])*len(old['scenarios']['test'])*r
@@ -114,10 +159,14 @@ def preview(args,ctx):
     shared_e5=len(set(e5)&{'fixed','periodic','single_frame','history_mlp','no_dr'})*len(old['settings']['seeds'])*len(old['scenarios']['test'])*r
     projected_unique=main_count+e5_count-shared_e5+len(core)*len(old['settings']['seeds'])*4*fault_n*r+2*4*fault_n*r+e4_count
     return dict(protocol=PROTOCOL,sampling=ctx['sampling'],stages=args.stages,output=str(args.output_dir),
-        training_policy='continue_original_sealed_training_no_budget_increase',
+        training_policy='continue_sealed_training_with_explicit_e4_budget',
         existing_mlp_target=ctx['training']['target_total_steps'],existing_mlp_status=ctx['training']['status'],
         remaining_native_training=len(ctx['native'])*len(old['settings']['seeds'])-len(ctx['completed']),
-        remaining_e4_training=e4_pending,comparison_episodes=main_count,e4_report_episodes=e4_count,
+        remaining_e4_training=e4_pending,e4_target_steps_each=args.e4_timesteps,
+        e4_total_target_steps=sum(len(seeds) for n,seeds in ctx['e4']['method_seeds'].items()
+                                 if n not in ('b0_random','b1_reactive'))*args.e4_timesteps,
+        e4_training_dir=str(args.e4_training_dir),e4_calibration_budget_unchanged=True,
+        comparison_episodes=main_count,e4_report_episodes=e4_count,
         e5_report_episodes=len(e5)*len(old['settings']['seeds'])*len(old['scenarios']['test'])*r,
         e6_report_episodes=len(ctx['spec']['groups']['core'])*len(old['settings']['seeds'])*5*min(200,len(old['scenarios']['test']))*r,
         long_fault_report_episodes=2*5*min(200,len(old['scenarios']['test']))*r,
@@ -240,7 +289,7 @@ def materialize(jobs,root,*,robust=False,e4=False,split='test'):
 
 def native_report(args,ctx,experiment,models,*,faults=None):
     from scripts.experiment_reports import export_report
-    out=args.output_dir/experiment;store=getattr(args,'shared_episode_store',args.output_dir/'episodes')
+    out=args.output_dir/experiment;store=getattr(args,'shared_episode_store',episode_store(args))
     spec=base_spec(args,ctx,models);scenes=spec['scenarios']['test'][:200] if faults else spec['scenarios']['test']
     all_jobs=[]
     for label,fault in (faults or {'nominal':{}}).items():
@@ -281,7 +330,8 @@ def e4_evaluate(args,ctx):
             else:
                 state=read(task/'state.json');metadata=read(task/'metadata.json');head=model_header(task/'model.zip')
                 if (state['status']!='completed' or state['signature']!=metadata['signature']
-                    or head['training_seed']!=seed or head['evaluated_checkpoint_steps']<old['timesteps']):
+                    or head['training_seed']!=seed or head['evaluated_checkpoint_steps']<old['timesteps']
+                    or metadata.get('requested_timesteps')!=old['timesteps']):
                     raise ValueError('E4训练未完成或来源不符')
             model=dict(variant=name,variant_config=variant,origin='rule' if rule else 'historical',**head,
                 sampling=ctx['sampling'],training_budget_steps=head['evaluated_checkpoint_steps'],training_success_hold_s=0.,
@@ -299,7 +349,7 @@ def e4_evaluate(args,ctx):
         for model,cfg in models:
             spec=dict(protocol=PROTOCOL,sampling=ctx['sampling'],config=nominal_config(cfg),scenarios=banks,
                       models=[model],scientific_code_sha256=scientific_hashes())
-            jobs+=make_jobs(spec,args.output_dir/'episodes',scenes=banks[split])
+            jobs+=make_jobs(spec,episode_store(args),scenes=banks[split])
         all_jobs+=jobs
         split_jobs[split]=jobs
     seal(out/'evaluation_manifest.json',dict(source_sha=sha(args.e4_dir/'manifest.json'),sampling=ctx['sampling'],
@@ -346,7 +396,7 @@ def run(args):
                     spec=comparison_spec(args.source_dir,args.primary_model,args.sealed_source,ctx['sampling'])
                     spec['models'].append(long_model(args,ctx));spec['labels']={'single_frame_15m':'单帧MLP 15M（单模型、无DR）'}
                     spec['english_labels']={'single_frame_15m':'Single frame 15M, no DR'}
-                    jobs=make_jobs(spec,out/'episodes');seal(out/'main/manifest.json',spec)
+                    jobs=make_jobs(spec,episode_store(args));seal(out/'main/manifest.json',spec)
                     receipt=run_jobs(args,jobs,spec['scenarios']['validation'],out/'main')
                     report=make_report(spec,jobs,out/'main',args.bootstrap)
                     atomic_json(out/'main/state.json',dict(receipt,status='completed',report=str(report)))
@@ -359,10 +409,12 @@ def run(args):
                         stream.write('\nE3保持原训练内部验证口径；本轮修正后的随机动作协议只用于独立正式重评。\n')
                     if report['status']!='complete':raise RuntimeError('E3训练日志覆盖不全，保留缺项并停止后续阶段')
                 elif stage=='e4':
-                    for phase in ('calibrate','train'):
-                        train([sys.executable,bundle/'scripts/run_e4_experiments.py',phase,'--profile','formal',
-                            '--config',bundle/'configs/e4_formal.yaml','--output-dir',args.e4_dir.parent,'--resume'],f'e4_{phase}')
-                    e4_evaluate(args,ctx)
+                    validate_e4_training_manifest(args,ctx['e4'])
+                    train(e4_training_command(args,bundle,'calibrate'),'e4_calibrate')
+                    trained_manifest=validate_e4_training_manifest(args,ctx['e4'],required=True)
+                    train(e4_training_command(args,bundle,'train'),'e4_train')
+                    sub=copy.copy(args);sub.e4_dir=args.e4_training_dir
+                    e4_evaluate(sub,{**ctx,'e4':trained_manifest})
                 elif stage=='e5':
                     names=list(dict.fromkeys(n for g in GROUPS for n in ctx['spec']['groups'][g]))
                     train([sys.executable,worker,'train','--profile','formal','--output-dir',args.source_dir.parent,
@@ -377,7 +429,7 @@ def run(args):
                     for model in (primary_model(args.primary_model,ctx['sampling']),long_model(args,ctx)):
                         sub=copy.copy(args);sub.output_dir=out/'long_faults'/model['variant']
                         # 共用主任务store，避免nominal前200场景重复运行。
-                        sub.shared_episode_store=out/'episodes'
+                        sub.shared_episode_store=episode_store(args)
                         native_report(sub,ctx,'e6',[model],faults={k:ctx['old']['faults'][k] for k in FAULTS})
                 else:raise ValueError(f'未知阶段：{stage}')
                 state['stages'][stage]={'status':'completed'};atomic_json(out/'state.json',state)
