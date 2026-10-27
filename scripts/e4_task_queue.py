@@ -43,7 +43,14 @@ def process_from_receipt(receipt):
     try:
         p=psutil.Process(receipt['pid'])
         if p.create_time()!=receipt['created'] or p.status()==psutil.STATUS_ZOMBIE:return None
-        if p.cmdline()!=receipt['command']:raise RuntimeError('存活任务命令与记录不一致，拒绝重复启动')
+        actual=p.cmdline()
+        if actual!=receipt['command']:
+            # Linux退出可发生在status与cmdline两次读取之间，此时argv变空。
+            if not p.is_running() or p.status()==psutil.STATUS_ZOMBIE:return None
+            if not actual:
+                # 内核可先清空argv再进入僵尸态；保留占用并在下一轮观察，不释放槽位。
+                return p
+            raise RuntimeError(f'存活任务命令与记录不一致，拒绝重复启动：{actual!r}')
         return p
     except psutil.NoSuchProcess:return None
 
@@ -148,7 +155,7 @@ class Queue:
                     job,p,receipt=item['job'],item['process'],item['receipt']
                     live=process_from_receipt(receipt)
                     if live is None:
-                        code=item['popen'].poll() if item['popen'] is not None else None
+                        code=item['popen'].wait(timeout=5) if item['popen'] is not None else None
                         valid=(cached(job) if job['kind']!='train' else completed_model(job))
                         if code not in (0,None):valid=False
                         receipt.update(status='completed' if valid else 'failed',exit_code=code,finished_at=time.time())

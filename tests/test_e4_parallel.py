@@ -85,6 +85,20 @@ class ParallelQueueTests(unittest.TestCase):
             self.assertIsNone(process_from_receipt(dict(pid=100,created=10.,command=['old'])))
         p.kill.assert_not_called();p.cmdline.assert_not_called()
 
+    def test_empty_command_keeps_slot_until_process_finishes(self):
+        p=Mock();p.create_time.return_value=10.;p.status.return_value='running';p.cmdline.return_value=[]
+        with patch('scripts.e4_task_queue.psutil.Process',return_value=p):
+            self.assertIs(process_from_receipt(dict(pid=100,created=10.,command=['old'])),p)
+        p.cmdline.return_value=['different']
+        with patch('scripts.e4_task_queue.psutil.Process',return_value=p):
+            with self.assertRaises(RuntimeError):process_from_receipt(dict(pid=100,created=10.,command=['old']))
+    def test_exit_between_status_and_command_is_finished(self):
+        import psutil
+        p=Mock();p.create_time.return_value=10.;p.status.side_effect=['running',psutil.STATUS_ZOMBIE]
+        p.cmdline.return_value=[]
+        with patch('scripts.e4_task_queue.psutil.Process',return_value=p):
+            self.assertIsNone(process_from_receipt(dict(pid=100,created=10.,command=['old'])))
+
     def test_reservations_prevent_startup_memory_overcommit(self):
         snapshot=dict(memory_limit=30*2**30,memory_current=20*2**30,gpu=[])
         with patch('scripts.e4_task_queue.resources',side_effect=lambda:copy.deepcopy(snapshot)):
