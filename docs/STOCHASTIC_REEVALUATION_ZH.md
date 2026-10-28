@@ -115,6 +115,22 @@ E6报告30,000局；两个长模型扰动报告2,000局。这些是各报告的�
 相同模型/环境/场景/采样任务跨报告共享。模型权重不同、标称配置一致时预计独立评估
 169,240局，最终以实际任务键去重为准，不将共享引用再次计作新评估。
 
+## 历史2M模型单独对比
+
+原simulation_experiments/formal内6种方法各5seed的历史模型，可统一与75M模型比较：
+
+```bash
+python scripts/reevaluate_historical_2m.py run \
+  --sealed-source results/remaining_formal_sources_20261027 \
+  --workers auto --device auto
+```
+
+默认输出results/reevaluation_stochastic_v2/historical_2m_vs_75m，共31模型、20,088局。
+原五类对照与75M的16,848局直接校验复用，正常仅补原有DR主动GRU的3,240局。
+2M指训练预算，权重沿用原验证选出的selected_model，报告同时列出实际检查点步数。
+此入口不训练，不替代800万E4。它暂停父派发器、等待在途E4任务完成，评估结束或异常
+退出后自动恢复派发。plan只列任务与未经轨迹核验的文件存在数，run才全面校验缓存。
+
 主对比在共同648场景配对，对照先对五个真实训练seed取场景均值。
 75M和15M各是一份真实模型，不能复制成五个seed。采样重复先在模型/场景内取均值，
 不增加独立训练次数。区间与结论须注明冻结模型、训练预算和训练物理差异；E3原始学习
