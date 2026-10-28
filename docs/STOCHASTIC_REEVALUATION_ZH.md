@@ -30,7 +30,8 @@ bash scripts/run_remaining_formal_conda.sh run --background \
   --evaluation-protocol stochastic-arrival-v2 \
   --sealed-source results/remaining_formal_sources_20261027 \
   --adopt-training-run results/remaining_formal_15m \
-  --output-dir results/reevaluation_stochastic_v2_e4_8m_parallel \
+  --output-dir results/reevaluation_stochastic_v2_e4_8m_parallel_recovery \
+  --stages train_mlp,e4,e5,e6,long_faults \
   --e4-timesteps 8000000 --e4-training-dir results/e4_8m/formal \
   --e4-concurrency auto --e4-probe-seconds 150 \
   --episode-store results/reevaluation_stochastic_v2/episodes \
@@ -39,6 +40,8 @@ bash scripts/run_remaining_formal_conda.sh run --background \
 
 将`run --background`替换为`plan`或`status`可只读检查。新Python入口默认新协议，
 默认只计划；后台启动器默认执行。不要同时启动第二个父调度器。
+上面的阶段列表用于当前服务器恢复：主对比和E3已经完成，当前目录保留其报告引用。
+在全新实验上执行完整流程时应省略--stages，并选择全新输出目录。
 
 仅重评75M与五类对照、不涉及训练时，使用：
 
@@ -60,7 +63,8 @@ bash scripts/run_fast_comparison_conda.sh run --background \
 旧父调度器并接管。若训练失败则停止后续阶段，不擅自从checkpoint恢复或增加预算。
 原工作目录在当前训练完成后才同步；部署前差异保留备份及Git stash。
 
-当前新输出根目录为`results/reevaluation_stochastic_v2_e4_8m_parallel`；先前调度封存保留。
+当前新输出根目录为`results/reevaluation_stochastic_v2_e4_8m_parallel_recovery`；
+实际活动目录以`results/active_formal_campaign.json`为准，先前调度封存保留。
 通过--episode-store继续共享原`results/reevaluation_stochastic_v2/episodes`，避免预算
 调度更新导致相同科学协议的主对比/E5/E6重复评估。episodes保存共享逐局JSON与
 压缩轨迹；main、e4、e5、e6、long_faults保存各自视图与报告；index.md提供报告索引。
@@ -99,6 +103,8 @@ E4根目录使用独占调度锁；恢复先识别存活任务，避免重复训
 需要重测时，先等存活任务完成再测。失败会停止派发，继续监控健康任务，不自动重试；
 人工查明失败原因并保存原收据后才可恢复失败任务。已有checkpoint恢复至800万总目标，
 不是再追加800万。切换父调度保留B1结果、已完成校准模型及验证缓存；新调度仅补缺项。
+Linux新增进程启动tick与内核启动编号作为稳定身份；保留墙钟创建时间供审计。
+自建子进程使用操作系统poll确认退出，身份暂时不可读时继续占用槽位，不等待5秒后退出调度。
 
 长训练与正式评估串行。评估按亲和性、配额、内存和显存选择上限，比较CPU多进程与
 集中GPU批量推理吞吐；预热只使用验证片段，采样预算最多60秒，不按成功率选设备。

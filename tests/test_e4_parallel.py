@@ -99,6 +99,24 @@ class ParallelQueueTests(unittest.TestCase):
         with patch('scripts.e4_task_queue.psutil.Process',return_value=p):
             self.assertIsNone(process_from_receipt(dict(pid=100,created=10.,command=['old'])))
 
+    def test_linux_birth_token_survives_clock_change_and_rejects_reuse(self):
+        p=Mock(pid=100);p.create_time.return_value=20.;p.status.return_value='running';p.cmdline.return_value=['old']
+        receipt=dict(pid=100,created=10.,command=['old'],linux_birth_token='boot:123')
+        with patch('scripts.e4_task_queue.psutil.Process',return_value=p), \
+             patch('scripts.e4_task_queue.linux_birth_token',return_value='boot:123'):
+            self.assertIs(process_from_receipt(receipt),p)
+        with patch('scripts.e4_task_queue.psutil.Process',return_value=p), \
+             patch('scripts.e4_task_queue.linux_birth_token',return_value='boot:124'):
+            self.assertIsNone(process_from_receipt(receipt))
+
+    def test_owned_process_keeps_running_when_psutil_temporarily_loses_identity(self):
+        jobs=[self.job('first',delay=.25),self.job('second',delay=.1)]
+        with patch('scripts.e4_task_queue.process_from_receipt',return_value=None):
+            self.q.run(jobs,limit=1,resource_guard=False)
+        p=self.root/'events'
+        self.assertGreaterEqual(float((p/'second.start').read_text()),float((p/'first.end').read_text()))
+        self.assertTrue(all(cached(j) for j in jobs))
+
     def test_reservations_prevent_startup_memory_overcommit(self):
         snapshot=dict(memory_limit=30*2**30,memory_current=20*2**30,gpu=[])
         with patch('scripts.e4_task_queue.resources',side_effect=lambda:copy.deepcopy(snapshot)):

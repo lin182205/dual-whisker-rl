@@ -38,11 +38,25 @@ def completed_model(job):
     except (OSError,KeyError,ValueError):return False
 
 
+def linux_birth_token(pid):
+    """内核启动编号与进程启动tick不受墙钟校时影响。"""
+    if sys.platform!='linux':return None
+    try:
+        fields=Path(f'/proc/{pid}/stat').read_text().rsplit(')',1)[1].split()
+        boot=Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+        return f'{boot}:{fields[19]}'
+    except (OSError,IndexError):return None
+
+
 def process_from_receipt(receipt):
     """PID复用不能作为恢复或终止其他进程的依据。"""
     try:
         p=psutil.Process(receipt['pid'])
-        if p.create_time()!=receipt['created'] or p.status()==psutil.STATUS_ZOMBIE:return None
+        birth=receipt.get('linux_birth_token')
+        if birth:
+            if linux_birth_token(p.pid)!=birth:return None
+        elif p.create_time()!=receipt['created']:return None
+        if p.status()==psutil.STATUS_ZOMBIE:return None
         actual=p.cmdline()
         if actual!=receipt['command']:
             # Linux退出可发生在status与cmdline两次读取之间，此时argv变空。
@@ -118,6 +132,8 @@ class Queue:
         receipt=dict(pid=child.pid,created=process.create_time(),command=command,job_signature=job['signature'],
             task_id=job['id'],status='running',log=str(log),started_at=time.time(),log_bytes=log.stat().st_size,
             last_output_change=time.time())
+        birth=linux_birth_token(child.pid)
+        if birth is not None:receipt['linux_birth_token']=birth
         atomic_json(self.receipt_path(job),receipt)
         return dict(job=job,process=process,popen=child,receipt=receipt,handle=handle)
 
@@ -153,9 +169,12 @@ class Queue:
                     active.append(self.start(pending.pop(index)))
                 for item in list(active):
                     job,p,receipt=item['job'],item['process'],item['receipt']
-                    live=process_from_receipt(receipt)
-                    if live is None:
-                        code=item['popen'].wait(timeout=5) if item['popen'] is not None else None
+                    child=item['popen'];code=child.poll() if child is not None else None
+                    identity=process_from_receipt(receipt) if child is None or code is None else None
+                    # 自己创建的子进程以waitpid/poll为退出依据；psutil临时读不到身份不能释放槽位。
+                    live=(code is None) if child is not None else identity is not None
+                    receipt['identity_pending']=bool(live and identity is None)
+                    if not live:
                         valid=(cached(job) if job['kind']!='train' else completed_model(job))
                         if code not in (0,None):valid=False
                         receipt.update(status='completed' if valid else 'failed',exit_code=code,finished_at=time.time())
