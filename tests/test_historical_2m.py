@@ -71,5 +71,24 @@ class HistoricalComparisonTests(unittest.TestCase):
                     with runner.training_window(SimpleNamespace(output_dir=out,monitor_interval=.01)):pass
             parent.resume.assert_called_once()
 
+    def test_in_memory_pause_resumes_environment_before_trainer_and_parent(self):
+        import psutil
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);out=root/'new';out.mkdir();old=root/'old';old.mkdir();(root/'results').mkdir()
+            atomic_json(root/'results/active_formal_campaign.json',dict(pid=10,created=20.,output_dir=str(old)))
+            atomic_json(old/'deployment.json',dict(command=['python','campaign']))
+            processes={i:Mock(pid=i) for i in (10,11,12)};parent,trainer,env=[processes[i] for i in (10,11,12)]
+            for p in processes.values():p.status.return_value=psutil.STATUS_RUNNING
+            parent.children.return_value=[trainer];trainer.children.return_value=[env]
+            trainer.cmdline.return_value=['python','e4_parallel_worker.py','job.json']
+            order=[]
+            for i,p in processes.items():p.resume.side_effect=lambda i=i:order.append(i)
+            with patch.object(runner,'ROOT',root),patch.object(runner,'process_from_receipt',side_effect=lambda r:processes[r['pid']]),patch.object(runner,'owned_receipt',side_effect=lambda p,*a:{'pid':p.pid}):
+                with self.assertRaisesRegex(RuntimeError,'evaluation failed'):
+                    with runner.training_window(SimpleNamespace(output_dir=out,monitor_interval=.01,pause_inflight_training=True)):
+                        trainer.suspend.assert_called_once();env.suspend.assert_called_once()
+                        raise RuntimeError('evaluation failed')
+            self.assertEqual(order,[12,11,10])
+
 
 if __name__=='__main__':unittest.main()

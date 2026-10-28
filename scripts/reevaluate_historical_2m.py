@@ -64,6 +64,7 @@ def training_window(args):
     receipt=owned_receipt(parent,deployment['command'])
     lease=dict(parent=receipt,previous_output=active['output_dir'],status='pausing',started_at=time.time())
     path=args.output_dir/'training_coordination.json';atomic_json(path,lease)
+    suspended=[]
     try:
         parent.suspend()
         children=[]
@@ -73,24 +74,46 @@ def training_window(args):
             if not any(Path(part).name=='e4_parallel_worker.py' for part in command):
                 raise RuntimeError('父调度存在其他在途阶段，恢复训练并停止本次评估')
             children.append(owned_receipt(child,command))
-        lease.update(status='waiting_for_inflight_training',children=children);atomic_json(path,lease)
-        while any(process_from_receipt(r) is not None for r in children):
-            print('[等待评估窗口] 保留在途E4任务，等待训练及验证落盘',flush=True)
-            time.sleep(min(30.,args.monitor_interval))
+        if getattr(args,'pause_inflight_training',False):
+            # 先停训练主进程，再停其环境，避免挂起期间产生新子进程；恢复按相反顺序。
+            for receipt0 in children:
+                child=process_from_receipt(receipt0)
+                if child is None:continue
+                suspended.append(receipt0);lease['suspended_workers']=suspended;atomic_json(path,lease)
+                child.suspend()
+                for descendant in child.children(recursive=True):
+                    if descendant.status()==psutil.STATUS_ZOMBIE:continue
+                    suspended.append(owned_receipt(descendant));atomic_json(path,lease);descendant.suspend()
+            lease.update(status='training_suspended_in_memory',children=children);atomic_json(path,lease)
+            print(f'[评估窗口] 已挂起{len(suspended)}个训练及环境进程，内存中的进度保留',flush=True)
+        else:
+            lease.update(status='waiting_for_inflight_training',children=children);atomic_json(path,lease)
+            while any(process_from_receipt(r) is not None for r in children):
+                print('[等待评估窗口] 保留在途E4任务，等待训练及验证落盘',flush=True)
+                time.sleep(min(30.,args.monitor_interval))
         lease.update(status='evaluating',evaluation_started_at=time.time());atomic_json(path,lease)
         yield
     finally:
+        errors=[]
+        for worker in reversed(suspended):
+            try:
+                current=process_from_receipt(worker)
+                if current is not None:current.resume()
+            except psutil.Error as e:errors.append(repr(e))
         current=process_from_receipt(receipt)
         if current is not None:
             current.resume();lease.update(status='training_resumed',resumed_at=time.time())
         else:lease.update(status='parent_no_longer_alive',finished_at=time.time())
+        lease['worker_resume_errors']=errors
         atomic_json(path,lease)
+        if errors:raise RuntimeError(f'部分训练进程恢复失败：{errors}')
 
 
 def parser():
     from scripts.run_fast_comparison import parser as original
     p=original();p.description=__doc__
     p.add_argument('--monitor-interval',type=float,default=10.)
+    p.add_argument('--pause-inflight-training',action='store_true',help='挂起在途训练进程树并保留内存，评估后原地恢复')
     return p
 
 
