@@ -155,6 +155,7 @@ class ComparisonEvaluationProgressTests(unittest.TestCase):
         manifest = dict(signature="manifest")
         model = SimpleNamespace(observation_space="obs", action_space="act")
         env = Mock(observation_space="obs", action_space="act")
+        env.unwrapped = SimpleNamespace(hybrid_motion=None)
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             for name in names:

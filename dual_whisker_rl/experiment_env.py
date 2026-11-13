@@ -7,6 +7,7 @@ import numpy as np
 from dual_whisker_rl.envs.mobile_whisker_env import MobileWhiskerPuffEnv
 from dual_whisker_rl.envs.whisker_only_env import DynamicPuffPlume
 from dual_whisker_rl.e4_experiments import ObservationHistory, MethodActionAdapter
+from dual_whisker_rl.envs.room_plume import RoomPuffPlume
 
 FEATURE_MASKS = {
     "none": [],
@@ -51,6 +52,10 @@ class ExperimentPuff(DynamicPuffPlume):
                 return
         super()._emit_puffs()
 
+class ExperimentRoomPuff(ExperimentPuff, RoomPuffPlume):
+    """保留房间反射/遮挡，并复用实验释放与随机化钩子。"""
+
+
 class FaultSensor:
     """始终推进物理传感器，丢样只保持读数；故障随机流独立于羽流。"""
     def __init__(self, sensor, fault, side, dt, seed):
@@ -83,6 +88,8 @@ class FaultSensor:
 class ExperimentMobileEnv(MobileWhiskerPuffEnv):
     """仅实验入口使用的继承环境：特征消融、持续到源和可控故障。"""
     def _make_dynamic_plume(self, **kwargs):
+        if self.room_navigation is not None:
+            return ExperimentRoomPuff(self.room_navigation.map,self.room_navigation.source_clearance,**kwargs)
         return ExperimentPuff(**kwargs)
 
     def __init__(self, config):
@@ -124,7 +131,7 @@ class ExperimentMobileEnv(MobileWhiskerPuffEnv):
         self.field = self.plume
         self._experiment_rng = np.random.default_rng(0)
         self._delayed = deque()
-        self._last_command = np.array([self.stop_action,0,0])
+        self._last_command = np.array([-1.,0.,0.,0.]) if self.hybrid_motion else np.array([self.stop_action,0,0])
         self._wind_changed = False
 
     def _randomize_sensors(self):
@@ -141,7 +148,7 @@ class ExperimentMobileEnv(MobileWhiskerPuffEnv):
         self._previous_reached = False
         self._wind_changed = False
         self._delayed.clear()
-        self._last_command = np.array([self.stop_action,0,0])
+        self._last_command = np.array([-1.,0.,0.,0.]) if self.hybrid_motion else np.array([self.stop_action,0,0])
         self._experiment_rng = np.random.default_rng(np.random.SeedSequence([int(seed or 0),0x455850]))
         self.plume.episode_time_s = 0.0
         opts = dict(options or {})
@@ -173,7 +180,8 @@ class ExperimentMobileEnv(MobileWhiskerPuffEnv):
             scale = self.observation_builder.config.scale
             clip = self.observation_builder.config.clip
             obs[0:2] = np.clip([self.left_sensor.value/scale,self.right_sensor.value/scale],-clip,clip)
-        obs[FEATURE_MASKS[self.feature_mask]] = 0
+        indices = [16] if self.hybrid_motion and self.feature_mask=='no_blank_age' else FEATURE_MASKS[self.feature_mask]
+        obs[indices] = 0
         noise = float(self.fault.get("heading_noise_deg",0.0))
         if noise and hasattr(self,"_experiment_rng"):
             heading = self.robot_state.heading + math.radians(float(self._experiment_rng.normal(0,noise)))
@@ -185,12 +193,15 @@ class ExperimentMobileEnv(MobileWhiskerPuffEnv):
         self._goal_dwell = self._goal_dwell+self.dt if reached and self._previous_reached else 0.0
         self._previous_reached = bool(reached)
         qualified = reached and self._goal_dwell+1e-12>=self.success_hold_s
-        return super()._source_search_reward_components(distance,qualified,oob,left,right,position_displacement,**kwargs)
+        components=super()._source_search_reward_components(distance,qualified,oob,left,right,position_displacement,**kwargs)
+        if self.hybrid_motion and self.effective_config.get('progress_reward_scale') == 0:
+            components['distance_potential_progress']=0.
+        return components
 
     def step(self, action):
         self.plume.episode_time_s = self.step_count*self.dt
         active = self.plume.episode_time_s >= float(self.fault.get("start_s",0))
-        command = np.asarray(action,dtype=np.int64)
+        command = np.asarray(action,dtype=np.float32 if self.hybrid_motion else np.int64)
         if active:
             if not self._wind_changed and "wind_turn_deg" in self.fault:
                 self.plume.wind_direction_base += math.radians(float(self.fault["wind_turn_deg"]))

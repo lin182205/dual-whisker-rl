@@ -4,10 +4,10 @@
 之上，把触须装到一个差速驱动的移动机器人上，做气源搜索。默认每个 episode
 联合随机化气源方位、风向、下风侧机器人起点和朝向，同时保留旧固定场景用于诊断。
 
-动作空间 `MultiDiscrete([6, 10, 10])` = [移动动作, 左扇区, 右扇区]，与硬件串口协议
-兼容（移动交给底盘、扇区对应 STEP 命令）。观测在父类 12 维硬件特征上追加机器人自身
-可得的本体感受（朝向 cos/sin、上一步移动动作）和可选 blank_age，不含真实风向/气源方向等特权信息；
-奖励可用真实气源距离（仅训练期）。
+旧动作空间 `MultiDiscrete([6, 10, 10])`；motion_mode=hybrid 时用连续速度与离散扇区。
+扇区仍对应硬件 STEP 命令，连续底盘控制只在仿真接入。观测在父类12维硬件特征上追加机器人自身
+可得的本体感受（朝向 cos/sin、上一步移动动作）和可选 blank_age。房间模式额外提供
+已定位的 x/y、相对风向和雷达；真实气源位置仅供奖励与评估使用。
 """
 
 from __future__ import annotations
@@ -24,6 +24,8 @@ from dual_whisker_rl.envs.robot_model import RobotState
 from dual_whisker_rl.envs.whisker_only_env import DynamicPuffPlume
 from dual_whisker_rl.envs.whisker_only_env import WhiskerOnlyPuffEnv
 from dual_whisker_rl.envs.world_bounds import resolve_world_bounds, world_bounds_config
+from dual_whisker_rl.envs.room_navigation import RoomNavigation, WallAwareWhiskers
+from dual_whisker_rl.envs.hybrid_action import HybridMotion, HybridMotionWhiskerSpace, decode_hybrid_action
 
 
 class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
@@ -41,6 +43,14 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         cfg = dict(config or {})
+        cfg["plume_overrides"] = dict(cfg.get("plume_overrides") or {})
+        if cfg.get("motion_mode", "discrete") not in ("discrete", "hybrid"):
+            raise ValueError("motion_mode 必须为 discrete 或 hybrid")
+        self.hybrid_motion = None
+        hybrid = cfg.get("motion_mode") == "hybrid"
+        if hybrid and not cfg.get("map_layout"):
+            raise ValueError("连续底盘模式需要显式启用房间地图")
+        self.room_navigation = RoomNavigation(cfg) if cfg.get("map_layout") else None
         # 低层环境继续兼容旧的 ±1.0 默认；E4/正式配置通过 world_bounds 显式设置场地。
         if "world_bounds" not in cfg and "world_half" not in cfg:
             cfg["world_half"] = 1.0
@@ -65,7 +75,7 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
                 "source_position; remove source_position or use scenario_mode='fixed'"
             )
         if scenario_mode == "fixed" and not explicit_source:
-            cfg["source_position"] = (-(wh - 0.2), 0.0)
+            cfg["source_position"] = (-2.5, -2.5) if self.room_navigation else (-(wh - 0.2), 0.0)
         cfg.setdefault("max_steps", 400)
         plume_model = str(cfg.get("plume_model", "dynamic"))
         # 论文模式使用作者的 0.5 m/s；原模式保持面向机器人尺度的慢风和长寿命 puff。
@@ -88,6 +98,9 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         if active_side not in (None, "left", "right"):
             raise ValueError("active_whisker_side must be None, left, or right")
         super().__init__(cfg)
+        if self.room_navigation is not None:
+            self.whiskers = WallAwareWhiskers(self.whiskers, self.room_navigation.map)
+            self.REWARD_COMPONENT_NAMES = type(self).REWARD_COMPONENT_NAMES + ("collision_penalty",)
 
         self.scenario_mode = scenario_mode
         self.active_whisker_side = active_side
@@ -154,6 +167,10 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         # 动作：[移动, 左扇区, 右扇区]。
         sc = int(self.whiskers.sector_count)
         self.action_space = spaces.MultiDiscrete([self.n_move_actions, sc, sc])
+        if hybrid:
+            self.action_space = HybridMotionWhiskerSpace(sc)
+            self.hybrid_motion = HybridMotion(cfg, self.robot)
+            self.REWARD_COMPONENT_NAMES += ("near_obstacle_penalty", "control_smoothness_penalty")
 
         obsolete_reward_keys = (
             "odor_reach_scale",
@@ -281,7 +298,7 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         world_diameter = 2.0 * math.sqrt(2.0) * self.world_half
         self.positive_auxiliary_reward_upper_bound = (
             self.best_concentration_reward_scale * self.best_concentration_clip
-            + self.progress_reward_scale * world_diameter
+            + (8.0 if self.room_navigation else self.progress_reward_scale * world_diameter)
             + self.whisker_reacquisition_bonus
             * self.max_whisker_reacquisition_rewards
         )
@@ -332,8 +349,23 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
             "heading_sin",
             "last_move_norm",
         ]
+        if hybrid:
+            low = np.concatenate([base_low, np.array([-1., -1., 0., -1., 0.], dtype=np.float32)])
+            high = np.concatenate([base_high, np.ones(5, dtype=np.float32)])
+            self.observation_field_names = self.observation_builder.field_names + [
+                "heading_cos", "heading_sin", "actual_linear_velocity_norm", "actual_angular_velocity_norm"]
         if self.include_blank_age_observation:
             self.observation_field_names.append("blank_age_norm")
+        if self.room_navigation:
+            nav = self.room_navigation
+            extra_low = np.array([-1.]*4 + [0.]*nav.beams, dtype=np.float32)
+            extra_high = np.ones(4+nav.beams, dtype=np.float32)
+            self.observation_space = spaces.Box(
+                low=np.concatenate([low, extra_low]), high=np.concatenate([high, extra_high]),
+                dtype=np.float32,
+            )
+            self.observation_field_names += nav.field_names
+        self.effective_config = cfg
 
         self.last_move = self.stop_action
         self.prev_distance = 0.0
@@ -351,6 +383,13 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         )
 
     # ---- 位姿与观测 ----
+
+    def _make_dynamic_plume(self, **kwargs):
+        if self.room_navigation is not None:
+            from dual_whisker_rl.envs.room_plume import RoomPuffPlume
+            return RoomPuffPlume(self.room_navigation.map,
+                                 self.room_navigation.source_clearance, **kwargs)
+        return super()._make_dynamic_plume(**kwargs)
 
     @staticmethod
     def _validate_range(
@@ -373,6 +412,8 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
 
     def sample_initial_robot_pose(self) -> RobotState:
         """按场景模式采样机器人起点，并同步到底盘模型。"""
+        if self.room_navigation is not None:
+            return self.room_navigation.initialize(self)
         if self._scenario_robot_override is not None:
             x, y, heading = self._scenario_robot_override
             self.robot.reset(x, y, heading)
@@ -463,6 +504,13 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
 
     def scenario_metadata(self) -> dict[str, Any]:
         """返回可序列化的场景初始化分布。"""
+        if self.room_navigation:
+            nav = self.room_navigation
+            return {"mode": self.scenario_mode, "source_sampling": "uniform_free_space",
+                    "robot_sampling": "uniform_free_space", "uniform_heading_probability": 1.,
+                    "minimum_start_path_distance": nav.minimum_distance,
+                    "robot_radius": nav.radius, "source_clearance": nav.source_clearance,
+                    "map_sha256": nav.map.digest, **nav.map.metadata()}
         if self.scenario_mode == "fixed":
             return {
                 "mode": "fixed",
@@ -511,11 +559,17 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
             ],
             dtype=np.float32,
         )
+        if self.hybrid_motion:
+            motion = self.hybrid_motion
+            proprio = np.array([math.cos(heading), math.sin(heading),
+                                motion.linear/motion.v_max, motion.angular/motion.w_max], dtype=np.float32)
         parts = [base, proprio]
         if self.include_blank_age_observation:
             blank_age_s = self.blank_age_steps * self.dt
             blank_age_norm = min(blank_age_s / self.blank_age_clip_s, 1.0)
             parts.append(np.array([blank_age_norm], dtype=np.float32))
+        if self.room_navigation:
+            parts.append(self.room_navigation.observation(self))
         obs = np.concatenate(parts).astype(np.float32)
         self._last_obs = obs
         return obs
@@ -640,15 +694,19 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         options: dict[str, Any] | None = None,
     ) -> tuple[np.ndarray, dict[str, Any]]:
         self.last_move = self.stop_action
+        if self.hybrid_motion:
+            self.hybrid_motion.reset()
         self.best_concentration = 0.0
         self.stagnation_steps = 0
         self._reset_odor_search_state()
         self._scenario_robot_override = None
+        if self.room_navigation:
+            self.room_navigation.reset()
         if isinstance(options, dict) and isinstance(options.get("scenario"), dict):
             pose = options["scenario"].get("robot_pose")
             if pose is not None and len(pose) == 3:
                 self._scenario_robot_override = tuple(float(v) for v in pose)
-        if self.scenario_mode == "randomized":
+        if self.scenario_mode == "randomized" or self.room_navigation:
             if seed is not None:
                 self._scenario_rng = np.random.default_rng(
                     np.random.SeedSequence([int(seed), 0x5343454E])
@@ -659,6 +717,8 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
                 )
         obs, info = super().reset(seed=seed, options=options)
         self.prev_distance = self._distance_to_source()
+        if self.room_navigation:
+            self._previous_path_distance = self.room_navigation.distance((self.robot_state.x, self.robot_state.y))
         info.update(
             {
                 "distance_to_source": self.prev_distance,
@@ -680,7 +740,12 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         return int(arr[0]), int(arr[1]), int(arr[2])
 
     def step(self, action: Any) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
-        move, left_sector, right_sector = self._decode_action(action)
+        if self.hybrid_motion:
+            linear_norm, angular_norm, left_sector, right_sector = decode_hybrid_action(
+                action, self.whiskers.sector_count)
+            move = self.stop_action
+        else:
+            move, left_sector, right_sector = self._decode_action(action)
         self.last_move = move
         self.last_left_sector = left_sector
         self.last_right_sector = right_sector
@@ -688,7 +753,24 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         # 先推进机器人位姿，再采样触须（触须点由 whisker_model 依位姿自动计算）。
         previous_x = self.robot_state.x
         previous_y = self.robot_state.y
-        self.robot_state = self.robot.step(move)
+        previous_state = self.robot_state
+        if self.hybrid_motion:
+            move_name = self.hybrid_motion.move(self, linear_norm, angular_norm)
+            move = DifferentialDriveRobot.ACTIONS.index(move_name)
+            self.last_move = move
+        else:
+            self.robot_state = self.robot.step(move)
+        if self.room_navigation and not self.hybrid_motion:
+            self.robot_state = self.room_navigation.move(previous_state, self.robot_state)
+            self.robot.state = self.robot_state
+        actual_body_moved = move != self.stop_action
+        if self.room_navigation:
+            actual_body_moved = bool(
+                math.hypot(self.robot_state.x-previous_x, self.robot_state.y-previous_y) > 1e-10
+                or abs(self._wrap_angle(self.robot_state.heading-previous_state.heading)) > 1e-10
+            )
+        if self.hybrid_motion:
+            actual_body_moved = bool(abs(self.hybrid_motion.linear) > 1e-10 or abs(self.hybrid_motion.angular) > 1e-10)
         position_displacement = float(
             math.hypot(
                 self.robot_state.x - previous_x,
@@ -733,11 +815,14 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         odor_search_info = self._update_odor_search_state(
             odor_hit=bool(hit_left or hit_right),
             whisker_moved=whisker_moved,
-            body_moved=move != self.stop_action,
+            body_moved=actual_body_moved,
         )
 
         distance = self._distance_to_source()
         reached = distance <= self.goal_radius
+        if self.room_navigation:
+            reached = bool(reached and self.room_navigation.map.visible(
+                (self.robot_state.x, self.robot_state.y), self.room_navigation.source))
         oob = not (self.world_min < self.robot_state.x < self.world_max and self.world_min < self.robot_state.y < self.world_max)
         reward_components = self._source_search_reward_components(
             distance,
@@ -751,6 +836,13 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
                 odor_search_info["whisker_reacquisition_rewarded"]
             ),
         )
+        if self.room_navigation:
+            nav = self.room_navigation
+            path_distance = nav.distance((self.robot_state.x, self.robot_state.y))
+            reward_components["collision_penalty"] = -nav.collision_penalty if nav.collision else 0.
+            self._previous_path_distance = path_distance
+        if self.hybrid_motion:
+            reward_components.update(self.hybrid_motion.reward_components(self))
         reward = float(sum(reward_components.values()))
 
         self.step_count += 1
@@ -779,6 +871,10 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
                     **odor_search_info,
                     "reward": reward,
                     "reward_components": reward_components,
+                    "is_success": reached,
+                    "goal_radius": self.goal_radius,
+                    **(self.room_navigation.info(self) if self.room_navigation else {}),
+                    **(self.hybrid_motion.info(self) if self.hybrid_motion else {}),
                 }
             )
 
@@ -818,6 +914,14 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         terminated = bool(reached or oob)
         truncated = self.step_count >= self.max_steps
         return obs, reward, terminated, truncated, info
+
+    def _current_info(self):
+        info = super()._current_info()
+        if self.room_navigation and self.room_navigation.source is not None:
+            info.update(self.room_navigation.info(self))
+            if self.hybrid_motion:
+                info.update(self.hybrid_motion.info(self))
+        return info
 
     def _source_search_reward(
         self,
@@ -874,6 +978,12 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         )
 
         distance_improvement = self.prev_distance - distance
+        distance_reward = self.progress_reward_scale * distance_improvement
+        if self.room_navigation:
+            nav = self.room_navigation
+            path_distance = nav.distance((self.robot_state.x, self.robot_state.y))
+            distance_improvement = self._previous_path_distance-path_distance
+            distance_reward = nav.potential(path_distance)-nav.potential(self._previous_path_distance)
         position_progressed = (
             position_displacement > self.position_progress_epsilon
         )
@@ -900,7 +1010,7 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
 
         return {
             "distance_potential_progress": float(
-                self.progress_reward_scale * distance_improvement
+                distance_reward
             ),
             "best_concentration_improvement": float(
                 self.best_concentration_reward_scale * concentration_improvement

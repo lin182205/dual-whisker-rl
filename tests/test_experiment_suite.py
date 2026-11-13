@@ -15,7 +15,8 @@ from dual_whisker_rl.experiment_protocol import write_json
 
 class ExperimentSelectionTests(unittest.TestCase):
     def resolve(self, flags):
-        args=runner.parser().parse_args(flags)
+        # 此文件保留原E3–E6协议验收；办公默认另有独立测试。
+        args=runner.parser().parse_args([*flags,"--config","configs/red_experiments.yaml"])
         return args,runner.resolve(args)
 
     def test_default_is_all_and_training_is_deduplicated(self):
@@ -71,7 +72,7 @@ class ExperimentSelectionTests(unittest.TestCase):
 
 class PaperReportTests(unittest.TestCase):
     def fixture(self,root,names=("main","h1"),seeds=(1,2)):
-        args=runner.parser().parse_args(["summarize","--bootstrap","30"])
+        args=runner.parser().parse_args(["summarize","--bootstrap","30","--config","configs/red_experiments.yaml"])
         spec,profile,cfg,_,_,_=runner.resolve(args)
         profile["seeds"]=list(seeds)
         write_json(root/"manifest.json",dict(signature="test"))

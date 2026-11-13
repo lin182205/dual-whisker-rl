@@ -71,7 +71,7 @@ def b1(P,args,job):
     env=P.make_env('b1_reactive',cfg)
     c=job['candidate_config']
     controller=P.ReactiveController(hit_threshold=float(c['b1_hit_threshold']),trend_threshold=float(c['b1_trend_threshold']),
-        contrast_threshold=float(c['b1_contrast_threshold']),search_period=int(c['b1_search_period']),scan_period=int(c['b1_scan_period']))
+        contrast_threshold=float(c['b1_contrast_threshold']),search_period=int(c['b1_search_period']),scan_period=int(c['b1_scan_period']),hybrid=cfg.get('motion_mode')=='hybrid')
     rows=[]
     try:
         for scene in P.read_scenarios(Path(job['root']),'validation',None):

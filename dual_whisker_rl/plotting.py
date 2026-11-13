@@ -9,7 +9,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
-ODOR_CMAP = "YlGnBu_r"
+ODOR_CMAP = "Blues"
+SOURCE_MARKER_COLOR = "#c43c39"
 
 
 def draw_odor_field(
@@ -22,7 +23,7 @@ def draw_odor_field(
     add_colorbar: bool = True,
     label: str = "odor concentration",
 ) -> Any:
-    """Draw the odor field with a blue-low/yellow-high color scale."""
+    """浓度由浅蓝递进至深蓝，统一静态场图和轨迹动画的色阶。"""
 
     field = ax.pcolormesh(
         xx,

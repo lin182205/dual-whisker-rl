@@ -34,8 +34,12 @@ def variant_plan(args,spec,names):
 
 
 def legacy_command(args,root,profile,stage):
+    import yaml
+    from dual_whisker_rl.paths import project_path
+    spec=yaml.safe_load(project_path(args.config).read_text(encoding='utf-8'))
+    config=spec.get('e4_config',f'configs/e4_{args.profile}.yaml')
     command=[sys.executable,str(ROOT/"scripts/run_e4_experiments.py"),stage,
-        "--profile",args.profile,"--config",str(ROOT/f"configs/e4_{args.profile}.yaml"),
+        "--profile",args.profile,"--config",str(project_path(config)),
         "--output-dir",str(root/"e4"),"--max-steps",str(profile["max_steps"])]
     for flag,value in [("--timesteps",args.timesteps),("--n-envs",args.n_envs),("--methods",args.e4_methods)]:
         if value is not None: command += [flag,str(value)]

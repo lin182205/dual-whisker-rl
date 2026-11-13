@@ -123,7 +123,12 @@ class MethodActionAdapter(gym.Wrapper):
         self._scan_sector = 0
         self._scan_direction = 1
         self._scan_count = 0
-        if method == "b2_fixed" or method == "b3_scan":
+        self.hybrid = env.unwrapped.hybrid_motion is not None
+        if self.hybrid:
+            from dual_whisker_rl.envs.hybrid_action import HybridMotionWhiskerSpace
+            branches = 0 if method in ('b2_fixed','b3_scan') else 1 if method in ('b6_left','b6_right') else 2
+            self.action_space = HybridMotionWhiskerSpace(env.unwrapped.whiskers.sector_count, categorical_branches=branches)
+        elif method == "b2_fixed" or method == "b3_scan":
             self.action_space = spaces.Discrete(6)
         elif method in ("b6_left", "b6_right"):
             self.action_space = spaces.MultiDiscrete([6, 10])
@@ -143,6 +148,24 @@ class MethodActionAdapter(gym.Wrapper):
         return obs, info
 
     def _map_action(self, action: Any) -> np.ndarray:
+        if self.hybrid:
+            a = np.asarray(action, dtype=np.float32).reshape(-1)
+            if a.shape != self.action_space.shape or not self.action_space.contains(a):
+                raise ValueError("批量基线动作维度或扇区非法")
+            if self.method == 'b2_fixed': sectors = [self.fixed_sector]*2
+            elif self.method == 'b3_scan':
+                # 复用旧扫描计时，速度小数不经过离散移动映射。
+                sector = self._scan_sector
+                self._scan_count += 1
+                if self._scan_count >= self.scan_hold:
+                    self._scan_count = 0; self._scan_sector += self._scan_direction
+                    if self._scan_sector >= 9: self._scan_sector,self._scan_direction = 9,-1
+                    elif self._scan_sector <= 0: self._scan_sector,self._scan_direction = 0,1
+                sectors = [sector]*2
+            elif self.method == 'b6_left': sectors = [a[2],self.fixed_sector]
+            elif self.method == 'b6_right': sectors = [self.fixed_sector,a[2]]
+            else: return a
+            return np.asarray([*a[:2],*sectors], dtype=np.float32)
         if self.method == "b2_fixed":
             move = int(np.asarray(action).reshape(-1)[0])
             return np.asarray([move, self.fixed_sector, self.fixed_sector], dtype=np.int64)
@@ -234,10 +257,31 @@ def build_scenarios(
     profile: str = "formal",
     seed: int = 20260915,
     world_bounds: tuple[float, float] | list[float] | None = None,
+    config: dict[str, Any] | None = None,
+    count: int | None = None,
 ) -> list[E4Scenario]:
     """生成固定分层场景；几何尺度随 world_bounds 缩放。"""
     if split not in ("validation", "test"):
         raise ValueError("split must be validation or test")
+    if config and config.get('map_layout'):
+        # 房间场景直接封存环境的全场初始化，不再强制下风出发或按无障碍几何摆点。
+        cfg = dict(config)
+        cfg['plume_overrides'] = {**cfg.get('plume_overrides', {}), 'puff_warmup_steps': 0}
+        env = MobileWhiskerPuffEnv(cfg)
+        number = count if count is not None else (12 if profile=='smoke' else 216 if split=='validation' else 648)
+        scenes=[]
+        try:
+            for i in range(number):
+                episode_seed=int(seed+(11 if split=='validation' else 1000029)+i*17)
+                _, info=env.reset(seed=episode_seed)
+                s=env.robot_state;d=info['path_distance_to_source']
+                scenes.append(E4Scenario(f'{split}_rooms_{i:04d}',split,episode_seed,
+                    float(env.plume.wind_speed_mean),float(env.plume.wind_direction_base),
+                    tuple(info['source']),(s.x,s.y,s.heading),1.,
+                    'near' if d<4 else 'middle' if d<8 else 'far', 'all_free_space',
+                    int((s.heading%(2*math.pi))//(math.pi/2)),i))
+        finally: env.close()
+        return scenes
     world_min, world_max, world_half = resolve_world_bounds(world_bounds, default_half=2.5)
     bounds = (world_min, world_max)
     rng = np.random.default_rng(seed + (11 if split == "validation" else 29))
@@ -328,10 +372,13 @@ def reset_scenario(env: gym.Env, scenario: E4Scenario):
 
 
 class RandomController:
-    def __init__(self, seed: int) -> None:
+    def __init__(self, seed: int, hybrid=False, sector_count=10) -> None:
         self.rng = np.random.default_rng(seed)
+        self.hybrid,self.sector_count=hybrid,sector_count
 
     def predict(self, obs: np.ndarray, deterministic: bool = True):
+        if self.hybrid:
+            return np.r_[self.rng.uniform(-1,1,2),self.rng.integers(self.sector_count,size=2)].astype(np.float32),None
         return np.asarray([self.rng.integers(0, 6), self.rng.integers(0, 10), self.rng.integers(0, 10)], dtype=np.int64), None
 
 
@@ -345,8 +392,10 @@ class ReactiveController:
         contrast_threshold: float = 0.03,
         search_period: int = 8,
         scan_period: int = 2,
+        hybrid: bool = False,
     ) -> None:
         self.rng = np.random.default_rng(seed)
+        self.hybrid = hybrid
         self.hit_threshold = float(hit_threshold)
         self.trend_threshold = float(trend_threshold)
         self.contrast_threshold = float(contrast_threshold)
@@ -360,7 +409,7 @@ class ReactiveController:
         self.steps_since_hit = 0
 
     def predict(self, obs: np.ndarray, deterministic: bool = True):
-        frame = np.asarray(obs, dtype=np.float32).reshape(-1)[-16:]
+        frame = np.asarray(obs, dtype=np.float32).reshape(-1)[-57 if self.hybrid else -16:]
         left_smooth, right_smooth = float(frame[2]), float(frame[3])
         left_trend, right_trend = float(frame[4]), float(frame[5])
         diff = float(frame[6])
@@ -379,6 +428,16 @@ class ReactiveController:
         else:
             sector = int((self.steps_since_hit // self.scan_period) % 10)
             other = 9 - sector
+        if self.hybrid:
+            # 只用气味与雷达；近障时原地朝更开阔一侧转，不读取地图/源点。
+            scan=frame[21:57]*3.
+            front=float(np.min(np.r_[scan[-2:],scan[:3]]))
+            if front<.5:
+                turn=1. if scan[3:15].mean()>=scan[22:34].mean() else -1.
+                motion=[-1.,turn]
+            else:
+                motion={0:[1.,0.],5:[-1.,0.],3:[-1.,1.],4:[-1.,-1.]}[move]
+            return np.asarray([*motion,sector,other],dtype=np.float32),None
         return np.asarray([move, sector, other], dtype=np.int64), None
 
 
@@ -446,6 +505,9 @@ def evaluate_one(model: Any, env: gym.Env, scenario: E4Scenario, *, deterministi
     else:
         row["mean_left_right_contrast"] = None
     row.update({"scenario_id": scenario.scenario_id, "split": scenario.split, "seed": scenario.seed, "wind_speed": scenario.wind_speed, "distance_bin": scenario.distance_bin, "crosswind_bin": scenario.crosswind_bin, "source_strength": scenario.source_strength, "heading_quadrant": scenario.heading_quadrant, "repeat": scenario.repeat, "reward": float(sum(float(x.get("reward", 0.0)) for x in base.trajectory))})
+    if base.room_navigation:
+        from dual_whisker_rl.mobile_contract import navigation_episode_metrics
+        row.update(navigation_episode_metrics(base.trajectory))
     return row
 
 
@@ -470,6 +532,9 @@ def aggregate(rows: list[dict[str, Any]], *, include_breakdown: bool = True) -> 
     if include_breakdown:
         out["by_distance_bin"] = {key: aggregate([r for r in rows if r["distance_bin"] == key], include_breakdown=False) for key in sorted({r["distance_bin"] for r in rows})}
         out["by_wind_speed"] = {str(key): aggregate([r for r in rows if r["wind_speed"] == key], include_breakdown=False) for key in sorted({r["wind_speed"] for r in rows})}
+    if any('collision_count' in r for r in rows):
+        from dual_whisker_rl.mobile_contract import navigation_summary
+        out['navigation']=navigation_summary(rows)
     return out
 
 

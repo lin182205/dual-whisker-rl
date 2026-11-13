@@ -1,8 +1,8 @@
 """训练移动机器人 + 双触须气源搜索 PPO。
 
-动作 `MultiDiscrete([6, 10, 10])` = [移动, 左扇区, 右扇区]。默认观测为 16 维硬件可部署
-特征（12 维气味特征 + 朝向 cos/sin + 上一步移动 + blank_age）。历史仍由包装器堆叠为扁平向量，
-可选择直接交给 MLP，或先通过 GRU / Transformer 编码时间依赖后再交给 PPO。
+默认连续底盘 + 两个离散触须分类动作，57维单帧，20帧历史1140维。
+气味历史由 GRU / Transformer / MLP 编码，与当前导航帧融合后交给联合 PPO。
+显式使用旧配置时保留 MultiDiscrete([6,10,10]) 和旧编码器行为。
 """
 
 from __future__ import annotations
@@ -45,7 +45,10 @@ if str(ROOT) not in sys.path:
 
 from dual_whisker_rl.agents import GRUHistoryExtractor
 from dual_whisker_rl.agents import TransformerHistoryExtractor
+from dual_whisker_rl.agents.hybrid_policy import HybridActorCriticPolicy
+from dual_whisker_rl.agents.olfactory_navigation import OlfactoryNavigationExtractor
 from dual_whisker_rl.envs import MobileWhiskerPuffEnv
+from dual_whisker_rl.mobile_contract import environment_contract, validate_model_environment
 from dual_whisker_rl.paths import portable_path
 from dual_whisker_rl.paths import project_path
 from dual_whisker_rl.paths import resolve_path_args
@@ -78,6 +81,10 @@ class CompactTrainingInfoWrapper(gym.Wrapper):
         "is_success",
         "distance_to_source",
         "out_of_bounds",
+        "collision",
+        "collision_count",
+        "path_distance_to_source",
+        "actual_linear_velocity", "actual_angular_velocity", "surface_clearance_m", "near_obstacle", "control_change_norm",
     )
 
     @classmethod
@@ -155,6 +162,11 @@ class RewardComponentsTensorboardCallback(BaseCallback):
         infos = self.locals.get("infos", ())
         dones = np.asarray(self.locals.get("dones", ()), dtype=bool).reshape(-1)
         for env_index, info in enumerate(infos):
+            if "collision" in info:
+                self.logger.record_mean("rollout/collision_rate", float(info["collision"]))
+            for key in ("actual_linear_velocity", "actual_angular_velocity", "surface_clearance_m", "near_obstacle", "control_change_norm"):
+                if key in info:
+                    self.logger.record_mean(f"navigation/{key}", float(info[key]))
             if "odor_hit" in info:
                 self._diagnostic_step_count += 1
                 blank_age_steps = int(info.get("blank_age_steps", 0))
@@ -507,7 +519,7 @@ class TrainingCycleEtaCallback(BaseCallback):
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=Path, default=Path("configs/mobile_whisker.yaml"))
+    parser.add_argument("--config", type=Path, default=Path("configs/mobile_rooms_hybrid.yaml"))
     parser.add_argument(
         "--scenario-mode",
         choices=("randomized", "fixed"),
@@ -616,7 +628,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def resolve_output_paths(args: argparse.Namespace) -> None:
+def resolve_output_paths(args: argparse.Namespace, config=None) -> None:
     """从头训练分配新编号；续训恢复 checkpoint 对应的实验和日志目录。"""
     if getattr(args, "_output_paths_resolved", False):
         return
@@ -626,7 +638,9 @@ def resolve_output_paths(args: argparse.Namespace) -> None:
     if args.tensorboard_run_dir is not None:
         raise ValueError("--tensorboard-run-dir 仅用于 --resume-from 续训")
     args.tensorboard_dir = args.tensorboard_dir or ROOT / "results" / "tensorboard"
-    keyword = args.experiment_name or f"mobile_whisker_{args.temporal_encoder}_ppo"
+    prefix = ("mobile_hybrid" if (config or {}).get("motion_mode") == "hybrid"
+              else "mobile_rooms" if (config or {}).get("map_layout") else "mobile_whisker")
+    keyword = args.experiment_name or f"{prefix}_{args.temporal_encoder}_ppo"
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", keyword):
         raise ValueError("--experiment-name 只能包含英文字母、数字、下划线和连字符")
 
@@ -869,7 +883,7 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--gru-dropout must satisfy 0 <= dropout < 1")
 
 
-def build_policy_kwargs(args: argparse.Namespace, base_observation_dim: int) -> dict:
+def build_policy_kwargs(args: argparse.Namespace, base_observation_dim: int, *, hybrid=False) -> dict:
     """构造 MLP 基线、Transformer 或 GRU 历史编码策略参数。"""
     policy_kwargs: dict = {
         "net_arch": [160, 160],
@@ -905,6 +919,14 @@ def build_policy_kwargs(args: argparse.Namespace, base_observation_dim: int) -> 
                 },
             }
         )
+    if hybrid:
+        encoder_kwargs = dict(policy_kwargs.get("features_extractor_kwargs", {}))
+        encoder_kwargs.pop("history_length", None)
+        encoder_kwargs.pop("base_observation_dim", None)
+        policy_kwargs.update({"features_extractor_class": OlfactoryNavigationExtractor,
+                             "features_extractor_kwargs": {"history_length": args.history_length,
+                                 "base_observation_dim": base_observation_dim, "temporal_encoder": args.temporal_encoder,
+                                 "encoder_kwargs": encoder_kwargs}})
     return policy_kwargs
 
 
@@ -945,11 +967,26 @@ def train(args: argparse.Namespace) -> PPO:
     )
     validate_args(args)
     config = load_config(args.config)
-    resolve_output_paths(args)
     if args.scenario_mode is not None:
         config["scenario_mode"] = args.scenario_mode
     if args.domain_randomization:
         config["domain_randomization"] = True
+    resume_model = None
+    if args.resume_from is not None:
+        # 在创建 Monitor/输出目录前拒绝不兼容续训，避免触碰原训练日志。
+        resume_model = PPO.load(str(args.resume_from), device="auto")
+        probe = MobileWhiskerPuffEnv(config)
+        try:
+            validate_model_environment(resume_model, probe, args.history_length, resume=True)
+            if probe.hybrid_motion:
+                requested = build_policy_kwargs(args, 57, hybrid=True)["features_extractor_kwargs"]
+                extractor = resume_model.policy.features_extractor
+                if (extractor.temporal_encoder != requested["temporal_encoder"]
+                        or extractor.encoder_kwargs != requested["encoder_kwargs"]):
+                    raise ValueError("续训编码器参数与checkpoint不一致；请使用原训练参数")
+        finally:
+            probe.close()
+    resolve_output_paths(args, config)
     args.seed = resolve_seed(args.seed)
 
     set_random_seed(args.seed)
@@ -992,13 +1029,15 @@ def train(args: argparse.Namespace) -> PPO:
         save_vecnormalize=False,
         verbose=2,
     )
-    reward_components_callback = RewardComponentsTensorboardCallback(
-        MobileWhiskerPuffEnv.REWARD_COMPONENT_NAMES
-    )
-    # PPO 原生支持 MultiDiscrete([6, 10, 10])。
+    contract_env = MobileWhiskerPuffEnv(config)
+    model_contract = environment_contract(contract_env, args.history_length)
+    reward_components_callback = RewardComponentsTensorboardCallback(contract_env.REWARD_COMPONENT_NAMES)
+    contract_env.close()
+    hybrid = config.get("motion_mode") == "hybrid"
+    policy_kwargs = build_policy_kwargs(args, base_observation_dim, hybrid=hybrid)
     if args.resume_from is None:
         model = PPO(
-            policy="MlpPolicy",
+            policy=HybridActorCriticPolicy if hybrid else "MlpPolicy",
             env=env,
             learning_rate=args.learning_rate,
             n_steps=args.n_steps,
@@ -1009,14 +1048,14 @@ def train(args: argparse.Namespace) -> PPO:
             clip_range=0.2,
             ent_coef=args.ent_coef,
             target_kl=args.target_kl,
-            policy_kwargs=build_policy_kwargs(args, base_observation_dim),
+            policy_kwargs=policy_kwargs,
             tensorboard_log=str(args.tensorboard_dir),
             seed=args.seed,
             verbose=1,
         )
         starting_num_timesteps = 0
     else:
-        model = PPO.load(str(args.resume_from), device="auto")
+        model = resume_model
         checkpoint_shape = tuple(model.observation_space.shape)
         environment_shape = tuple(env.observation_space.shape)
         if checkpoint_shape != environment_shape:
@@ -1024,10 +1063,8 @@ def train(args: argparse.Namespace) -> PPO:
             raise ValueError(
                 "checkpoint observation shape does not match the current mobile "
                 f"environment: checkpoint={checkpoint_shape}, "
-                f"environment={environment_shape}. blank_age makes the default "
-                "base observation 16-dimensional; start a new run, or set "
-                "include_blank_age_observation=false only when evaluating/resuming "
-                "a legacy 15-dimensional model."
+                f"environment={environment_shape}. Use the training configuration "
+                "and observation schema recorded in the checkpoint."
             )
         model.set_env(env, force_reset=True)
         starting_num_timesteps = int(model.num_timesteps)
@@ -1043,6 +1080,11 @@ def train(args: argparse.Namespace) -> PPO:
             if expected_extractor_cls is None
             else isinstance(checkpoint_extractor, expected_extractor_cls)
         )
+        if hybrid:
+            requested = policy_kwargs["features_extractor_kwargs"]
+            matches = (isinstance(checkpoint_extractor, OlfactoryNavigationExtractor)
+                       and checkpoint_extractor.temporal_encoder == requested["temporal_encoder"]
+                       and checkpoint_extractor.encoder_kwargs == requested["encoder_kwargs"])
         if not matches:
             raise ValueError(
                 "--temporal-encoder does not match checkpoint features extractor: "
@@ -1055,6 +1097,11 @@ def train(args: argparse.Namespace) -> PPO:
             "resume_note=checkpoint PPO/model/optimizer parameters are preserved; "
             "--timesteps is additional training"
         )
+    if hybrid:
+        model_contract["encoder_config"] = model.policy.features_extractor.configuration
+    model.mobile_environment_contract = model_contract
+    if config.get("map_layout"):
+        save_run_metadata(args, config, model, starting_num_timesteps, training_complete=False)
     target_timesteps = starting_num_timesteps + args.timesteps
     rollout_size = int(model.n_steps) * int(env.num_envs)
     eta_callback = TrainingCycleEtaCallback(
@@ -1099,9 +1146,16 @@ def preview_policy_command(model: PPO, config: dict, args: argparse.Namespace) -
     env = make_env(config, args.seed + 200_000, args.history_length, monitor_dir=None)
     obs, _ = env.reset(seed=args.seed + 200_000)
     action, _ = model.predict(obs, deterministic=True)
-    move, left, right = np.asarray(action, dtype=np.int64).reshape(-1)[:3]
-    print(f"policy_action=[move={int(move)}, left={int(left)}, right={int(right)}]")
-    print(f"hardware_like_command=MOVE {int(move)} | STEP {int(left)} {int(right)}")
+    a = np.asarray(action).reshape(-1)
+    if env.unwrapped.hybrid_motion:
+        v = (float(a[0])+1.)*.5*env.unwrapped.hybrid_motion.v_max
+        w = float(a[1])*env.unwrapped.hybrid_motion.w_max
+        print(f"policy_action=[linear_norm={a[0]:.6f}, angular_norm={a[1]:.6f}, left={int(a[2])}, right={int(a[3])}]")
+        print(f"chassis_velocity_m_s={v:.6f} angular_rad_s={w:.6f} | whisker_command=STEP {int(a[2])} {int(a[3])}")
+    else:
+        move, left, right = (int(x) for x in a)
+        print(f"policy_action=[move={move}, left={left}, right={right}]")
+        print(f"hardware_like_command=MOVE {move} | STEP {left} {right}")
     env.close()
 
 
@@ -1110,6 +1164,7 @@ def save_run_metadata(
     config: dict,
     model: PPO,
     starting_num_timesteps: int,
+    training_complete: bool = True,
 ) -> None:
     args.log_dir.mkdir(parents=True, exist_ok=True)
     metadata_env = MobileWhiskerPuffEnv(config)
@@ -1134,6 +1189,7 @@ def save_run_metadata(
             "features_dim": args.gru_features_dim,
         }
     metadata = {
+        "environment_contract": model.mobile_environment_contract,
         "seed": args.seed,
         "train_env_seeds": [args.seed + idx for idx in range(args.n_envs)],
         "n_envs": args.n_envs,
@@ -1143,7 +1199,9 @@ def save_run_metadata(
         ),
         "timesteps": args.timesteps,
         "starting_num_timesteps": starting_num_timesteps,
-        "final_num_timesteps": int(model.num_timesteps),
+        "final_num_timesteps": int(model.num_timesteps) if training_complete else None,
+        "current_num_timesteps": int(model.num_timesteps),
+        "training_complete": training_complete,
         "training_cycle_timing": {
             "rollout_size": int(model.n_steps) * args.n_envs,
             "ppo_epochs": int(model.n_epochs),
@@ -1207,9 +1265,16 @@ def save_run_metadata(
         "sim_sensor_scale": metadata_env.observation_builder.config.scale,
         "init_pose_mode": metadata_env.init_pose_mode,
         "scenario": metadata_env.scenario_metadata(),
-        "action_space": "[move_action, left_sector, right_sector]",
+        "action_space": ("[linear_norm, angular_norm, left_sector, right_sector]" if metadata_env.hybrid_motion
+                         else "[move_action, left_sector, right_sector]"),
         "goal_radius": metadata_env.goal_radius,
         "reward": {
+            "distance_potential": (
+                {"metric": "free_space_path", "formula": "-8*clip(distance_m/20,0,1)",
+                 "budget": 8., "cap_m": 20.}
+                if metadata_env.room_navigation else {"metric": "euclidean",
+                    "scale": metadata_env.progress_reward_scale}
+            ),
             "progress_reward_scale": metadata_env.progress_reward_scale,
             "goal_bonus": metadata_env.goal_bonus,
             "oob_penalty": metadata_env.oob_penalty,

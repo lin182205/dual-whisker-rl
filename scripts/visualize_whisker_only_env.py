@@ -25,29 +25,13 @@ from dual_whisker_rl.envs.whisker_only_env import WhiskerOnlyPuffEnv
 from dual_whisker_rl.envs.whisker_only_env import WORLD_MAX
 from dual_whisker_rl.envs.whisker_only_env import WORLD_MIN
 from dual_whisker_rl.paths import resolve_path_args
+from dual_whisker_rl.plotting import ODOR_CMAP, SOURCE_MARKER_COLOR
 from dual_whisker_rl.visualization import save_matplotlib_animation
 
 
 def build_plume_colormap() -> colors.LinearSegmentedColormap:
-    """参考图风格：低浓度融入奶白背景，羽流随浓度加深为蓝，峰值跳到黄色。
-
-    低端锚定到与 facecolor 一致的奶白，使空白区（浓度≈0）与背景无缝衔接；
-    浓度升高时蓝色逐渐加深至深海军蓝（羽流核心），最高浓度过渡到黄色高亮。
-    """
-    return colors.LinearSegmentedColormap.from_list(
-        "puff_demo",
-        [
-            (0.00, "#f7f4ef"),
-            (0.15, "#cfe2ec"),
-            (0.35, "#93c1e0"),
-            (0.55, "#4f93cc"),
-            (0.75, "#22619f"),
-            (0.90, "#123b6b"),
-            (0.97, "#0c2747"),
-            (1.00, "#ffe27a"),
-        ],
-        N=256,
-    )
+    """共用浅蓝到深蓝的浓度色阶，最高浓度保持深蓝，不使用黄色。"""
+    return plt.get_cmap(ODOR_CMAP)
 
 
 def parse_args() -> argparse.Namespace:
@@ -372,7 +356,7 @@ def draw_source_marker(ax, map_metadata: dict[str, object]) -> None:
         clipped_x,
         clipped_y,
         s=150,
-        color="#f0d43a",
+        color=SOURCE_MARKER_COLOR,
         marker="*",
         edgecolor="#2b2b2b",
         linewidth=1.1,
@@ -412,7 +396,7 @@ def render_static(episode_data: dict[str, object], output_path: Path, title: str
     vmax = max(0.05, float(np.percentile(concentration_frames, 99.2)))
 
     fig, ax = plt.subplots(figsize=(10.5, 8.5))
-    ax.set_facecolor("#f7f4ef")
+    ax.set_facecolor("#f7fbff")
     heatmap = ax.imshow(
         concentration_frames[frame_idx],
         extent=[xs.min(), xs.max(), ys.min(), ys.max()],
@@ -554,7 +538,7 @@ def render_animation(
     vmax = max(0.05, float(np.percentile(concentration_frames, 99.2)))
 
     fig, ax = plt.subplots(figsize=(10.5, 8.5))
-    ax.set_facecolor("#f7f4ef")
+    ax.set_facecolor("#f7fbff")
     heatmap = ax.imshow(
         concentration_frames[0],
         extent=[xs.min(), xs.max(), ys.min(), ys.max()],

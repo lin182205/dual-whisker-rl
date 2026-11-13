@@ -43,6 +43,7 @@ class PretrainedExperimentTests(unittest.TestCase):
 
     def arguments(self, phase="run", *extra):
         return runner.parser().parse_args([phase, "--model-path", str(self.model_path),
+                                          "--config", "configs/red_experiments.yaml",
                                           "--experiments", "e4", "--bootstrap", "30",
                                           "--max-steps", "4", *extra])
 
@@ -60,7 +61,7 @@ class PretrainedExperimentTests(unittest.TestCase):
         self.assertTrue(args.output_dir.endswith("pretrained/trained model"))
 
     def test_native_defaults_are_unchanged(self):
-        args = runner.parser().parse_args(["plan", "--profile", "formal"])
+        args = runner.parser().parse_args(["plan", "--profile", "formal", "--config", "configs/red_experiments.yaml"])
         _, profile, _, names, _, payload = self.resolve(args)
         self.assertEqual(len(names), 6)
         self.assertEqual(profile["seeds"], [1, 2, 3, 4, 5])

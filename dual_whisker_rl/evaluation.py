@@ -6,6 +6,7 @@ from collections.abc import Callable
 from typing import Any
 
 import numpy as np
+from dual_whisker_rl.mobile_contract import navigation_episode_metrics, navigation_summary
 
 
 def evaluate_policy(
@@ -55,6 +56,7 @@ def evaluate_policy(
     passive_reacquisition_events = 0
     whisker_reacquisition_reward_events = 0
     trajectories: list[list[dict[str, Any]]] = []
+    navigation_rows = []
 
     for idx in range(episodes):
         env = env_factory()
@@ -77,6 +79,11 @@ def evaluate_policy(
             last_y = state.y
 
         trajectory = list(env.unwrapped.trajectory)
+        nav_row = navigation_episode_metrics(trajectory)
+        if nav_row:
+            nav_row["success"] = bool(info.get("is_success", False))
+            navigation_rows.append(nav_row)
+            path_length = nav_row["path_length"]
         returns.append(episode_return)
         lengths.append(len(trajectory))
         successes.append(1.0 if info["distance_to_source"] <= env.unwrapped.goal_radius else 0.0)
@@ -239,6 +246,7 @@ def evaluate_policy(
                 whisker_reacquisition_reward_events
             ),
             "termination_counts": termination_counts,
+            **({"navigation": navigation_summary(navigation_rows)} if navigation_rows else {}),
         },
         trajectories,
     )
@@ -276,7 +284,7 @@ def _format_action(action: Any) -> Any:
     arr = np.asarray(action)
     if arr.size == 1:
         return int(arr.reshape(-1)[0])
-    return arr.astype(np.int64)
+    return arr
 
 
 def _whisker_info_stats(

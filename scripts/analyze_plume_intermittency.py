@@ -44,6 +44,9 @@ def parse_args() -> argparse.Namespace:
         description="Diagnose whiff/blank intermittency of the dynamic puff plume."
     )
     parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument("--config", type=Path, default=None, help="可选 Mobile 配置；未提供时保留旧诊断。")
+    parser.add_argument("--source-position", type=float, nargs=2, default=None)
+    parser.add_argument("--wind-direction-deg", type=float, default=None)
     parser.add_argument("--steps", type=int, default=3000, help="采样步数。")
     parser.add_argument("--dt", type=float, default=0.2)
     parser.add_argument(
@@ -82,7 +85,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("results/figures"),
     )
-    return resolve_path_args(parser.parse_args(), "out_dir")
+    return resolve_path_args(parser.parse_args(), "out_dir", "config")
 
 
 def sample_points(
@@ -108,8 +111,11 @@ def run_series(
     series = np.zeros((steps, len(points)), dtype=np.float64)
     for t in range(steps):
         plume.advance()
-        for j, (px, py) in enumerate(points):
-            series[t, j] = plume.concentration(px, py, add_noise=False)
+        if hasattr(plume, "_concentrations"):
+            series[t] = plume._concentrations(points, add_noise=False)
+        else:
+            for j, (px, py) in enumerate(points):
+                series[t, j] = plume.concentration(px, py, add_noise=False)
     return series
 
 
@@ -205,14 +211,28 @@ def make_plot(
 
 def main() -> None:
     args = parse_args()
-    plume = DynamicPuffPlume(
-        seed=args.seed,
-        dt=args.dt,
-        wind_sampling_mode=args.wind_mode,
-    )
-    plume.reset(args.seed)
+    env = None
+    if args.config:
+        import yaml
+        from dual_whisker_rl.envs import MobileWhiskerPuffEnv
+        config = yaml.safe_load(args.config.read_text(encoding="utf-8"))
+        env = MobileWhiskerPuffEnv(config)
+        plume = env.plume
+        plume.wind_sampling_mode = args.wind_mode
+        scenario = {}
+        if args.source_position is not None:
+            scenario["source_position"] = args.source_position
+        if args.wind_direction_deg is not None:
+            scenario["wind_direction"] = math.radians(args.wind_direction_deg)
+        env.reset(seed=args.seed, options={"scenario": scenario})
+        args.dt = plume.dt
+    else:
+        plume = DynamicPuffPlume(seed=args.seed, dt=args.dt, wind_sampling_mode=args.wind_mode)
+        plume.reset(args.seed)
 
     points = sample_points(plume, args.downwind_distance, list(args.crosswind_offsets))
+    if any(not plume.is_position_valid(*p) for p in points) and env is not None:
+        raise ValueError("诊断采样点落在墙内或场外，请调整源位置、距离或偏移")
     series = run_series(plume, points, args.steps)
 
     summaries = [summarize_point(series[:, j], args.threshold, args.dt) for j in range(len(points))]
@@ -245,6 +265,38 @@ def main() -> None:
             for off, (px, py), s in zip(offsets, points, summaries)
         ],
     }
+    if env is not None:
+        from dual_whisker_rl.envs.sensor_model import AsymmetricGasSensor
+        sensor_series = np.zeros_like(series)
+        for j in range(len(points)):
+            sensor = AsymmetricGasSensor(response_tau=env.sensor_response_tau,
+                recovery_tau=env.sensor_recovery_tau, dt=env.dt, noise_std=env.sensor_noise_std,
+                rng=np.random.default_rng(args.seed+j))
+            sensor_series[:, j] = [sensor.update(v) for v in series[:, j]]
+        report["environment_config"] = config
+        report["map_sha256"] = env.room_navigation.map.digest if env.room_navigation else None
+        report["concentration_distribution"] = {
+            "quantiles": [0, .1, .5, .9, .99, 1],
+            "raw": np.quantile(series, [0, .1, .5, .9, .99, 1]).tolist(),
+            "sensor": np.quantile(sensor_series, [0, .1, .5, .9, .99, 1]).tolist(),
+            "sensor_hit_ratio": float(np.mean(sensor_series >= env.hit_threshold)),
+            "environment_hit_threshold": env.hit_threshold,
+        }
+        fig, axes = plt.subplots(2, 1, figsize=(11, 6), sharex=True)
+        times = np.arange(args.steps)*args.dt
+        for j, point in enumerate(points):
+            axes[0].plot(times, series[:, j], lw=.7, label=f"({point[0]:.2f},{point[1]:.2f})")
+            axes[1].plot(times, sensor_series[:, j], lw=.7)
+        axes[0].set_ylabel("Raw concentration")
+        axes[1].set_ylabel("MQ-3 response")
+        axes[1].set_xlabel("Time (s)")
+        for ax in axes:
+            ax.axhline(env.hit_threshold, color="black", ls="--", lw=.8)
+        axes[0].legend(fontsize=8)
+        fig.tight_layout()
+        fig.savefig(args.out_dir/f"plume_sensor_response{suffix}.png", dpi=130)
+        plt.close(fig)
+        env.close()
     json_path.parent.mkdir(parents=True, exist_ok=True)
     json_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
 

@@ -4,8 +4,8 @@ set -Eeuo pipefail
 # E4 正式实验统一启动器。所有长任务默认携带 --resume：首次运行与断点恢复使用同一命令。
 
 ENV_NAME="${DUAL_WHISKER_CONDA_ENV:-dual-whisker-rl}"
-OUTPUT_DIR="${E4_OUTPUT_DIR:-results/e4}"
-CONFIG_PATH="${E4_CONFIG_PATH:-configs/e4_formal.yaml}"
+OUTPUT_DIR="${E4_OUTPUT_DIR:-results/office_e4}"
+CONFIG_PATH="${E4_CONFIG_PATH:-configs/mobile_rooms_hybrid.yaml}"
 ACTION="run"
 BACKGROUND=0
 FOREGROUND_CHILD=0
@@ -28,8 +28,8 @@ usage() {
 
 启动器选项：
   --env-name NAME      Conda 环境名，默认 dual-whisker-rl
-  --output-dir PATH    E4 输出根目录，默认 results/e4
-  --config PATH        formal 配置，默认 configs/e4_formal.yaml
+  --output-dir PATH    E4 输出根目录，默认 results/office_e4
+  --config PATH        默认当前办公图 configs/mobile_rooms_hybrid.yaml
   --background         使用 nohup 在后台运行；日志和 PID 自动保存
   --log-file PATH      指定日志文件
   -h, --help           显示帮助

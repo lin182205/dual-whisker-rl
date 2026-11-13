@@ -29,7 +29,7 @@ def parser():
     p.add_argument("--e4-methods",help="原E4方法列表，逗号分隔；group/variants仅限制E3/E5/E6")
     p.add_argument("--learning-dir",type=Path,help="已有模型配套日志根目录，含<variant>/seed_<seed>/validation_history.json")
     p.add_argument("--bootstrap",type=int,default=2000,help="论文报告bootstrap次数，默认2000")
-    p.add_argument("--config",default="configs/red_experiments.yaml")
+    p.add_argument("--config",default="configs/office_experiments.yaml")
     p.add_argument("--profile",choices=["smoke","formal"],default="smoke")
     p.add_argument("--output-dir",help="默认results/simulation_experiments；已有模型默认放入pretrained/<模型名>子目录")
     p.add_argument("--model-path",type=Path,help="已训练PPO模型；跳过训练，仅评估一个variant，未指定variants时使用main")
@@ -84,6 +84,9 @@ def pretrained_source(args, names, profile):
 
 def check_pretrained_contract(model, env, variant):
     """维度一致仍不足以证明历史堆叠和编码器语义一致。"""
+    if env.unwrapped.hybrid_motion:
+        from dual_whisker_rl.batch_mobile import validate_contract
+        return validate_contract(model,env,variant)
     from dual_whisker_rl.agents import GRUHistoryExtractor
     from stable_baselines3.common.torch_layers import FlattenExtractor
     if env.observation_space != model.observation_space or env.action_space != model.action_space:
@@ -151,6 +154,12 @@ def resolve(args):
     cfg = yaml.safe_load(project_path(spec["base_config"]).read_text(encoding="utf-8"))
     cfg.update(spec.get("common",{}))
     cfg["max_steps"] = int(profile["max_steps"])
+    if cfg.get('map_layout'):
+        if args.output_dir == 'results/simulation_experiments': args.output_dir='results/office_experiments'
+        from dual_whisker_rl.mobile_contract import environment_contract
+        from dual_whisker_rl.envs import MobileWhiskerPuffEnv
+        probe=MobileWhiskerPuffEnv(cfg)
+        office_contract=environment_contract(probe,20);probe.close()
     if cfg.get("plume_model","dynamic")!="dynamic":
         raise ValueError("红字实验只支持dynamic Puff")
     code_paths = sorted((ROOT/"dual_whisker_rl").rglob("*.py")) + [Path(__file__),
@@ -161,6 +170,8 @@ def resolve(args):
                    variants=spec["variants"],faults=spec["faults"],code_sha256=code,
                    selection="validation_success_then_penalized_time",
                    success="radius_and_continuous_hold",time_unit="seconds")
+    if cfg.get('map_layout'):
+        payload.update(environment_contract=office_contract,success='first_unobstructed_arrival' if cfg.get('success_hold_s',0)==0 else 'radius_and_continuous_hold')
     if source:
         payload.update(external_model=source, selection="user_supplied_pretrained")
     suite_plan(args,spec,profile,names)  # 在任何写盘前验证全部实验选择。
@@ -169,7 +180,7 @@ def resolve(args):
 def prepare(root,profile,cfg,payload):
     scenarios = {}
     for split,count in [("validation",profile["validation_scenarios"]),("test",profile["test_scenarios"])]:
-        candidates = build_scenarios(split=split,profile="formal",world_bounds=cfg.get("world_bounds"))
+        candidates = build_scenarios(split=split,profile="formal",world_bounds=cfg.get("world_bounds"),config=cfg)
         if count>len(candidates):
             raise ValueError(f"{split}只有{len(candidates)}场景，不能要求{count}")
         rng = np.random.default_rng(20261013+(1 if split=="validation" else 2))
@@ -236,6 +247,9 @@ def rollout(model,env,scene,*,save_steps=False,probes=None):
         reward=total,reward_components={key:float(sum(r["reward_components"][key] for r in base.trajectory))
                                       for key in base.REWARD_COMPONENT_NAMES},
         evaluation_wall_s=time.perf_counter()-started)
+    if base.room_navigation:
+        from dual_whisker_rl.mobile_contract import navigation_episode_metrics
+        row.update(navigation_episode_metrics(base.trajectory))
     return row,step_rows
 
 def vector_factory(cfg,variant,seed):
@@ -323,13 +337,24 @@ def train_one(root,name,variant,seed,profile,cfg,manifest,args):
         if variant.get("encoder","gru")=="gru":
             kwargs.update(features_extractor_class=GRUHistoryExtractor,
                 features_extractor_kwargs=dict(history_length=length,base_observation_dim=int(vec.observation_space.shape[0]//length)))
+        policy='MlpPolicy'
+        if eval_env.unwrapped.hybrid_motion:
+            from dual_whisker_rl.batch_mobile import policy_setup,attach_contract,validate_contract
+            policy,kwargs=policy_setup(eval_env,length,variant.get('encoder','gru'))
         checkpoint = directory/"last_model.zip"
         if args.resume and checkpoint.exists():
             model = PPO.load(checkpoint,env=vec,device=profile.get("device", "cpu"))
+            if eval_env.unwrapped.hybrid_motion:
+                probe=make_experiment_env(cfg,variant,seed=seed)
+                validate_contract(model,probe,variant,resume=True);probe.close()
         else:
-            model = PPO("MlpPolicy",vec,learning_rate=1e-4,n_steps=profile["n_steps"],batch_size=profile["batch_size"],
+            model = PPO(policy,vec,learning_rate=1e-4,n_steps=profile["n_steps"],batch_size=profile["batch_size"],
                 n_epochs=5,gamma=.99,gae_lambda=.95,ent_coef=.003,target_kl=.02,seed=seed,
                 policy_kwargs=kwargs,verbose=0,device=profile.get("device", "cpu"),tensorboard_log=str(directory/"tensorboard"))
+            if eval_env.unwrapped.hybrid_motion:
+                probe=make_experiment_env(cfg,variant,seed=seed)
+                attach_contract(model,probe,variant);probe.close()
+        if eval_env.unwrapped.hybrid_motion:write_json(directory/'environment_contract.json',model.batch_environment_contract)
         model.learn(total_timesteps=max(0,profile["timesteps"]-model.num_timesteps),reset_num_timesteps=not args.resume,
                     callback=Diagnostics(),tb_log_name=name)
         model.save(directory/"final_model.zip")
@@ -415,6 +440,9 @@ def evaluate(root,names,spec,profile,cfg,manifest,args,*,robust=False):
         try:
             if source:
                 check_pretrained_contract(model,env,job["variant"])
+            elif env.unwrapped.hybrid_motion:
+                from dual_whisker_rl.batch_mobile import validate_contract
+                validate_contract(model,env,job['variant'])
             elif env.observation_space!=model.observation_space or env.action_space!=model.action_space:
                 raise ValueError("模型与故障环境的观测/动作契约不一致")
             for scene in entries:
@@ -450,6 +478,9 @@ def summarize(root,names,profile,*,robust=False):
         if not rows:
             continue
         result = summarize_episodes(rows)
+        if cfg_room := any('collision_count' in r for r in rows):
+            from dual_whisker_rl.mobile_contract import navigation_summary
+            result['navigation']=navigation_summary(rows)
         result["expected_episodes_per_variant"] = len(scenarios(root,"test"))*len(profile["seeds"]) if not robust else None
         result["independent_training_seed_count"] = len(profile["seeds"])
         manifest = json.loads((root/"manifest.json").read_text(encoding="utf-8"))

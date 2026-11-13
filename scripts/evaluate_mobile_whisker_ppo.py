@@ -22,6 +22,7 @@ if str(ROOT) not in sys.path:
 
 from dual_whisker_rl.agents import TransformerHistoryExtractor
 from dual_whisker_rl.envs import MobileWhiskerPuffEnv
+from dual_whisker_rl.mobile_contract import validate_model_environment, environment_contract
 from dual_whisker_rl.evaluation import evaluate_policy
 from dual_whisker_rl.paths import portable_path
 from dual_whisker_rl.paths import resolve_path_args
@@ -37,9 +38,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model-path",
         type=Path,
-        default=Path("results/models/mobile_whisker_gru_ppo_18848976_steps.zip"),
+        default=Path("results/models/mobile_hybrid_gru_ppo_1.zip"),
     )
-    parser.add_argument("--config", type=Path, default=Path("configs/mobile_whisker.yaml"))
+    parser.add_argument("--config", type=Path, default=Path("configs/mobile_rooms_hybrid.yaml"))
     parser.add_argument(
         "--scenario-mode",
         choices=("randomized", "fixed"),
@@ -47,6 +48,7 @@ def parse_args() -> argparse.Namespace:
         help="覆盖配置中的场景初始化模式；默认使用 randomized。",
     )
     parser.add_argument("--episodes", type=int, default=50)
+    parser.add_argument("--device", default="cpu", help="小批量推理默认使用CPU，与固定场景评估一致。")
     parser.add_argument("--seed", type=int, default=10_000)
     parser.add_argument("--domain-randomization", action="store_true")
     parser.add_argument(
@@ -153,6 +155,11 @@ def write_reward_breakdown(
 ) -> Path:
     """写入机器可读 CSV，并生成便于直接查看的定宽文本表。"""
     component_order = list(MobileWhiskerPuffEnv.REWARD_COMPONENT_NAMES)
+    for _, index in selected_episodes:
+        for step in trajectories[index]:
+            for name in step.get("reward_components", {}):
+                if name not in component_order:
+                    component_order.append(name)
     rows = []
     for result, episode_index in selected_episodes:
         trajectory = trajectories[episode_index]
@@ -283,11 +290,13 @@ def write_aligned_reward_breakdown(
 
 def main() -> None:
     args = parse_args()
+    import torch
+    torch.set_num_threads(1)
     if not args.model_path.exists():
         raise FileNotFoundError(f"模型不存在: {args.model_path}")
     # 显式导入自定义提取器，确保 SB3 反序列化 Transformer 策略时类路径可用。
     _ = TransformerHistoryExtractor
-    model = PPO.load(str(args.model_path))
+    model = PPO.load(str(args.model_path), device=args.device)
 
     config = load_config(args.config)
     if args.scenario_mode is not None:
@@ -296,10 +305,12 @@ def main() -> None:
         config["domain_randomization"] = True
 
     probe_env = MobileWhiskerPuffEnv(config)
+    history_length = validate_model_environment(model, probe_env)
     base_dim = int(probe_env.observation_space.shape[0])
     probe_goal_radius = float(probe_env.goal_radius)
     scenario = probe_env.scenario_metadata()
     observation_config = {
+        "environment_contract": model.mobile_environment_contract if probe_env.hybrid_motion else environment_contract(probe_env, history_length),
         "base_observation_dim": base_dim,
         "include_blank_age_observation": (
             probe_env.include_blank_age_observation
@@ -322,9 +333,7 @@ def main() -> None:
     if stacked_dim % base_dim != 0:
         raise ValueError(
             f"模型观测维度 {stacked_dim} 不是环境维度 {base_dim} 的整数倍。"
-            "新 mobile 环境默认加入 blank_age（单帧 16 维）；评估旧 15 维模型时，"
-            "请在 --config 指向的 YAML 中设置 "
-            "include_blank_age_observation: false。"
+            "请使用与模型训练时相同的场景配置和观测版本。"
         )
     history_length = stacked_dim // base_dim
     print(f"history_length={history_length} (base={base_dim}, stacked={stacked_dim})")

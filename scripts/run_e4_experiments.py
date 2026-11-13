@@ -163,6 +163,8 @@ def resolve_args(args: argparse.Namespace) -> None:
     args.output_dir = project_path(args.output_dir)
     args.config = project_path(args.config) if args.config else None
     config_values = load_yaml(args.config) if args.config else {}
+    if args.output_dir is None:
+        args.output_dir = project_path('results/office_e4') if config_values.get('map_layout') else DEFAULT_OUTPUT
     args.methods = parse_list(args.methods) or list(METHOD_ORDER)
     args.seeds = parse_list(args.seeds, cast=int) or defaults["seeds"]
     args.timesteps = int(args.timesteps or defaults["timesteps"])
@@ -246,7 +248,11 @@ def base_config(args: argparse.Namespace) -> dict[str, Any]:
 def experiment_manifest(args: argparse.Namespace, scenarios: dict[str, list[E4Scenario]]) -> dict[str, Any]:
     cfg = base_config(args)
     code_files = [Path(__file__).resolve(), ROOT / "dual_whisker_rl" / "e4_experiments.py", ROOT / "dual_whisker_rl" / "envs" / "mobile_whisker_env.py", ROOT / "dual_whisker_rl" / "envs" / "whisker_only_env.py", ROOT / "dual_whisker_rl" / "envs" / "world_bounds.py"]
-    return {
+    if cfg.get('map_layout'):
+        code_files += [ROOT/'dual_whisker_rl'/p for p in ('batch_mobile.py','envs/room_map.py','envs/room_layouts.py',
+            'envs/office_layout.py','envs/room_navigation.py','envs/room_plume.py','envs/hybrid_action.py',
+            'agents/hybrid_policy.py','agents/olfactory_navigation.py')]
+    manifest = {
         "version": VERSION,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "profile": args.profile,
@@ -268,13 +274,20 @@ def experiment_manifest(args: argparse.Namespace, scenarios: dict[str, list[E4Sc
             "animation": False,
         },
     }
+    if cfg.get('map_layout'):
+        from dual_whisker_rl.mobile_contract import environment_contract
+        probe=make_env('main',cfg)
+        manifest['environment_contract']=environment_contract(probe.unwrapped,20)
+        for m in manifest['methods']:m['action_interface']='continuous_motion+categorical_whiskers'
+        probe.close()
+    return manifest
 
 
 def prepare(args: argparse.Namespace) -> Path:
     cfg = base_config(args)
     scenarios = {
-        "validation": build_scenarios("validation", args.profile, world_bounds=cfg["world_bounds"]),
-        "test": build_scenarios("test", args.profile, world_bounds=cfg["world_bounds"]),
+        "validation": build_scenarios("validation", args.profile, world_bounds=cfg["world_bounds"],config=cfg),
+        "test": build_scenarios("test", args.profile, world_bounds=cfg["world_bounds"],config=cfg),
     }
     manifest = experiment_manifest(args, scenarios)
     root = args.output_dir / args.profile
@@ -282,6 +295,12 @@ def prepare(args: argparse.Namespace) -> Path:
         print(json.dumps({"output": portable_path(root), "scenario_counts": manifest["scenario_counts"], "methods": args.methods, "seeds": args.seeds, "method_seeds": manifest["method_seeds"], "vec_env_backend": args.vec_env_backend, "checkpoint_rollouts": args.checkpoint_rollouts, "max_steps": args.max_steps}, ensure_ascii=False, indent=2))
         return root
     root.mkdir(parents=True, exist_ok=True)
+    if (root/'manifest.json').exists():
+        previous=json.loads((root/'manifest.json').read_text(encoding='utf-8'))
+        if (cfg.get('map_layout') or previous.get('config',{}).get('map_layout')) and (
+            previous.get('environment_contract')!=manifest.get('environment_contract') or
+            previous.get('scenario_hashes')!=manifest.get('scenario_hashes')):
+            raise ValueError('批量场景地图/配置不一致，拒绝覆盖旧题库，请换输出目录')
     atomic_write_json(root / "manifest.json", manifest)
     for split, values in scenarios.items():
         path = root / f"scenarios_{split}.jsonl"
@@ -373,7 +392,7 @@ def experiment_signature(args: argparse.Namespace, method: str, seed: int, fixed
         "fixed_sector": int(fixed_sector),
         "training": {
             "algorithm": "PPO",
-            "policy": "MlpPolicy",
+            "policy": "HybridActorCriticPolicy" if signature_config.get('motion_mode')=='hybrid' else "MlpPolicy",
             "learning_rate": 1e-4,
             "n_steps": n_steps,
             "rollout": rollout,
@@ -393,6 +412,10 @@ def experiment_signature(args: argparse.Namespace, method: str, seed: int, fixed
             "world_bounds": sha256_file(ROOT / "dual_whisker_rl" / "envs" / "world_bounds.py"),
         },
     }
+    if signature_config.get('map_layout'):
+        manifest=experiment_manifest(args,{})
+        payload['environment_contract']=manifest['environment_contract']
+        payload['code_hashes'].update(manifest['code_hashes'])
     return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
@@ -674,6 +697,13 @@ def train_one(args: argparse.Namespace, root: Path, method: str, seed: int, *, f
         if not base_dims or len(set(base_dims)) != 1:
             raise ValueError(f"inconsistent base observation dimensions across workers: {base_dims}")
         kwargs.update({"features_extractor_class": GRUHistoryExtractor, "features_extractor_kwargs": {"history_length": meta["history_length"], "base_observation_dim": base_dims[0]}})
+    policy='MlpPolicy'
+    contract_env=None
+    if cfg.get('motion_mode')=='hybrid':
+        from dual_whisker_rl.batch_mobile import policy_setup,attach_contract,validate_contract
+        contract_env=make_env(method,cfg,fixed_sector=fixed_sector)
+        mlp_width=160
+        policy,kwargs=policy_setup(contract_env,meta['history_length'],meta['temporal_encoder'],mlp_width)
     checkpoint_dir = task_dir / "checkpoints"
     checkpoint_frequency = max(n_steps * args.checkpoint_rollouts, 1)
     callback_checkpoint = CheckpointCallback(save_freq=checkpoint_frequency, save_path=str(checkpoint_dir), name_prefix=f"{method}_seed{seed}")
@@ -692,13 +722,15 @@ def train_one(args: argparse.Namespace, root: Path, method: str, seed: int, *, f
     try:
         if checkpoint is not None:
             model = PPO.load(str(checkpoint), env=env, device="auto")
+            if contract_env is not None:validate_contract(model,contract_env,meta,resume=True)
             model.tensorboard_log = str(tensorboard_dir)
             remaining = max(0, args.timesteps - int(model.num_timesteps))
             if remaining > 0:
                 model.learn(total_timesteps=remaining, reset_num_timesteps=False, callback=callback, progress_bar=False, tb_log_name=f"e4_{method}_seed{seed}")
             resumed_from = portable_path(checkpoint)
         else:
-            model = PPO("MlpPolicy", env, learning_rate=1e-4, n_steps=n_steps, batch_size=batch_size, n_epochs=PPO_EPOCHS, gamma=0.99, gae_lambda=0.95, ent_coef=0.003, target_kl=0.02, policy_kwargs=kwargs, seed=seed, verbose=0, tensorboard_log=str(tensorboard_dir))
+            model = PPO(policy, env, learning_rate=1e-4, n_steps=n_steps, batch_size=batch_size, n_epochs=PPO_EPOCHS, gamma=0.99, gae_lambda=0.95, ent_coef=0.003, target_kl=0.02, policy_kwargs=kwargs, seed=seed, verbose=0, tensorboard_log=str(tensorboard_dir))
+            if contract_env is not None:attach_contract(model,contract_env,meta)
             model.learn(total_timesteps=args.timesteps, reset_num_timesteps=True, callback=callback, progress_bar=False, tb_log_name=f"e4_{method}_seed{seed}")
             resumed_from = None
         final_tmp = task_dir / "model.tmp"
@@ -707,7 +739,9 @@ def train_one(args: argparse.Namespace, root: Path, method: str, seed: int, *, f
         final_tmp.replace(saved_model)
         actual = int(model.num_timesteps)
         parameter_count = int(sum(parameter.numel() for parameter in model.policy.parameters()))
-        parameter_target = 60000 if method == "b5_history_mlp" else None
+        parameter_target = 60000 if method == "b5_history_mlp" and contract_env is None else None
+        if contract_env is not None:
+            atomic_write_json(task_dir/'environment_contract.json',model.batch_environment_contract)
         atomic_write_json(task_dir / "metadata.json", {"version": VERSION, "method": method, "seed": seed, "signature": signature, "requested_timesteps": args.timesteps, "actual_timesteps": actual, "history_length": meta["history_length"], "temporal_encoder": meta["temporal_encoder"], "mlp_width": mlp_width, "parameter_count": parameter_count, "parameter_target": parameter_target, "parameter_delta": (parameter_count - parameter_target) if parameter_target is not None else None, "resumed_from": resumed_from, "checkpoint_rollouts": int(args.checkpoint_rollouts), "checkpoint_frequency_env_steps": int(checkpoint_frequency * args.n_envs), "ppo_epochs": PPO_EPOCHS, "eta_window_rollouts": ETA_WINDOW_ROLLOUTS, "eta_unit": "minutes", "vec_env_backend": args.vec_env_backend, "subproc_start_method": "spawn" if args.vec_env_backend == "subproc" else None, "tensorboard_log_dir": portable_path(tensorboard_dir), "config": cfg})
         atomic_write_json(state_path(task_dir), {**current_state, "status": "completed", "timesteps_target": int(args.timesteps), "signature": signature, "actual_timesteps": actual, "artifact": portable_path(saved_model)})
     except KeyboardInterrupt as exc:
@@ -719,14 +753,16 @@ def train_one(args: argparse.Namespace, root: Path, method: str, seed: int, *, f
     finally:
         env.close()
         eval_env.close()
+        if contract_env is not None:contract_env.close()
 
 
 def load_controller(method: str, task_dir: Path, args: argparse.Namespace, config: dict[str, Any] | None = None):
     if method == "b0_random":
-        return RandomController(17)
+        return RandomController(17,hybrid=(config or {}).get('motion_mode')=='hybrid')
     if method == "b1_reactive":
         cfg = dict(config or {})
         return ReactiveController(
+            hybrid=cfg.get('motion_mode')=='hybrid',
             hit_threshold=float(cfg.get("b1_hit_threshold", 0.08)),
             trend_threshold=float(cfg.get("b1_trend_threshold", -0.02)),
             contrast_threshold=float(cfg.get("b1_contrast_threshold", 0.03)),
@@ -753,6 +789,9 @@ def evaluate_method(args: argparse.Namespace, root: Path, method: str, seed: int
     controller = load_controller(method, task_dir, args, cfg)
     signature = experiment_signature(args, method, seed, fixed_sector=fixed_sector, config_override=cfg)
     env = make_env(method, {**cfg, "seed": seed}, fixed_sector=fixed_sector)
+    if cfg.get('motion_mode')=='hybrid' and method not in RULE_METHODS:
+        from dual_whisker_rl.batch_mobile import validate_contract
+        validate_contract(controller,env,method_metadata(method))
     rows: list[dict[str, Any]] = []
     episodes_dir = task_dir / "episodes" / split
     episodes_dir.mkdir(parents=True, exist_ok=True)
@@ -784,7 +823,7 @@ def evaluate_method(args: argparse.Namespace, root: Path, method: str, seed: int
         episode_started = time.perf_counter()
         policy_seed = int(scenario.seed + 7001 + 1000003 * int(seed)) if method == "b0_random" else int(seed)
         if method == "b0_random":
-            controller = RandomController(policy_seed)
+            controller = RandomController(policy_seed,hybrid=cfg.get('motion_mode')=='hybrid')
         if hasattr(controller, "reset"):
             controller.reset()
         row = evaluate_one(controller, env, scenario, max_steps=args.max_steps)
@@ -866,6 +905,7 @@ def calibrate_command(args: argparse.Namespace, root: Path) -> None:
             candidate_cfg.update(candidate_config)
             candidate_env = make_env("b1_reactive", candidate_cfg)
             candidate_controller = ReactiveController(
+                hybrid=candidate_cfg.get('motion_mode')=='hybrid',
                 hit_threshold=float(candidate_config["b1_hit_threshold"]),
                 trend_threshold=float(candidate_config["b1_trend_threshold"]),
                 contrast_threshold=float(candidate_config["b1_contrast_threshold"]),
@@ -1109,8 +1149,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--profile", choices=("smoke", "formal"), default="smoke")
     parser.add_argument("--methods", default=None, help="逗号分隔的方法；默认全部 M/B0-B6")
     parser.add_argument("--seeds", default=None, help="逗号分隔训练种子；默认 smoke=1、formal=1..5")
-    parser.add_argument("--config", type=Path, default=None)
-    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--config", type=Path, default=Path('configs/mobile_rooms_hybrid.yaml'))
+    parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--timesteps", type=int, default=None)
     parser.add_argument("--n-envs", type=int, default=None)
     parser.add_argument("--vec-env-backend", choices=("auto", "dummy", "subproc"), default=None, help="训练环境并行后端；默认 smoke=dummy、formal=subproc")

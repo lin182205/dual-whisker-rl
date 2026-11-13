@@ -42,6 +42,8 @@ from dual_whisker_rl.e4_experiments import ObservationHistory
 from dual_whisker_rl.e4_experiments import scenario_hash
 from dual_whisker_rl.e4_experiments import sha256_file
 from dual_whisker_rl.envs import MobileWhiskerPuffEnv
+from dual_whisker_rl.mobile_contract import (validate_model_environment, environment_contract,
+    navigation_episode_metrics, navigation_summary)
 from dual_whisker_rl.paths import portable_path
 from dual_whisker_rl.paths import project_path
 from dual_whisker_rl.paths import resolve_path_args
@@ -49,6 +51,8 @@ from train_whisker_only_ppo import load_config
 
 
 SCENARIO_BANK_VERSION = "mobile-fixed-eval-v1"
+ROOM_SCENARIO_BANK_VERSION = "mobile-rooms-fixed-eval-v1"
+HYBRID_SCENARIO_BANK_VERSION = "mobile-hybrid-fixed-eval-v1"
 _WORKER_MODEL: PPO | None = None
 _WORKER_ENV: ObservationHistory | None = None
 
@@ -58,9 +62,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model-path",
         type=Path,
-        default=Path("results/models/mobile_whisker_gru_ppo.zip"),
+        default=Path("results/models/mobile_hybrid_gru_ppo_1.zip"),
     )
-    parser.add_argument("--config", type=Path, default=Path("configs/mobile_whisker.yaml"))
+    parser.add_argument("--config", type=Path, default=Path("configs/mobile_rooms_hybrid.yaml"))
     parser.add_argument(
         "--scenario-mode",
         choices=("randomized", "fixed"),
@@ -195,10 +199,21 @@ def prepare_scenario_bank(
     regenerate: bool,
 ) -> tuple[list[E4Scenario], dict[str, Any]]:
     config_hash = _config_hash(config)
+    probe = MobileWhiskerPuffEnv(config)
+    room_mode = probe.room_navigation is not None
+    version = ROOM_SCENARIO_BANK_VERSION if room_mode else SCENARIO_BANK_VERSION
+    hybrid = probe.hybrid_motion is not None
+    if hybrid:
+        version = HYBRID_SCENARIO_BANK_VERSION
+    contract = environment_contract(probe, 1) if hybrid else None
+    map_sha256 = probe.room_navigation.map.digest if room_mode else None
+    probe.close()
     if path.exists() and not regenerate:
         payload = json.loads(path.read_text(encoding="utf-8"))
-        if payload.get("version") != SCENARIO_BANK_VERSION:
+        if payload.get("version") != version or payload.get("map_sha256") != map_sha256:
             raise ValueError(f"不支持的场景库版本: {payload.get('version')!r}")
+        if hybrid and payload.get("environment_contract") != contract:
+            raise ValueError("固定场景的动作、观测或雷达契约不一致")
         scenarios = [
             E4Scenario.from_dict(value) for value in payload.get("scenarios", [])
         ]
@@ -228,13 +243,16 @@ def prepare_scenario_bank(
         base_seed=base_seed,
     )
     payload = {
-        "version": SCENARIO_BANK_VERSION,
+        "version": version,
+        "map_sha256": map_sha256,
         "count": len(scenarios),
         "base_seed": int(base_seed),
         "config_hash": config_hash,
         "scenario_hash": scenario_hash(scenarios),
         "scenarios": [scenario.to_dict() for scenario in scenarios],
     }
+    if hybrid:
+        payload["environment_contract"] = contract
     _atomic_write_json(path, payload)
     return scenarios, payload
 
@@ -255,18 +273,21 @@ def _init_worker(
         MobileWhiskerPuffEnv(worker_config),
         history_length=history_length,
     )
+    validate_model_environment(_WORKER_MODEL, _WORKER_ENV.unwrapped, history_length)
 
 
 def _evaluate_scenario(scenario_data: dict[str, Any]) -> dict[str, Any]:
     if _WORKER_MODEL is None or _WORKER_ENV is None:
         raise RuntimeError("评估 worker 尚未初始化")
     scenario = E4Scenario.from_dict(scenario_data)
-    return evaluate_one(
+    row = evaluate_one(
         _WORKER_MODEL,
         _WORKER_ENV,
         scenario,
         deterministic=True,
     )
+    row.update(navigation_episode_metrics(_WORKER_ENV.unwrapped.trajectory))
+    return row
 
 
 def infer_history_length(
@@ -279,6 +300,7 @@ def infer_history_length(
     probe_env = MobileWhiskerPuffEnv(config)
     try:
         base_dim = int(probe_env.observation_space.shape[0])
+        history_length = validate_model_environment(model, probe_env)
     finally:
         probe_env.close()
     stacked_dim = int(model.observation_space.shape[0])
@@ -287,7 +309,7 @@ def infer_history_length(
             f"模型观测维度 {stacked_dim} 不是环境单帧维度 {base_dim} 的整数倍"
         )
     extractor_name = type(model.policy.features_extractor).__name__
-    return stacked_dim // base_dim, base_dim, stacked_dim, extractor_name
+    return history_length, base_dim, stacked_dim, extractor_name
 
 
 def evaluate_parallel(
@@ -346,10 +368,11 @@ def main() -> None:
     if args.domain_randomization:
         config["domain_randomization"] = True
     config_id = _config_hash(config)[:12]
+    prefix = "mobile_hybrid_fixed" if config.get("motion_mode") == "hybrid" else "mobile_fixed"
     if args.scenario_file is None:
         args.scenario_file = project_path(
             Path("results/evaluation")
-            / f"mobile_fixed_{config_id}_seed{args.scenario_seed}_{args.episodes}.json"
+            / f"{prefix}_{config_id}_seed{args.scenario_seed}_{args.episodes}.json"
         )
     if args.json_path is None:
         args.json_path = project_path(
@@ -395,8 +418,16 @@ def main() -> None:
         device=args.device,
     )
     metrics = aggregate(rows)
+    if config.get("map_layout"):
+        metrics["navigation"] = navigation_summary(rows)
+    probe = MobileWhiskerPuffEnv(config)
+    contract = environment_contract(probe, history_length)
+    if probe.hybrid_motion:
+        contract["encoder_config"] = PPO.load(str(args.model_path), device=args.device).policy.features_extractor.configuration
+    probe.close()
     result = {
-        "version": SCENARIO_BANK_VERSION,
+        "version": bank["version"],
+        "map_sha256": bank.get("map_sha256"),
         "model_path": portable_path(args.model_path),
         "environment_config_path": portable_path(args.config),
         "environment_config": config,
@@ -409,6 +440,7 @@ def main() -> None:
         "deterministic_policy": True,
         "elapsed_seconds": elapsed_seconds,
         "observation": {
+            "environment_contract": contract,
             "base_dim": base_dim,
             "stacked_dim": stacked_dim,
             "history_length": history_length,

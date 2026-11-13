@@ -1,5 +1,9 @@
 # 仿真对比实验流程
 
+当前新办公场地请使用[办公批量实验指南](OFFICE_BATCH_EXPERIMENTS.md)。批量入口默认已
+切换到configs/office_experiments.yaml；本页下述为保留的旧开放场协议，复现时显式
+传入--config configs/red_experiments.yaml，使用原封存代码与原输出目录。
+
 当前75M主方法主对比请使用[快速对比指南](FAST_COMPARISON_ZH.md)：进入0.1米半径即成功，转换旧轨迹并只补缺项，不启动完整E3–E6训练。下文完整实验协议继续保留，历史结果不覆盖。
 
 最新命令与图表说明见[中文使用指南](SIMULATION_EXPERIMENT_GUIDE_ZH.md)。现在省略--experiments时默认运行E3–E6全部；可用--experiments e3 e6选择。每次执行自动创建独立的reports/<UTC时间戳>图表目录。

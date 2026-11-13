@@ -1,7 +1,7 @@
 """移动机器人 + 双触须气源搜索可视化（静态 PNG + MP4）。
 
 复用 `visualize_whisker_only_env` 的羽流配色与触须/机器人绘制助手；本脚本负责
-3 元动作 rollout（[移动, 左扇区, 右扇区]）、到达/出界即停，并在信息框显示左右
+离散/混合动作 rollout、到达/出界即停，并在信息框显示左右
 传感器浓度、L-R 差值及 mean|L-R|。给定 --model-path 时用 PPO 策略驱动（历史堆叠
 长度从模型反推），否则随机动作。
 """
@@ -20,6 +20,7 @@ matplotlib.use("Agg")
 
 import matplotlib.animation as animation
 from matplotlib import pyplot as plt
+from matplotlib.patches import Rectangle
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,6 +28,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from dual_whisker_rl.envs import MobileWhiskerPuffEnv
+from dual_whisker_rl.plotting import SOURCE_MARKER_COLOR
+from dual_whisker_rl.mobile_contract import validate_model_environment
 from dual_whisker_rl.paths import resolve_path_args
 from dual_whisker_rl.visualization import save_matplotlib_animation
 from train_whisker_only_ppo import load_config
@@ -40,9 +43,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model-path",
         type=Path,
-        default=Path("results/models/mobile_whisker_transformer_ppo.zip"),
+        default=Path("results/models/mobile_hybrid_gru_ppo_1.zip"),
     )
-    parser.add_argument("--config", type=Path, default=Path("configs/mobile_whisker.yaml"))
+    parser.add_argument("--config", type=Path, default=Path("configs/mobile_rooms_hybrid.yaml"))
     parser.add_argument(
         "--scenario-mode",
         choices=("randomized", "fixed"),
@@ -50,6 +53,7 @@ def parse_args() -> argparse.Namespace:
         help="覆盖配置中的场景初始化模式；默认使用 randomized。",
     )
     parser.add_argument("--no-model", action="store_true", help="忽略模型、用随机动作。")
+    parser.add_argument("--device", default="cpu", help="模型推理设备，默认CPU。")
     parser.add_argument("--seed", type=int, default=3)
     parser.add_argument("--steps", type=int, default=200)
     parser.add_argument("--resolution", type=int, default=100)
@@ -76,8 +80,10 @@ def parse_args() -> argparse.Namespace:
 
 
 def capture_rollout(env, model, history_length, steps, resolution, seed, deterministic):
-    """3 元动作 rollout；到达/出界即停。缓存逐帧气体场用于动画。"""
+    """兼容离散/混合动作的 rollout；绘图采样不改变环境随机轨迹。"""
     rng = np.random.default_rng(seed + 123)
+    if env.hybrid_motion:
+        env.action_space.seed(seed+123)
     obs, info = env.reset(seed=seed)
     obs = np.asarray(obs, dtype=np.float32)
     history: deque[np.ndarray] = deque([obs.copy()] * max(1, history_length), maxlen=max(1, history_length))
@@ -95,16 +101,23 @@ def capture_rollout(env, model, history_length, steps, resolution, seed, determi
     dists = [float(info["distance_to_source"])]
     total_reward = 0.0
     termination = "timeout"
+    lidar_frames = [info.get("lidar_ranges_m", [])]
+    collision_frames = [False]
+    actions = []
 
     for _ in range(steps):
         if model is None:
-            action = [int(rng.integers(6)), int(rng.integers(sc)), int(rng.integers(sc))]
+            action = (env.action_space.sample() if env.hybrid_motion else
+                      [int(rng.integers(6)), int(rng.integers(sc)), int(rng.integers(sc))])
         else:
             stacked = np.concatenate(tuple(history)).astype(np.float32)
             a, _ = model.predict(stacked, deterministic=deterministic)
-            action = [int(a[0]), int(a[1]), int(a[2])]
+            action = np.asarray(a).reshape(-1).copy()
+        actions.append(np.asarray(action).copy())
         obs, reward, terminated, truncated, info = env.step(action)
         history.append(np.asarray(obs, dtype=np.float32))
+        lidar_frames.append(info.get("lidar_ranges_m", []))
+        collision_frames.append(bool(info.get("collision", False)))
         total_reward += float(reward)
         ws = env._observe()[1]["whisker_state"]
         traj.append((env.robot_state.x, env.robot_state.y))
@@ -138,6 +151,9 @@ def capture_rollout(env, model, history_length, steps, resolution, seed, determi
         "source": (env.plume.source_x, env.plume.source_y),
         "goal_radius": float(env.goal_radius),
         "map_metadata": env.get_map_metadata(),
+        "lidar_frames": lidar_frames,
+        "collision_frames": collision_frames,
+        "actions": np.asarray(actions),
     }
 
 
@@ -154,7 +170,7 @@ def summarize_sensor_differences(differences):
 def _setup_axes(ax, data, cmap, frame_idx, title):
     xs, ys, frames = data["xs"], data["ys"], data["frames"]
     vmax = max(0.05, float(np.percentile(frames, 99.2)))
-    ax.set_facecolor("#f7f4ef")
+    ax.set_facecolor("#f7fbff")
     heatmap = ax.imshow(
         frames[frame_idx],
         extent=[xs.min(), xs.max(), ys.min(), ys.max()],
@@ -171,7 +187,7 @@ def _setup_axes(ax, data, cmap, frame_idx, title):
     sx, sy = data["source"]
     ax.scatter(
         [float(sx)], [float(sy)],
-        s=200, marker="*", color="#f2c53d", edgecolor="#2b2b2b",
+        s=200, marker="*", color=SOURCE_MARKER_COLOR, edgecolor="#2b2b2b",
         linewidth=1.0, zorder=7, label="Source",
     )
     wmin = float(data["map_metadata"]["world_min"])
@@ -182,7 +198,26 @@ def _setup_axes(ax, data, cmap, frame_idx, title):
     ax.set_xlabel("x (m)")
     ax.set_ylabel("y (m)")
     ax.set_title(title, fontsize=15, pad=10)
+    if "room_map" in data["map_metadata"]:
+        # 最终效果图仅绘制墙体，不把元数据中的房间/区域名称或编号叠加到轨迹上。
+        for x0, x1, y0, y1 in data["map_metadata"]["room_map"]["walls"]:
+            ax.add_patch(Rectangle((x0, y0), x1-x0, y1-y0,
+                                   facecolor="#353943", edgecolor="#353943", zorder=4))
+        ax.add_patch(Rectangle((wmin, wmin), wmax-wmin, wmax-wmin,
+                               fill=False, edgecolor="#353943", linewidth=3, zorder=4))
+        collision_points = ax.scatter([], [], s=55, marker="x", color="#e24740",
+                                       linewidth=1.7, zorder=8, label="Collision")
+        ax._room_overlay = collision_points
+        _update_room_overlay(ax, data, frame_idx)
     return heatmap, vmax
+
+
+def _update_room_overlay(ax, data, frame_idx):
+    if not hasattr(ax, "_room_overlay"):
+        return
+    collision_points = ax._room_overlay
+    mask = np.asarray(data["collision_frames"][:frame_idx+1], dtype=bool)
+    collision_points.set_offsets(data["trajectory"][:frame_idx+1][mask])
 
 
 def render_static(data, path, title):
@@ -246,6 +281,7 @@ def render_animation(data, path, title, stride, fps):
     fig.colorbar(heatmap, ax=ax, fraction=0.043, pad=0.03).set_label("Gas concentration (a.u.)")
 
     def update(fi):
+        _update_room_overlay(ax, data, fi)
         heatmap.set_data(frames[fi])
         line.set_data(traj[: fi + 1, 0], traj[: fi + 1, 1])
         robot.set_offsets(traj[fi])
@@ -440,6 +476,7 @@ def render_animation_rollouts(rollouts, path, title, stride, fps):
         artists.append(
             {
                 "data": data,
+                "axes": ax,
                 "heatmap": heatmap,
                 "line": line,
                 "robot": robot,
@@ -462,6 +499,7 @@ def render_animation_rollouts(rollouts, path, title, stride, fps):
             data = state["data"]
             traj = data["trajectory"]
             fi = frame_ids[min(frame_position, len(frame_ids) - 1)]
+            _update_room_overlay(state["axes"], data, fi)
             state["heatmap"].set_data(data["frames"][fi])
             state["line"].set_data(traj[: fi + 1, 0], traj[: fi + 1, 1])
             state["robot"].set_offsets([traj[fi]])
@@ -537,9 +575,11 @@ def main() -> None:
         from dual_whisker_rl.agents import TransformerHistoryExtractor
 
         _ = TransformerHistoryExtractor
-        model = PPO.load(str(args.model_path))
+        import torch
+        torch.set_num_threads(1)
+        model = PPO.load(str(args.model_path), device=args.device)
         base = int(env.observation_space.shape[0])
-        history_length = int(model.observation_space.shape[0]) // base
+        history_length = validate_model_environment(model, env)
         print(f"loaded_model={args.model_path} history_length={history_length}")
     else:
         print("no model -> random actions")

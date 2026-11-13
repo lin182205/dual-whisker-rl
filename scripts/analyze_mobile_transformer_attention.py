@@ -32,9 +32,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from dual_whisker_rl.agents import TransformerHistoryExtractor
+from dual_whisker_rl.agents.olfactory_navigation import OlfactoryNavigationExtractor
+from dual_whisker_rl.mobile_contract import validate_model_environment
 from dual_whisker_rl.envs import MobileWhiskerPuffEnv
 from dual_whisker_rl.paths import portable_path
 from dual_whisker_rl.paths import resolve_path_args
+from dual_whisker_rl.plotting import SOURCE_MARKER_COLOR
 from dual_whisker_rl.visualization import save_matplotlib_animation
 from train_whisker_only_ppo import load_config
 from visualize_whisker_only_env import build_plume_colormap
@@ -191,8 +194,8 @@ def detect_transition_events(
 
     completed_sides: list[str] = []
     for action_index, angle_key, side in (
-        (1, "left_angle", "left"),
-        (2, "right_angle", "right"),
+        (-2, "left_angle", "left"),
+        (-1, "right_angle", "right"),
     ):
         target = sector_target(int(action[action_index]), sector_count, side)
         previous_error = abs(wrap_angle(float(previous[angle_key]) - target))
@@ -216,7 +219,8 @@ def detect_transition_events(
         "wind_change_deg": math.degrees(wind_change),
         "left_angle_deg": math.degrees(float(current["left_angle"])),
         "right_angle_deg": math.degrees(float(current["right_angle"])),
-        "action": [int(value) for value in action],
+        "action": ([float(value) for value in action[:2]]+[int(value) for value in action[2:]]
+                   if len(action) == 4 else [int(value) for value in action]),
         "swing_sides": completed_sides,
     }
     return [{"event": name, **common} for name in event_names]
@@ -302,11 +306,11 @@ def capture_attention_rollout(
             events.append(event)
 
         if terminated or truncated or state_step >= steps:
-            actions.append(np.full(3, -1, dtype=np.int64))
+            actions.append(np.full(model.action_space.shape, -1, dtype=np.float32 if env.hybrid_motion else np.int64))
             break
 
         prediction, _ = model.predict(stacked, deterministic=deterministic)
-        action = np.asarray(prediction, dtype=np.int64).reshape(-1)[:3]
+        action = np.asarray(prediction).reshape(-1)
         actions.append(action.copy())
         previous = state
         observation, _, terminated, truncated, _ = env.step(action)
@@ -336,7 +340,7 @@ def capture_attention_rollout(
         "raw_attention": np.asarray(raw_attentions, dtype=np.float32),
         "normalized_attention": np.asarray(normalized_attentions, dtype=np.float32),
         "grids": np.asarray(grids, dtype=np.float32),
-        "actions": np.asarray(actions, dtype=np.int64),
+        "actions": np.asarray(actions, dtype=np.float32 if env.hybrid_motion else np.int64),
         "events": events,
         "event_codes": event_codes,
         "source": (float(env.plume.source_x), float(env.plume.source_y)),
@@ -609,7 +613,7 @@ def save_attention_animation(
         interpolation="bilinear",
         aspect="equal",
     )
-    map_axis.scatter(*data["source"], marker="*", s=180, color="#f2c53d", edgecolor="#222222", zorder=7)
+    map_axis.scatter(*data["source"], marker="*", s=180, color=SOURCE_MARKER_COLOR, edgecolor="#222222", zorder=7)
     map_axis.set_xlim(float(data["xs"].min()), float(data["xs"].max()))
     map_axis.set_ylim(float(data["ys"].min()), float(data["ys"].max()))
     map_axis.set_xlabel("x (m)")
@@ -731,7 +735,7 @@ def save_data_outputs(
             "seed": int(args.seed),
             "states": len(data["states"]),
             "history_length": int(extractor.history_length),
-            "layers": len(extractor.encoder.layers),
+            "layers": len((extractor.olfactory if isinstance(extractor, OlfactoryNavigationExtractor) else extractor).encoder.layers),
             "heads": int(data["raw_attention"].shape[2]),
             "event_context": int(args.event_context),
             "thresholds": {
@@ -785,7 +789,8 @@ def main() -> None:
         config["domain_randomization"] = True
     model = PPO.load(str(args.model_path))
     extractor = model.policy.features_extractor
-    if not isinstance(extractor, TransformerHistoryExtractor):
+    if not (isinstance(extractor, TransformerHistoryExtractor) or
+            isinstance(extractor, OlfactoryNavigationExtractor) and extractor.temporal_encoder == "transformer"):
         raise TypeError(
             "Attention analysis requires TransformerHistoryExtractor; "
             f"loaded {type(extractor).__name__}"
@@ -794,6 +799,7 @@ def main() -> None:
     extractor.eval()
 
     env = MobileWhiskerPuffEnv(config)
+    validate_model_environment(model, env)
     base_dim = int(env.observation_space.shape[0])
     expected_dim = int(extractor.history_length * base_dim)
     if tuple(model.observation_space.shape) != (expected_dim,):

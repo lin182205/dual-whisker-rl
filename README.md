@@ -1,10 +1,100 @@
-# 当前正式实验：修正羽流与随机采样重评
+# 当前默认：办公场地训练与批量对比
 
-当前统一协议和服务器命令见[随机动作正式重评指南](docs/STOCHASTIC_REEVALUATION_ZH.md)。
+新批量对比已使用当前 `small_office_v1`、连续底盘和离散触须，入口为
+`scripts/run_red_experiments.py`（默认 `configs/office_experiments.yaml`）及
+`scripts/run_e4_experiments.py`；结果分别写入 `results/office_experiments` 和
+`results/office_e4`。方法、预算和旧实验用法见[办公批量实验指南](docs/OFFICE_BATCH_EXPERIMENTS.md)。
+
+```powershell
+python scripts/run_red_experiments.py plan --profile smoke
+python scripts/run_red_experiments.py run --profile smoke --experiments e3 e5 --variants main,fixed,periodic --resume
+```
+
+## 既有正式实验：修正羽流与随机采样重评
+
+既有模型的封存协议和服务器命令见[随机动作正式重评指南](docs/STOCHASTIC_REEVALUATION_ZH.md)。
 先完成现有15M训练，再按修复后的物理参数和随机动作评估全部方法；旧模型、训练与结果保留。
 E4每模型目标800万步，校准与正式训练默认先测实际吞吐，再选择最多两个模型并行。
 
 # Dual Whisker RL
+
+## Mobile 独立入口：连续底盘与双触须联合避障搜索
+
+Mobile 独立训练、普通评估、固定场景评估和可视化默认使用
+`configs/mobile_rooms_hybrid.yaml`，布局标识为 `small_office_v1`。
+场地为 `[-5,5]×[-5,5]` 米，三间办公室、会议室、茶水间和卫生间沿公共通道组织，
+下侧为接待前厅，主走廊净宽1.5米。墙厚0.1米、七个1米房门及一个1.6米开放口；
+会议室分别通前厅与走廊，其他房间独立开门到公共区。左右隔墙错位、面积按用途区分。
+只有墙体障碍。气源和机器人在包括走廊的自由区域随机初始化，机器人朝向均匀随机。
+地图用于定位、碰撞和路径计算，不直接输入策略；房间编号R1–R6按实际区域判断，
+走廊独立标记为 `corridor`、前厅为 `reception`。
+研究参考、尺寸和门洞位置见[办公平面设计](docs/OFFICE_LAYOUT_DESIGN.md)。
+运行 `python scripts/visualize_room_layout.py` 可从实际训练几何生成标注平面图。
+
+动作按 `[linear_norm, angular_norm, left_sector, right_sector]` 打包，速度分量在
+[-1,1]，映射到线速度[0,0.15]米/秒、角速度[-1.5,1.5]弧度/秒；触须为整数0–9。
+项目内的混合 PPO 策略使用二维高斯和两个分类分布，联合对数概率与熵相加。
+训练保留原始高斯样本；执行只限幅速度，触须直接使用分类结果。随机动作也遵守整数约束。
+
+默认单帧 **57维**，顺序为原12维气味/触须特征、朝向cos/sin、实际线速度/v_max、
+实际角速度/ω_max、blank_age、x/5与y/5、相对风向cos/sin、36维归一化雷达。
+360条原始射线按36扇区取最小距离，量程3米；0号扇区以正前方居中（[-5°,5°)），
+之后逆时针排列，角度首尾循环。风向表示气流运动方向，位姿和雷达默认无测量噪声。
+20帧历史共 **1140维**。13维气味/触须/blank_age历史默认经GRU输出64维，当前帧
+44维导航信息经64→64的MLP输出64维；融合为128维，送入两层160单元的策略/价值网络。
+`--temporal-encoder mlp/transformer` 处理相同的嗅觉历史，导航分支相同。
+静态轨迹图和动画不显示雷达射线，雷达输入及逐步记录继续保留。
+最终轨迹效果图不标注房间/区域名称或编号；用途、尺寸标注仅用于独立平面设计图。
+羽流浓度图与色条统一使用浅蓝到深蓝的 `Blues` 色阶，高浓度端也为深蓝色。
+气源采用红色星标，与蓝色浓度场区分；星标颜色不表示浓度。
+
+机器人半径 0.15 米，碰墙取消平移并扣 0.5 分，保留转向且继续运行；触须采样遇墙截断。
+底盘按差速圆弧积分，每子步位移≤1厘米、转角≤0.05弧度，并按弧弦偏离余量检测碰撞。
+实际行程按圆弧长度累计，受阻步不计平移；日志分别保留请求与实际线/角速度。
+动态 puff 中心遇墙反射，浓度计算屏蔽隔墙贡献，气体可通过门洞传播。该模型是轻量
+几何约束近似，不求解压力或室内回流，也不对遮挡后的高斯质量作守恒重分配。
+默认暖场 500 步、最多 1200 个 puff，寿命按场地尺度和最低风速计算。
+
+每局最多 1200 步（240 秒），首次进入气源 0.1 米且无遮挡即成功。距离奖励为
+`Phi(d_next)-Phi(d_previous)`，`Phi(d)=-8*clip(d/20,0,1)`；d 是按安全半径膨胀地图上的
+最短可行路径距离，真实气源位置仅供奖励和评估。其他原有奖励系数保留。
+表面间隙为 `max(0,min(lidar)-robot_radius)`，低于0.20米时成本为
+`-0.05*clip(1-clearance/0.20,0,1)^2`；实际速度变化成本为
+`-0.005*(abs(Δv)/v_max+abs(Δω)/(2*ω_max))`。成本可配置、单独记录；没有正的前进奖励。
+参考 [DRL-robot-navigation 固定版本1adfe511](https://github.com/reiniscimurs/DRL-robot-navigation/tree/1adfe511d6f3ff5d7d3bdc357914501c29646c39)
+的雷达分区、连续速度与近障成本思路，来源与适配说明见[第三方参考](docs/THIRD_PARTY_REFERENCES.md)。
+
+```powershell
+# 默认新实验名 mobile_hybrid_gru_ppo_<编号>，模型与 checkpoint 均保存环境契约
+python scripts/train_mobile_whisker_ppo.py --timesteps 50000 --n-envs 4
+# 以实际训练输出的模型路径为准
+python scripts/evaluate_mobile_whisker_ppo.py --model-path results/models/mobile_hybrid_gru_ppo_1.zip --episodes 50 --no-visualization
+python scripts/evaluate_mobile_fixed_scenarios.py --model-path results/models/mobile_hybrid_gru_ppo_1.zip --episodes 100 --workers 12
+python scripts/visualize_mobile_whisker_env.py --no-model --steps 140
+# 跨门洞下游诊断，输出间歇性、原始浓度和传感器响应图
+python scripts/analyze_plume_intermittency.py --config configs/mobile_rooms_hybrid.yaml --source-position -2.5 -3.5 --wind-direction-deg 0 --downwind-distance 3 --crosswind-offsets 0 0.15 0.3 0.45 --threshold 0.2 --steps 3000 --label office
+```
+
+新模型/检查点会核对 `mobile_hybrid_nav_v1` 观测、`hybrid_motion_whisker_v1` 动作、
+字段顺序、历史长度、物理速度范围、雷达分区、特征分组、编码器、地图摘要和有效配置；
+续训严格匹配，评估仅允许改变回合步数上限。固定场景库使用独立房间版本和地图摘要，
+封存后的场景可逐步复现原采样局，混合动作题库使用独立的mobile-hybrid版本和文件名。
+两种评估的 `navigation` 字段统一给出碰撞、速度、最小表面间隙、近障步比例、控制变化、
+可行路径距离、路径效率与同房间/跨房间分组。碰撞次数按受阻步计数，碰撞率为每局
+碰撞步比例的平均值；路径效率仅对成功局计算，失败局保留为空。
+同房/跨房分组按实际区域编号比较，走廊也视为独立区域，不再按坐标象限判断。
+
+旧 15/16 维 Mobile 模型需显式传入其原训练配置，例如
+`--config configs/mobile_whisker.yaml`；旧 15 维还需原配置的
+`include_blank_age_observation: false`。旧模型不能用于新房间观测。
+上一版56维四房间模型使用 `--config configs/mobile_rooms_four.yaml`，其地图摘要与
+原四房间场景一致。六房间地图使用不同摘要，即使观测维度相同也不能混用模型和题库。
+原 Mobile 5×5 配置及 E4/E5/E6 配置保留原定义和签名校验规则。
+上一版56维六房间离散模型使用 `--config configs/mobile_rooms.yaml`；新旧动作和观测
+不可混用，即使地图摘要相同也会拒绝加载。旧配置不会自动变成连续动作。
+上一版57维六房间混合模型使用 `--config configs/mobile_rooms_hybrid_six.yaml`。
+它与当前办公图观测维度相同，但地图摘要不同，模型和固定题库不会混用。
+连续底盘输出目前用于仿真，硬件触须 `STEP l r` 接口保持原样。
 
 旧轨迹转换流程见[快速对比历史指南](docs/FAST_COMPARISON_ZH.md)。当前修正物理与随机采样协议使用上方正式重评指南，旧轨迹保留供溯源。
 
@@ -67,7 +157,7 @@ is a separate multi-process command after checkpoints are available.
 Training seeds are random by default for better policy diversity. Pass `--seed 42` when you need a reproducible run. Each training run writes `run_metadata.json` under its log directory with the actual seed and config.
 
 Mobile PPO 从头训练可用 `--experiment-name` 指定实验关键词（`--run-name` 同义）。
-默认关键词为 `mobile_whisker_<encoder>_ppo`。每次从头训练自动分配下一个编号，例如
+连续房间模式默认关键词为 `mobile_hybrid_<encoder>_ppo`，离散房间为 `mobile_rooms_<encoder>_ppo`，旧场景为 `mobile_whisker_<encoder>_ppo`。每次从头训练自动分配下一个编号，例如
 `odor_search_1`、`odor_search_2`；checkpoint、最终模型、日志与 TensorBoard 子目录
 使用同一编号。指定 `--resume-from` 时，脚本从 checkpoint 恢复原实验名称、checkpoint
 目录和 TensorBoard 记录，`--timesteps` 表示额外训练步数；此时忽略 `--experiment-name`。
@@ -143,7 +233,8 @@ STM32 `build`、`.git` 和本地 IDE 设置目录；这些环境或生成产物�
 
 独立训练与评估通过同一份 YAML 定义环境场景：静态高斯场的 Joint PPO / Fixed-whisker DQN 使用
 configs/default.yaml（10×10）；固定机器人触须实验使用 configs/whisker_only.yaml
-（1×1）；移动动态 puff 实验使用 configs/mobile_whisker.yaml（5×5，边界 [-2.5, 2.5]）。
+（1×1）；Mobile 独立入口默认使用 configs/mobile_rooms.yaml（10×10 不规则六房间）。
+configs/mobile_whisker.yaml 保留原5×5无障碍定义（边界 [-2.5, 2.5]），供旧模型和既有实验使用。
 对应的训练、评估、固定场景复评和 Mobile 可视化入口默认读取各自配置；--config
 可显式选择另一份配置，命令行场景参数仅在显式传入时覆盖 YAML。触须采样对比的
 --steps 默认取配置中的 max_steps。
