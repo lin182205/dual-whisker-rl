@@ -31,7 +31,7 @@ def parser():
     p.add_argument("--bootstrap",type=int,default=2000,help="论文报告bootstrap次数，默认2000")
     p.add_argument("--config",default="configs/office_experiments.yaml")
     p.add_argument("--profile",choices=["smoke","formal"],default="smoke")
-    p.add_argument("--output-dir",help="默认results/simulation_experiments；已有模型默认放入pretrained/<模型名>子目录")
+    p.add_argument("--output-dir",help="办公历史版默认results/office_history_experiments；已有模型放入pretrained/<模型名>子目录")
     p.add_argument("--model-path",type=Path,help="已训练PPO模型；跳过训练，仅评估一个variant，未指定variants时使用main")
     p.add_argument("--model-seed",type=int,help="仅当模型未保存训练seed时声明；已保存的seed不能改写")
     p.add_argument("--group",help="限制E3/E5/E6的配置组；默认E3/E6为core、E5为六类消融全部")
@@ -140,9 +140,6 @@ def resolve(args):
     if args.model_path and not args.variants and args.group not in (None,"core"):
         raise ValueError("--model-path只评估一个方法，请用--variants指定，不使用--group")
     source = pretrained_source(args, names, profile) if args.model_path else None
-    if args.output_dir is None:
-        args.output_dir = (f"results/simulation_experiments/pretrained/{args.model_path.stem}"
-                           if source else "results/simulation_experiments")
     faults = [n.strip() for n in args.faults.split(",")]
     if set(faults)-set(spec["faults"]) or len(faults)!=len(set(faults)):
         raise ValueError(f"未知或重复故障：{faults}")
@@ -154,8 +151,15 @@ def resolve(args):
     cfg = yaml.safe_load(project_path(spec["base_config"]).read_text(encoding="utf-8"))
     cfg.update(spec.get("common",{}))
     cfg["max_steps"] = int(profile["max_steps"])
+    if args.output_dir is None:
+        if cfg.get("feature_layout"):
+            output_root = "results/office_history_experiments"
+        elif cfg.get("map_layout") and not source:
+            output_root = "results/office_experiments"
+        else:
+            output_root = "results/simulation_experiments"
+        args.output_dir = f"{output_root}/pretrained/{args.model_path.stem}" if source else output_root
     if cfg.get('map_layout'):
-        if args.output_dir == 'results/simulation_experiments': args.output_dir='results/office_experiments'
         from dual_whisker_rl.mobile_contract import environment_contract
         from dual_whisker_rl.envs import MobileWhiskerPuffEnv
         probe=MobileWhiskerPuffEnv(cfg)

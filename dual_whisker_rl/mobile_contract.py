@@ -6,6 +6,10 @@ import json
 
 import numpy as np
 from dual_whisker_rl.envs.hybrid_action import HybridMotionWhiskerSpace
+from dual_whisker_rl.mobile_features import (
+    CURRENT_NAVIGATION_INDICES, NAVIGATION_INDICES, OLFACTORY_INDICES,
+    feature_layout_contract, feature_layout_kwargs,
+)
 
 
 def environment_contract(env, history_length):
@@ -32,8 +36,12 @@ def environment_contract(env, history_length):
         contract["radar"] = {"raw_rays": 360, "sectors": 36, "range_m": env.room_navigation.lidar_range,
                              "pooling": "minimum", "sector_zero": "forward_centered",
                              "order": "counterclockwise", "index_rule": "((degrees+5)//10)%36"}
-        contract["feature_groups"] = {"olfactory_history": list(range(12))+[16],
-                                      "navigation_current": [12, 13, 14, 15]+list(range(17, 57))}
+        layout = feature_layout_contract(**feature_layout_kwargs(config))
+        navigation = CURRENT_NAVIGATION_INDICES if layout else NAVIGATION_INDICES
+        contract["feature_groups"] = {"olfactory_history": list(OLFACTORY_INDICES),
+                                      "navigation_current": list(navigation)}
+        if layout:
+            contract["feature_layout"] = layout
     else:
         contract["action_nvec"] = env.action_space.nvec.tolist()
     return json.loads(json.dumps(contract, sort_keys=True))
@@ -70,6 +78,8 @@ def validate_model_environment(model, env, history_length=None, *, resume=False)
             encoder = getattr(extractor, "configuration", None)
             if encoder is None or actual.get("encoder_config") != encoder:
                 raise ValueError("混合模型的编码器配置契约不一致")
+            if encoder.get("feature_layout") != expected.get("feature_layout"):
+                raise ValueError("模型的历史分支契约与配置不一致；请使用训练时的观测配置")
             expected["encoder_config"] = encoder
         if not resume:
             expected["effective_config"].pop("max_steps", None)

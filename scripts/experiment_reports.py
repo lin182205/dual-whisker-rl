@@ -10,6 +10,8 @@ from dual_whisker_rl.paths import portable_path, project_path
 METRICS = ("odor_hit_ratio", "success", "whisker_only_reacquisition_events", "penalized_time_s")
 LABELS = {"main": "Proposed", "fixed": "Fixed whiskers", "periodic": "Periodic scan",
           "single_frame": "Single frame", "history_mlp": "History MLP", "no_dr": "Without DR",
+          "current_wind_only": "Current wind only", "no_motion_history": "Without motion history",
+          "no_absolute_xy": "Without absolute position",
           "b0_random": "Random rule", "b1_reactive": "Reactive rule", "b2_fixed": "Fixed whiskers",
           "b3_scan": "Periodic scan", "b4_single_frame": "Single frame", "b5_history_mlp": "History MLP",
           "b6_left": "Left sensor", "b6_right": "Right sensor"}
@@ -279,6 +281,9 @@ def export_report(experiment, root, out, args, names, spec, profile, manifest, *
             status, notes = "missing_retrained_controls", ["一个已有模型不足以形成训练消融；需要各配置分别训练的模型。没有生成推理删特征冒充训练消融的数值。"]
         else:
             rows = native_rows(root,names,profile["seeds"],sources)
+            metrics = METRICS
+            if manifest.get("environment_contract", {}).get("feature_layout"):
+                metrics += ("reacquisition_events", "collision_rate")
             effects = []
             for group in E5_GROUPS:
                 members = [n for n in spec["groups"][group] if n in names]
@@ -286,20 +291,20 @@ def export_report(experiment, root, out, args, names, spec, profile, manifest, *
                 for n in members:
                     if n == reference:
                         continue
-                    for metric in METRICS:
+                    for metric in metrics:
                         effect = paired_row([r for r in rows if r["variant"]==n], [r for r in rows if r["variant"]==reference], metric,args.bootstrap)
                         if effect.get("training_seeds",0) < 2:
                             effect["ci95_low"],effect["ci95_high"] = None,None
                         effects.append(dict(group=group,variant=n,reference=reference,metric=metric,**effect))
             for group in E5_GROUPS:
-                for metric in METRICS:
+                for metric in metrics:
                     family=[r for r in effects if r["group"]==group and r["metric"]==metric and "seed_sign_permutation_p" in r]
                     for r,p in zip(family,holm([r["seed_sign_permutation_p"] for r in family])):
                         r["holm_p_within_group_metric"] = p
                 effect_plot(effects,group,out,figures)
             expected=len(json.loads((root/"scenarios_test.json").read_text(encoding="utf-8")))
             coverage=coverage_rows(names,profile["seeds"],rows,expected,"e5")
-            table(out,"episodes",rows,["variant","training_seed","scenario_id",*METRICS])
+            table(out,"episodes",rows,["variant","training_seed","scenario_id",*metrics])
             table(out,"paired_effects",effects,["group","variant","reference","metric","status","difference","ci95_low","ci95_high"])
             table(out,"coverage",coverage,["variant","actual_episodes","expected_episodes","complete"])
             status="complete" if coverage and all(r["complete"] for r in coverage) and effects and all(r["status"]=="paired" for r in effects) else "partial_or_missing_controls"

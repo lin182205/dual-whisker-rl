@@ -49,6 +49,7 @@ from dual_whisker_rl.agents.hybrid_policy import HybridActorCriticPolicy
 from dual_whisker_rl.agents.olfactory_navigation import OlfactoryNavigationExtractor
 from dual_whisker_rl.envs import MobileWhiskerPuffEnv
 from dual_whisker_rl.mobile_contract import environment_contract, validate_model_environment
+from dual_whisker_rl.mobile_features import feature_layout_kwargs
 from dual_whisker_rl.paths import portable_path
 from dual_whisker_rl.paths import project_path
 from dual_whisker_rl.paths import resolve_path_args
@@ -519,7 +520,7 @@ class TrainingCycleEtaCallback(BaseCallback):
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=Path, default=Path("configs/mobile_rooms_hybrid.yaml"))
+    parser.add_argument("--config", type=Path, default=Path("configs/mobile_rooms_hybrid_history.yaml"))
     parser.add_argument(
         "--scenario-mode",
         choices=("randomized", "fixed"),
@@ -638,7 +639,8 @@ def resolve_output_paths(args: argparse.Namespace, config=None) -> None:
     if args.tensorboard_run_dir is not None:
         raise ValueError("--tensorboard-run-dir 仅用于 --resume-from 续训")
     args.tensorboard_dir = args.tensorboard_dir or ROOT / "results" / "tensorboard"
-    prefix = ("mobile_hybrid" if (config or {}).get("motion_mode") == "hybrid"
+    prefix = ("mobile_hybrid_history" if (config or {}).get("feature_layout")
+              else "mobile_hybrid" if (config or {}).get("motion_mode") == "hybrid"
               else "mobile_rooms" if (config or {}).get("map_layout") else "mobile_whisker")
     keyword = args.experiment_name or f"{prefix}_{args.temporal_encoder}_ppo"
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", keyword):
@@ -883,7 +885,7 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--gru-dropout must satisfy 0 <= dropout < 1")
 
 
-def build_policy_kwargs(args: argparse.Namespace, base_observation_dim: int, *, hybrid=False) -> dict:
+def build_policy_kwargs(args: argparse.Namespace, base_observation_dim: int, *, hybrid=False, config=None) -> dict:
     """构造 MLP 基线、Transformer 或 GRU 历史编码策略参数。"""
     policy_kwargs: dict = {
         "net_arch": [160, 160],
@@ -926,7 +928,7 @@ def build_policy_kwargs(args: argparse.Namespace, base_observation_dim: int, *, 
         policy_kwargs.update({"features_extractor_class": OlfactoryNavigationExtractor,
                              "features_extractor_kwargs": {"history_length": args.history_length,
                                  "base_observation_dim": base_observation_dim, "temporal_encoder": args.temporal_encoder,
-                                 "encoder_kwargs": encoder_kwargs}})
+                                 "encoder_kwargs": encoder_kwargs, **feature_layout_kwargs(config or {})}})
     return policy_kwargs
 
 
@@ -979,7 +981,7 @@ def train(args: argparse.Namespace) -> PPO:
         try:
             validate_model_environment(resume_model, probe, args.history_length, resume=True)
             if probe.hybrid_motion:
-                requested = build_policy_kwargs(args, 57, hybrid=True)["features_extractor_kwargs"]
+                requested = build_policy_kwargs(args, 57, hybrid=True, config=config)["features_extractor_kwargs"]
                 extractor = resume_model.policy.features_extractor
                 if (extractor.temporal_encoder != requested["temporal_encoder"]
                         or extractor.encoder_kwargs != requested["encoder_kwargs"]):
@@ -1034,7 +1036,7 @@ def train(args: argparse.Namespace) -> PPO:
     reward_components_callback = RewardComponentsTensorboardCallback(contract_env.REWARD_COMPONENT_NAMES)
     contract_env.close()
     hybrid = config.get("motion_mode") == "hybrid"
-    policy_kwargs = build_policy_kwargs(args, base_observation_dim, hybrid=hybrid)
+    policy_kwargs = build_policy_kwargs(args, base_observation_dim, hybrid=hybrid, config=config)
     if args.resume_from is None:
         model = PPO(
             policy=HybridActorCriticPolicy if hybrid else "MlpPolicy",

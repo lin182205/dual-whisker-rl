@@ -164,7 +164,12 @@ def resolve_args(args: argparse.Namespace) -> None:
     args.config = project_path(args.config) if args.config else None
     config_values = load_yaml(args.config) if args.config else {}
     if args.output_dir is None:
-        args.output_dir = project_path('results/office_e4') if config_values.get('map_layout') else DEFAULT_OUTPUT
+        if config_values.get("feature_layout"):
+            args.output_dir = project_path("results/office_history_e4")
+        elif config_values.get("map_layout"):
+            args.output_dir = project_path("results/office_e4")
+        else:
+            args.output_dir = DEFAULT_OUTPUT
     args.methods = parse_list(args.methods) or list(METHOD_ORDER)
     args.seeds = parse_list(args.seeds, cast=int) or defaults["seeds"]
     args.timesteps = int(args.timesteps or defaults["timesteps"])
@@ -251,7 +256,7 @@ def experiment_manifest(args: argparse.Namespace, scenarios: dict[str, list[E4Sc
     if cfg.get('map_layout'):
         code_files += [ROOT/'dual_whisker_rl'/p for p in ('batch_mobile.py','envs/room_map.py','envs/room_layouts.py',
             'envs/office_layout.py','envs/room_navigation.py','envs/room_plume.py','envs/hybrid_action.py',
-            'agents/hybrid_policy.py','agents/olfactory_navigation.py')]
+            'agents/hybrid_policy.py','agents/olfactory_navigation.py','mobile_features.py','mobile_contract.py')]
     manifest = {
         "version": VERSION,
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -1149,7 +1154,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--profile", choices=("smoke", "formal"), default="smoke")
     parser.add_argument("--methods", default=None, help="逗号分隔的方法；默认全部 M/B0-B6")
     parser.add_argument("--seeds", default=None, help="逗号分隔训练种子；默认 smoke=1、formal=1..5")
-    parser.add_argument("--config", type=Path, default=Path('configs/mobile_rooms_hybrid.yaml'))
+    parser.add_argument("--config", type=Path, default=Path("configs/mobile_rooms_hybrid_history.yaml"))
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--timesteps", type=int, default=None)
     parser.add_argument("--n-envs", type=int, default=None)
@@ -1172,6 +1177,13 @@ def main() -> None:
         prepare(args); return
     if not (root / "manifest.json").exists():
         prepare(args)
+    else:
+        from dual_whisker_rl.mobile_features import feature_layout_contract, feature_layout_kwargs
+
+        saved = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+        requested_layout = feature_layout_contract(**feature_layout_kwargs(load_yaml(args.config)))
+        if saved.get("environment_contract", {}).get("feature_layout") != requested_layout:
+            raise ValueError("E4 场景清单的历史分支契约不一致，请使用对应配置与输出目录")
     if args.command == "status":
         status(args, root); return
     if args.command == "calibrate":

@@ -1,6 +1,6 @@
 # 办公图批量对比，旧协议保留在red_experiments.yaml。
 scope: simulation_only
-base_config: configs/mobile_rooms_hybrid.yaml
+base_config: configs/mobile_rooms_hybrid_history.yaml
 selection: success_then_penalized_time
 profiles:
   smoke:
@@ -72,6 +72,24 @@ variants:
     encoder: mlp
     config:
       domain_randomization: false
+  current_wind_only:
+    method: main
+    history_length: 20
+    encoder: gru
+    config:
+      history_ablation: current_wind_only
+  no_motion_history:
+    method: main
+    history_length: 20
+    encoder: gru
+    config:
+      history_ablation: no_motion_history
+  no_absolute_xy:
+    method: main
+    history_length: 20
+    encoder: gru
+    config:
+      history_ablation: no_absolute_xy
   single_left:
     method: b6_left
     history_length: 20
@@ -285,6 +303,9 @@ groups:
   - no_blank_age
   - no_angles
   - raw_only
+  - current_wind_only
+  - no_motion_history
+  - no_absolute_xy
   rewards:
   - main
   - no_reacquisition_reward
@@ -396,4 +417,4 @@ faults:
   servo_delay:
     servo_time_factor: 1.5
     action_delay_steps: 2
-e4_config: configs/mobile_rooms_hybrid.yaml
+e4_config: configs/mobile_rooms_hybrid_history.yaml

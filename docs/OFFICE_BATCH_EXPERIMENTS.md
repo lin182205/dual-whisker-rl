@@ -2,16 +2,17 @@
 
 当前新实验默认采用 `small_office_v1`，地图与独立Mobile训练一致，气源/机器人全场
 随机初始化，包含走廊和前厅。配置为 `configs/office_experiments.yaml`，基础环境为
-`configs/mobile_rooms_hybrid.yaml`。旧实验配置继续保存在 `configs/red_experiments.yaml`
-及 `configs/e4_smoke.yaml` / `configs/e4_formal.yaml`，原结果不会迁移成办公场地数据。
+`configs/mobile_rooms_hybrid_history.yaml`。上一版办公批量配置为
+`configs/office_experiments_legacy.yaml`，使用 `configs/mobile_rooms_hybrid.yaml`。
+开放场历史配置为 `configs/red_experiments.yaml` 及 `configs/e4_smoke.yaml` / `configs/e4_formal.yaml`。
 
 ## 入口与输出
 
 | 入口 | 默认内容 | 默认输出根目录 |
 |---|---|---|
-| scripts/run_red_experiments.py | 办公场地E3/E4/E5/E6，省略实验选择时运行全部 | results/office_experiments |
-| scripts/run_e4_experiments.py | 办公场地M/B0–B6主方法和基线对比 | results/office_e4 |
-| scripts/run_e4_formal_conda.sh | 办公E4正式计划，沿用断点恢复机制 | results/office_e4 |
+| scripts/run_red_experiments.py | 办公场地E3/E4/E5/E6，省略实验选择时运行全部 | results/office_history_experiments |
+| scripts/run_e4_experiments.py | 办公场地M/B0–B6主方法和基线对比 | results/office_history_e4 |
+| scripts/run_e4_formal_conda.sh | 办公E4正式计划，沿用断点恢复机制 | results/office_history_e4 |
 
 ```powershell
 # 查看计划，不启动训练
@@ -38,7 +39,17 @@ python scripts/run_e4_experiments.py run --profile smoke --methods main,b0_rando
 ## 方法与公平性
 
 所有方法共享办公墙体、碰撞、障碍感知动态puff、传感器、雷达和路径势差。
-主方法默认GRU，气味历史与当前导航帧双分支融合；MLP和单帧消融保留相同导航分支。
+主方法默认用GRU处理19维气味、触须、风向和相对运动历史，再与当前42维导航分支融合。
+MLP和单帧对照使用相同的导航分支。E5 特征组加入三项同结构对照：
+
+| 对照 | 编码器内的处理 |
+|---|---|
+| current_wind_only | 用当前风向填充整个历史窗口 |
+| no_motion_history | 相对位姿统一为零位移与零转角 |
+| no_absolute_xy | 屏蔽导航分支的地图坐标，历史分支仍能读取相对位移 |
+
+可用 `--experiments e5 --variants main,current_wind_only,no_motion_history,no_absolute_xy`
+选择这组对照。各组配对复用训练种子、验证与测试场景，并报告命中、重捕获、到源与碰撞指标。
 
 | 方法 | 策略输出 | 触须行为 |
 |---|---|---|
@@ -64,6 +75,7 @@ PPO的概率为二维高斯与实际存在的分类分支相乘，不对高斯�
 
 ```powershell
 python scripts/run_red_experiments.py plan --config configs/red_experiments.yaml --profile formal
+python scripts/run_red_experiments.py plan --config configs/office_experiments_legacy.yaml --profile formal
 python scripts/run_e4_experiments.py status --config configs/e4_formal.yaml --profile formal --output-dir results/e4
 ```
 
@@ -72,4 +84,4 @@ python scripts/run_e4_experiments.py status --config configs/e4_formal.yaml --pr
 其来源签名；新办公实验使用本页入口及独立目录。修改过物理或代码的正式历史运行
 应使用原封存源码，不通过更改签名绕过检查。
 
-本轮仅做短训练与链路验收，相关日志/模型/报告位于results/office_batch_verification。
+新版历史分支的短训验收记录位于 `results/office_history_verification`。

@@ -26,6 +26,7 @@ from dual_whisker_rl.envs.whisker_only_env import WhiskerOnlyPuffEnv
 from dual_whisker_rl.envs.world_bounds import resolve_world_bounds, world_bounds_config
 from dual_whisker_rl.envs.room_navigation import RoomNavigation, WallAwareWhiskers
 from dual_whisker_rl.envs.hybrid_action import HybridMotion, HybridMotionWhiskerSpace, decode_hybrid_action
+from dual_whisker_rl.mobile_features import feature_layout_contract, feature_layout_kwargs
 
 
 class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
@@ -48,6 +49,8 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
             raise ValueError("motion_mode 必须为 discrete 或 hybrid")
         self.hybrid_motion = None
         hybrid = cfg.get("motion_mode") == "hybrid"
+        if feature_layout_contract(**feature_layout_kwargs(cfg)) and not hybrid:
+            raise ValueError("风向与运动历史需要连续底盘的57维房间观测")
         if hybrid and not cfg.get("map_layout"):
             raise ValueError("连续底盘模式需要显式启用房间地图")
         self.room_navigation = RoomNavigation(cfg) if cfg.get("map_layout") else None

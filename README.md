@@ -2,8 +2,8 @@
 
 新批量对比已使用当前 `small_office_v1`、连续底盘和离散触须，入口为
 `scripts/run_red_experiments.py`（默认 `configs/office_experiments.yaml`）及
-`scripts/run_e4_experiments.py`；结果分别写入 `results/office_experiments` 和
-`results/office_e4`。方法、预算和旧实验用法见[办公批量实验指南](docs/OFFICE_BATCH_EXPERIMENTS.md)。
+`scripts/run_e4_experiments.py`；风向与运动历史版结果分别写入
+`results/office_history_experiments` 和 `results/office_history_e4`。方法、预算和旧实验用法见[办公批量实验指南](docs/OFFICE_BATCH_EXPERIMENTS.md)。
 
 ```powershell
 python scripts/run_red_experiments.py plan --profile smoke
@@ -21,7 +21,7 @@ E4每模型目标800万步，校准与正式训练默认先测实际吞吐，再
 ## Mobile 独立入口：连续底盘与双触须联合避障搜索
 
 Mobile 独立训练、普通评估、固定场景评估和可视化默认使用
-`configs/mobile_rooms_hybrid.yaml`，布局标识为 `small_office_v1`。
+`configs/mobile_rooms_hybrid_history.yaml`，布局标识为 `small_office_v1`。
 场地为 `[-5,5]×[-5,5]` 米，三间办公室、会议室、茶水间和卫生间沿公共通道组织，
 下侧为接待前厅，主走廊净宽1.5米。墙厚0.1米、七个1米房门及一个1.6米开放口；
 会议室分别通前厅与走廊，其他房间独立开门到公共区。左右隔墙错位、面积按用途区分。
@@ -40,9 +40,12 @@ Mobile 独立训练、普通评估、固定场景评估和可视化默认使用
 实际角速度/ω_max、blank_age、x/5与y/5、相对风向cos/sin、36维归一化雷达。
 360条原始射线按36扇区取最小距离，量程3米；0号扇区以正前方居中（[-5°,5°)），
 之后逆时针排列，角度首尾循环。风向表示气流运动方向，位姿和雷达默认无测量噪声。
-20帧历史共 **1140维**。13维气味/触须/blank_age历史默认经GRU输出64维，当前帧
-44维导航信息经64→64的MLP输出64维；融合为128维，送入两层160单元的策略/价值网络。
-`--temporal-encoder mlp/transformer` 处理相同的嗅觉历史，导航分支相同。
+20帧原始观测共 **1140维**。时序分支每帧 **19维**，包含13维气味、触须与空白时长，
+2维风向及4维相对位姿。编码器用各帧的朝向把风向统一到当前车身坐标系，
+并将历史位置相对当前位置的位移投影为车身前向、左向的米数，同时编码相对朝向的余弦和正弦。
+导航分支只读取当前 **42维**，包括位置、朝向、实际速度和雷达。默认 GRU 与导航 MLP
+各输出64维，拼成128维供策略与价值网络使用。`--temporal-encoder mlp/transformer`
+可选择同样输入的历史编码器。地图位姿与风向仍来自仿真状态。
 静态轨迹图和动画不显示雷达射线，雷达输入及逐步记录继续保留。
 最终轨迹效果图不标注房间/区域名称或编号；用途、尺寸标注仅用于独立平面设计图。
 羽流浓度图与色条统一使用浅蓝到深蓝的 `Blues` 色阶，高浓度端也为深蓝色。
@@ -65,11 +68,11 @@ Mobile 独立训练、普通评估、固定场景评估和可视化默认使用
 的雷达分区、连续速度与近障成本思路，来源与适配说明见[第三方参考](docs/THIRD_PARTY_REFERENCES.md)。
 
 ```powershell
-# 默认新实验名 mobile_hybrid_gru_ppo_<编号>，模型与 checkpoint 均保存环境契约
+# 默认新实验名 mobile_hybrid_history_gru_ppo_<编号>，模型与 checkpoint 均保存环境契约
 python scripts/train_mobile_whisker_ppo.py --timesteps 50000 --n-envs 4
 # 以实际训练输出的模型路径为准
-python scripts/evaluate_mobile_whisker_ppo.py --model-path results/models/mobile_hybrid_gru_ppo_1.zip --episodes 50 --no-visualization
-python scripts/evaluate_mobile_fixed_scenarios.py --model-path results/models/mobile_hybrid_gru_ppo_1.zip --episodes 100 --workers 12
+python scripts/evaluate_mobile_whisker_ppo.py --model-path results/models/mobile_hybrid_history_gru_ppo_1.zip --episodes 50 --no-visualization
+python scripts/evaluate_mobile_fixed_scenarios.py --model-path results/models/mobile_hybrid_history_gru_ppo_1.zip --episodes 100 --workers 12
 python scripts/visualize_mobile_whisker_env.py --no-model --steps 140
 # 跨门洞下游诊断，输出间歇性、原始浓度和传感器响应图
 python scripts/analyze_plume_intermittency.py --config configs/mobile_rooms_hybrid.yaml --source-position -2.5 -3.5 --wind-direction-deg 0 --downwind-distance 3 --crosswind-offsets 0 0.15 0.3 0.45 --threshold 0.2 --steps 3000 --label office
@@ -92,7 +95,9 @@ python scripts/analyze_plume_intermittency.py --config configs/mobile_rooms_hybr
 原 Mobile 5×5 配置及 E4/E5/E6 配置保留原定义和签名校验规则。
 上一版56维六房间离散模型使用 `--config configs/mobile_rooms.yaml`；新旧动作和观测
 不可混用，即使地图摘要相同也会拒绝加载。旧配置不会自动变成连续动作。
-上一版57维六房间混合模型使用 `--config configs/mobile_rooms_hybrid_six.yaml`。
+旧办公57维模型使用 `--config configs/mobile_rooms_hybrid.yaml`，旧六房间模型使用
+`--config configs/mobile_rooms_hybrid_six.yaml`。新版编码契约 `wind_motion_history_v1`
+区分原始维度相同的模型与场景清单。
 它与当前办公图观测维度相同，但地图摘要不同，模型和固定题库不会混用。
 连续底盘输出目前用于仿真，硬件触须 `STEP l r` 接口保持原样。
 
@@ -157,7 +162,9 @@ is a separate multi-process command after checkpoints are available.
 Training seeds are random by default for better policy diversity. Pass `--seed 42` when you need a reproducible run. Each training run writes `run_metadata.json` under its log directory with the actual seed and config.
 
 Mobile PPO 从头训练可用 `--experiment-name` 指定实验关键词（`--run-name` 同义）。
-连续房间模式默认关键词为 `mobile_hybrid_<encoder>_ppo`，离散房间为 `mobile_rooms_<encoder>_ppo`，旧场景为 `mobile_whisker_<encoder>_ppo`。每次从头训练自动分配下一个编号，例如
+办公历史版默认关键词为 `mobile_hybrid_history_<encoder>_ppo`，旧连续房间为
+`mobile_hybrid_<encoder>_ppo`，离散房间为 `mobile_rooms_<encoder>_ppo`，旧开放场为
+`mobile_whisker_<encoder>_ppo`。每次从头训练自动分配下一个编号，例如
 `odor_search_1`、`odor_search_2`；checkpoint、最终模型、日志与 TensorBoard 子目录
 使用同一编号。指定 `--resume-from` 时，脚本从 checkpoint 恢复原实验名称、checkpoint
 目录和 TensorBoard 记录，`--timesteps` 表示额外训练步数；此时忽略 `--experiment-name`。

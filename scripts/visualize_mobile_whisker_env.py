@@ -43,9 +43,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model-path",
         type=Path,
-        default=Path("results/models/mobile_hybrid_gru_ppo_1.zip"),
+        default=Path("results/models/mobile_hybrid_history_gru_ppo_1.zip"),
     )
-    parser.add_argument("--config", type=Path, default=Path("configs/mobile_rooms_hybrid.yaml"))
+    parser.add_argument("--config", type=Path, default=Path("configs/mobile_rooms_hybrid_history.yaml"))
     parser.add_argument(
         "--scenario-mode",
         choices=("randomized", "fixed"),

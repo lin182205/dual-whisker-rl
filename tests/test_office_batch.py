@@ -20,7 +20,7 @@ from scripts import run_e4_experiments as e4
 from scripts.experiment_suite import legacy_command
 
 ROOT=Path(__file__).resolve().parents[1]
-CFG=yaml.safe_load((ROOT/'configs/mobile_rooms_hybrid.yaml').read_text(encoding='utf-8'))
+CFG=yaml.safe_load((ROOT/'configs/mobile_rooms_hybrid_history.yaml').read_text(encoding='utf-8'))
 torch.set_num_threads(1)
 
 def cfg():
@@ -35,13 +35,14 @@ class OfficeBatchTests(unittest.TestCase):
         spec,profile,c,_,_,payload=red.resolve(args)
         self.assertEqual(c['map_layout'],'small_office_v1')
         self.assertEqual(profile['max_steps'],1200)
-        self.assertIn('office_experiments',args.output_dir)
+        self.assertIn('office_history_experiments',args.output_dir)
         self.assertEqual(c['success_hold_s'],0)
         self.assertEqual(payload['environment_contract']['observation_version'],'mobile_hybrid_nav_v1')
+        self.assertEqual(payload['environment_contract']['feature_layout']['version'], 'wind_motion_history_v1')
         command=legacy_command(args,ROOT/'results/unused',profile,'prepare')
-        self.assertEqual(Path(command[command.index('--config')+1]).name,'mobile_rooms_hybrid.yaml')
+        self.assertEqual(Path(command[command.index('--config')+1]).name,'mobile_rooms_hybrid_history.yaml')
         a=e4.build_parser().parse_args(['prepare']);e4.resolve_args(a)
-        self.assertEqual(a.max_steps,1200);self.assertIn('office_e4',str(a.output_dir))
+        self.assertEqual(a.max_steps,1200);self.assertIn('office_history_e4',str(a.output_dir))
 
     def test_office_nominal_matches_base_physics(self):
         c=cfg();c.pop('success_hold_s')
