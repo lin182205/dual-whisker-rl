@@ -454,7 +454,7 @@ def metrics_from_trajectory(
     hits = sum(bool(row.get("odor_hit", False)) for row in trajectory)
     blanks = len(trajectory) - hits
     final_distance = float(trajectory[-1]["distance_to_source"])
-    success = bool(final_distance <= goal_radius)
+    success = bool(trajectory[-1].get("is_success", final_distance <= goal_radius))
     world_min, world_max = (float(world_bounds[0]), float(world_bounds[1]))
     out_of_bounds = not (
         world_min < float(trajectory[-1]["x"]) < world_max

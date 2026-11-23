@@ -129,7 +129,7 @@ def select_visualization_episode_indices(
     for episode_index, trajectory in enumerate(trajectories):
         succeeded = bool(
             trajectory
-            and float(trajectory[-1]["distance_to_source"]) <= goal_radius
+            and trajectory[-1].get("is_success", float(trajectory[-1]["distance_to_source"]) <= goal_radius)
         )
         if succeeded and first_success is None:
             first_success = episode_index

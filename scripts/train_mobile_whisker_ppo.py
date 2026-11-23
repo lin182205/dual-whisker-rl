@@ -70,6 +70,8 @@ class CompactTrainingInfoWrapper(gym.Wrapper):
     INFO_KEYS = (
         "odor_hit",
         "blank_age_steps",
+        "blank_loop",
+        "initial_heading_mode",
         "move_action",
         "body_moved",
         "whisker_moved",
@@ -99,6 +101,30 @@ class CompactTrainingInfoWrapper(gym.Wrapper):
     def step(self, action):
         obs, reward, terminated, truncated, info = self.env.step(action)
         return obs, reward, terminated, truncated, self._compact(info)
+
+
+class OfficeCurriculumCallback(BaseCallback):
+    """按累计环境步数切换起点采样，正在运行的回合继续完成。"""
+
+    def __init__(self, target_timesteps):
+        super().__init__()
+        self.target_timesteps = target_timesteps
+        self.stage = None
+
+    def update_stage(self, env, timesteps):
+        stage = 2 if 2 * timesteps >= self.target_timesteps else (
+            1 if 4 * timesteps >= self.target_timesteps else 0
+        )
+        if stage != self.stage:
+            env.env_method("set_office_curriculum_stage", stage)
+            self.stage = stage
+            print(f"office_curriculum_stage={stage} at timesteps={timesteps}", flush=True)
+
+    def _on_rollout_start(self):
+        self.update_stage(self.training_env, self.num_timesteps)
+
+    def _on_step(self):
+        return True
 
 
 class RewardComponentsTensorboardCallback(BaseCallback):
@@ -163,8 +189,14 @@ class RewardComponentsTensorboardCallback(BaseCallback):
         infos = self.locals.get("infos", ())
         dones = np.asarray(self.locals.get("dones", ()), dtype=bool).reshape(-1)
         for env_index, info in enumerate(infos):
+            episode_done = env_index < dones.size and bool(dones[env_index])
             if "collision" in info:
                 self.logger.record_mean("rollout/collision_rate", float(info["collision"]))
+            if "blank_loop" in info:
+                self.logger.record_mean("rollout/blank_loop_ratio", float(info["blank_loop"]))
+            if episode_done and "initial_heading_mode" in info:
+                self.logger.record_mean("rollout/curriculum_fallback_rate",
+                                        float(info["initial_heading_mode"] == "curriculum_fallback"))
             for key in ("actual_linear_velocity", "actual_angular_velocity", "surface_clearance_m", "near_obstacle", "control_change_norm"):
                 if key in info:
                     self.logger.record_mean(f"navigation/{key}", float(info[key]))
@@ -201,7 +233,6 @@ class RewardComponentsTensorboardCallback(BaseCallback):
                 self._whisker_reacquisition_reward_events += int(
                     bool(info.get("whisker_reacquisition_rewarded", False))
                 )
-            episode_done = env_index < dones.size and bool(dones[env_index])
             if episode_done:
                 self._episode_successes.append(
                     float(bool(info.get("is_success", False)))
@@ -1113,13 +1144,11 @@ def train(args: argparse.Namespace) -> PPO:
         ppo_epochs=int(model.n_epochs),
         checkpoint_callback=checkpoint_callback,
     )
-    callbacks = CallbackList(
-        [
-            reward_components_callback,
-            checkpoint_callback,
-            eta_callback,
-        ]
-    )
+    callbacks = [reward_components_callback, checkpoint_callback, eta_callback]
+    if config.get("office_start_curriculum", False):
+        curriculum = OfficeCurriculumCallback(target_timesteps)
+        curriculum.update_stage(env, starting_num_timesteps)
+        callbacks.append(curriculum)
     # 新训练使用新编号；续训继续写入原 TensorBoard 子目录。
     model.set_logger(
         configure(
@@ -1130,7 +1159,7 @@ def train(args: argparse.Namespace) -> PPO:
     model.learn(
         total_timesteps=args.timesteps,
         progress_bar=False,
-        callback=callbacks,
+        callback=CallbackList(callbacks),
         log_interval=args.log_interval,
         reset_num_timesteps=args.resume_from is None,
     )
@@ -1310,6 +1339,7 @@ def save_run_metadata(
             "stagnation_window": metadata_env.stagnation_window,
             "stagnation_penalty": metadata_env.stagnation_penalty,
             "mobile_time_penalty": metadata_env.mobile_time_penalty,
+            "blank_loop_penalty": metadata_env.blank_loop_penalty,
             "positive_auxiliary_reward_upper_bound": (
                 metadata_env.positive_auxiliary_reward_upper_bound
             ),

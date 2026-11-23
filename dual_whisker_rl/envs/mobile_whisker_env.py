@@ -203,6 +203,18 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
             raise ValueError("goal_bonus is fixed at 50.0 for mobile source search")
         self.goal_bonus = 50.0
         self.mobile_time_penalty = float(cfg.get("mobile_time_penalty", 0.03))
+        self.blank_loop_penalty = float(cfg.get("blank_loop_penalty", 0.0))
+        if self.blank_loop_penalty and not hybrid:
+            raise ValueError("blank_loop_penalty 需要连续底盘房间环境")
+        if self.blank_loop_penalty:
+            self.REWARD_COMPONENT_NAMES += ("blank_loop_penalty",)
+        self.office_start_curriculum = cfg.get("office_start_curriculum", False)
+        if not isinstance(self.office_start_curriculum, bool) or (
+            self.office_start_curriculum and cfg.get("map_layout") != "small_office_v1"
+        ):
+            raise ValueError("office_start_curriculum 仅在办公地图上接受布尔值")
+        self.office_curriculum_stage = 0
+        self._blank_loop_window = deque(maxlen=26)
         self.oob_penalty = float(cfg.get("oob_penalty", 25.0))
         self.best_concentration_reward_scale = float(
             cfg.get("best_concentration_reward_scale", 3.0)
@@ -286,6 +298,7 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
             "distance_progress_epsilon": self.distance_progress_epsilon,
             "stagnation_penalty": self.stagnation_penalty,
             "mobile_time_penalty": self.mobile_time_penalty,
+            "blank_loop_penalty": self.blank_loop_penalty,
         }
         for name, value in nonnegative_reward_values.items():
             if not math.isfinite(value) or value < 0.0:
@@ -318,6 +331,7 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         self.minimum_oob_penalty = (
             self.max_episode_time_cost
             + self.positive_auxiliary_reward_upper_bound
+            + self.blank_loop_penalty * self.max_steps
         )
         if self.oob_penalty + 1e-12 < self.minimum_oob_penalty:
             raise ValueError(
@@ -690,6 +704,11 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
 
     # ---- 生命周期 ----
 
+    def set_office_curriculum_stage(self, stage: int) -> None:
+        if stage not in (0, 1, 2):
+            raise ValueError("办公训练课程阶段必须为 0、1 或 2")
+        self.office_curriculum_stage = stage
+
     def reset(
         self,
         *,
@@ -719,6 +738,9 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
                     int(self.rng.integers(0, 2**63 - 1))
                 )
         obs, info = super().reset(seed=seed, options=options)
+        self._blank_loop_window.clear()
+        if self.hybrid_motion:
+            self._blank_loop_window.append((self.robot_state.x, self.robot_state.y, 0.0))
         self.prev_distance = self._distance_to_source()
         if self.room_navigation:
             self._previous_path_distance = self.room_navigation.distance((self.robot_state.x, self.robot_state.y))
@@ -846,6 +868,21 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
             self._previous_path_distance = path_distance
         if self.hybrid_motion:
             reward_components.update(self.hybrid_motion.reward_components(self))
+        blank_loop = False
+        if self.hybrid_motion:
+            window = self._blank_loop_window
+            window.append((self.robot_state.x, self.robot_state.y, self.room_navigation.path_length))
+            x0, y0, path0 = window[0]
+            blank_loop = (
+                len(window) == window.maxlen
+                and self.blank_age_steps >= 25
+                and position_displacement > 1e-10
+                and window[-1][2] - path0 >= 0.45 - 1e-12
+                and all(math.hypot(x - x0, y - y0) <= 0.25 for x, y, _ in window)
+            )
+        if self.blank_loop_penalty:
+            penalize = blank_loop and not (reached or oob or self.step_count + 1 >= self.max_steps)
+            reward_components["blank_loop_penalty"] = -self.blank_loop_penalty if penalize else 0.0
         reward = float(sum(reward_components.values()))
 
         self.step_count += 1
@@ -871,6 +908,9 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
                     "best_concentration": self.best_concentration,
                     "position_displacement": position_displacement,
                     "stagnation_steps": self.stagnation_steps,
+                    "blank_loop": blank_loop,
+                    "left_effective_length": math.dist((self.robot_state.x, self.robot_state.y), whisker_state.left_point),
+                    "right_effective_length": math.dist((self.robot_state.x, self.robot_state.y), whisker_state.right_point),
                     **odor_search_info,
                     "reward": reward,
                     "reward_components": reward_components,
@@ -908,6 +948,7 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
                 "best_concentration": self.best_concentration,
                 "position_displacement": position_displacement,
                 "stagnation_steps": self.stagnation_steps,
+                "blank_loop": blank_loop,
                 **odor_search_info,
                 "out_of_bounds": oob,
                 "is_success": reached,

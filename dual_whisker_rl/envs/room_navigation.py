@@ -92,19 +92,38 @@ class RoomNavigation:
                 raise ValueError("固定场景的起点不可达或距源过近")
             mode = "scenario"
         else:
-            for _ in range(10000):
-                x, y = self.map.sample_free(env._scenario_rng, self.radius)
-                distance = self.distance((x, y))
-                if math.isfinite(distance) and distance >= self.minimum_distance:
-                    break
-            else:
-                raise RuntimeError("无法采样与气源可达且足够远的机器人起点")
+            x, y, distance, mode = self.sample_start(env)
             heading = float(env._scenario_rng.uniform(-np.pi, np.pi))
-            mode = "uniform"
         self.start_room = self.map.room_id((x, y))
         self.initial_path_distance = distance
         env.initial_heading_mode = mode
         return env.robot.reset(x, y, heading)
+
+    def sample_start(self, env):
+        rng = env._scenario_rng
+        stage = env.office_curriculum_stage
+        mode = "uniform"
+        if env.office_start_curriculum and stage < 2 and rng.random() < (.8, .6)[stage]:
+            source_room = self.map.room_id(self.source)
+            rooms = {source_room}
+            if stage == 1:
+                for door in self.map.doors:
+                    if source_room in door["regions"]:
+                        rooms.update(door["regions"])
+            for _ in range(256):
+                x, y = self.map.sample_free(rng, self.radius)
+                if self.map.room_id((x, y)) not in rooms:
+                    continue
+                distance = self.distance((x, y))
+                if max(1., self.minimum_distance) <= distance <= (3., 5.)[stage]:
+                    return x, y, distance, f"curriculum_{stage}"
+            mode = "curriculum_fallback"
+        for _ in range(10000):
+            x, y = self.map.sample_free(rng, self.radius)
+            distance = self.distance((x, y))
+            if math.isfinite(distance) and distance >= self.minimum_distance:
+                return x, y, distance, mode
+        raise RuntimeError("无法采样与气源可达且足够远的机器人起点")
 
     def distance(self, position):
         return self.map.path_distance(position, self.source, self.radius, self.source_distances)

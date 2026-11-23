@@ -129,7 +129,7 @@ def capture_rollout(env, model, history_length, steps, resolution, seed, determi
         frames.append(g.copy())
         dists.append(float(info["distance_to_source"]))
         if terminated or truncated:
-            reached = info["distance_to_source"] <= env.goal_radius
+            reached = info.get("is_success", info["distance_to_source"] <= env.goal_radius)
             termination = "reached_goal" if reached else ("out_of_bounds" if info.get("out_of_bounds") else "timeout")
             break
 

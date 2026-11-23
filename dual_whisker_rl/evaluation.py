@@ -86,7 +86,8 @@ def evaluate_policy(
             path_length = nav_row["path_length"]
         returns.append(episode_return)
         lengths.append(len(trajectory))
-        successes.append(1.0 if info["distance_to_source"] <= env.unwrapped.goal_radius else 0.0)
+        success = bool(info.get("is_success", info["distance_to_source"] <= env.unwrapped.goal_radius))
+        successes.append(float(success))
         final_distance = float(info["distance_to_source"])
         final_distances.append(final_distance)
         min_distances.append(
@@ -149,7 +150,7 @@ def evaluate_policy(
         whisker_reacquisition_reward_events += search_diagnostics[
             "whisker_reacquisition_reward_events"
         ]
-        if final_distance <= env.unwrapped.goal_radius:
+        if success:
             termination = "success"
         elif bool(info.get("out_of_bounds", False)):
             termination = "out_of_bounds"
