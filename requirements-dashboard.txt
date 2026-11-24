@@ -1,0 +1,6 @@
+# 管理面板单独安装，不依赖 torch，也不修改训练环境。
+fastapi>=0.115,<1
+uvicorn>=0.30,<1
+tensorboard>=2.16,<3
+psutil>=5.9,<8
+PyYAML>=6,<7

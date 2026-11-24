@@ -551,6 +551,8 @@ class TrainingCycleEtaCallback(BaseCallback):
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--managed-task-dir", type=Path, default=None,
+                        help="管理运行段目录；由面板生成，不改变普通CLI的追加步数语义。")
     parser.add_argument("--config", type=Path, default=Path("configs/mobile_rooms_hybrid_history.yaml"))
     parser.add_argument(
         "--scenario-mode",
@@ -988,6 +990,8 @@ def make_env(
 
 
 def train(args: argparse.Namespace) -> PPO:
+    if getattr(args, "managed_task_dir", None) and not getattr(args, "_output_paths_resolved", False):
+        raise ValueError("管理任务请由面板启动，避免将新运行段写入原实验目录")
     resolve_path_args(
         args,
         "config",
@@ -1156,19 +1160,31 @@ def train(args: argparse.Namespace) -> PPO:
             format_strings=["stdout", "tensorboard"],
         )
     )
-    model.learn(
-        total_timesteps=args.timesteps,
-        progress_bar=False,
-        callback=CallbackList(callbacks),
-        log_interval=args.log_interval,
-        reset_num_timesteps=args.resume_from is None,
-    )
-
-    args.model_path.parent.mkdir(parents=True, exist_ok=True)
-    model.save(args.model_path)
-    preview_policy_command(model, config, args)
-    env.close()
-    save_run_metadata(args, config, model, starting_num_timesteps)
+    managed = None
+    try:
+        if getattr(args, "managed_task_dir", None) is not None:
+            from dual_whisker_rl.dashboard.training_control import ManagedSession
+            managed = ManagedSession(args, model, eta_callback)
+            outcome = managed.learn(model, callbacks)
+            args.managed_outcome = outcome
+            save_run_metadata(args, config, model, starting_num_timesteps,
+                              training_complete=outcome == "completed")
+        else:
+            model.learn(
+                total_timesteps=args.timesteps,
+                progress_bar=False,
+                callback=CallbackList(callbacks),
+                log_interval=args.log_interval,
+                reset_num_timesteps=args.resume_from is None,
+            )
+            args.model_path.parent.mkdir(parents=True, exist_ok=True)
+            model.save(args.model_path)
+            preview_policy_command(model, config, args)
+            save_run_metadata(args, config, model, starting_num_timesteps)
+    finally:
+        env.close()
+    if managed is not None:
+        managed.finish(model)
     return model
 
 
@@ -1233,6 +1249,7 @@ def save_run_metadata(
         "final_num_timesteps": int(model.num_timesteps) if training_complete else None,
         "current_num_timesteps": int(model.num_timesteps),
         "training_complete": training_complete,
+        "managed_outcome": getattr(args, "managed_outcome", None),
         "training_cycle_timing": {
             "rollout_size": int(model.n_steps) * args.n_envs,
             "ppo_epochs": int(model.n_epochs),
