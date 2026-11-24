@@ -129,7 +129,31 @@ class DashboardTests(unittest.TestCase):
     def test_pid_reuse_is_not_alive(self):
         current = identity(os.getpid())
         self.assertTrue(alive(current))
-        self.assertFalse(alive({**current, "created": current["created"] - 10}))
+        if current.get("proc_token"):
+            self.assertFalse(alive({**current, "proc_token": {**current["proc_token"], "start_ticks": "0"}}))
+        else:
+            self.assertFalse(alive({**current, "created": current["created"] - 10}))
+
+    def test_linux_identity_survives_clock_adjustment_but_not_pid_reuse(self):
+        token = {"boot_id": "boot-one", "start_ticks": "123456"}
+        who = {**identity(os.getpid()), "created": 0, "proc_token": token}
+        with patch('dual_whisker_rl.dashboard.files.proc_token', return_value=token):
+            self.assertTrue(alive(who))
+        for changed in ({**token, "start_ticks": "123457"}, {**token, "boot_id": "boot-two"}):
+            with patch('dual_whisker_rl.dashboard.files.proc_token', return_value=changed):
+                self.assertFalse(alive(who))
+
+    def test_live_worker_recovers_false_failure_and_clears_error(self):
+        task = self.service.store.get(self.create())
+        directory = self.root / "live-worker"
+        directory.mkdir()
+        atomic_json(directory / "status.json", {"state": "running", "current_steps": 5000})
+        task.update(state="failed", error="训练进程已退出")
+        task['attempts'] = [{"directory": str(directory), "log": str(directory/'train.log'),
+                             "identity": identity(os.getpid())}]
+        self.service._refresh(task)
+        self.assertEqual(task['state'], 'running')
+        self.assertNotIn('error', task)
 
     def test_downsampling_preserves_peak_endpoints_and_limit(self):
         points = [[i, 1000 if i == 12345 else 0] for i in range(20000)]

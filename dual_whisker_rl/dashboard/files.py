@@ -49,11 +49,28 @@ def checkpoint_data(path, *, crc=False):
     return data
 
 
+def proc_token(pid):
+    """Linux原始启动时钟计数不使用会随校时变化的btime墙钟基准。"""
+    try:
+        stat = Path(f"/proc/{int(pid)}/stat").read_text()
+        return {"boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
+                "start_ticks": stat.rsplit(")", 1)[1].split()[19]}
+    except (OSError, ValueError, IndexError):
+        return None
+
+
 def identity(pid):
     try:
+        before = proc_token(pid)
         p = psutil.Process(int(pid))
-        return {"pid": p.pid, "created": p.create_time(), "cwd": p.cwd(),
-                "command": p.cmdline()}
+        result = {"pid": p.pid, "created": p.create_time(), "cwd": p.cwd(),
+                  "command": p.cmdline()}
+        after = proc_token(pid)
+        if before != after:
+            return None
+        if after:
+            result["proc_token"] = after
+        return result
     except (psutil.Error, OSError, ValueError, TypeError):
         return None
 
@@ -63,6 +80,8 @@ def alive(who):
         return False
     try:
         p = psutil.Process(int(who["pid"]))
+        if who.get("proc_token"):
+            return proc_token(who["pid"]) == who["proc_token"] and p.status() != psutil.STATUS_ZOMBIE
         return abs(p.create_time() - who["created"]) < .01 and p.status() != psutil.STATUS_ZOMBIE
     except (psutil.Error, KeyError, TypeError):
         return False

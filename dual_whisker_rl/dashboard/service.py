@@ -133,6 +133,7 @@ class Service:
                 task["target_steps"] = sample["logged_target"]
             if alive(attempt.get("identity")):
                 task["state"] = "running"
+                task.pop("error", None)
             else:
                 meta = read_json(attempt["metadata"], {})
                 if meta.get("training_complete") and (meta.get("final_num_timesteps") or 0) >= task["target_steps"]:
@@ -154,6 +155,7 @@ class Service:
             self.children.pop(task["id"], None)
             live = False
         if live:
+            task.pop("error", None)
             if task["state"] not in {"pausing", "stopping"}:
                 task["state"] = "running" if state.get("state") == "running" else "starting"
         elif task["state"] in ACTIVE:
