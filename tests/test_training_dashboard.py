@@ -169,6 +169,24 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(restored["target_steps"], task["target_steps"])
         self.assertEqual(restored["desired_state"], "running")
 
+    def test_pending_takeover_keeps_checkpoint_progress(self):
+        task_id = self.create()
+        task = self.service.store.get(task_id)
+        log = self.root / "old.log"
+        log.write_text("[训练轮次] 第1/100轮结束 本轮总耗时=50秒 训练步数=15095000/35000000\n", encoding="utf-8")
+        task.update(mode="managed", state="queued", current_steps=15000000)
+        task["attempts"] = [{"legacy": True, "log": str(log)}]
+        self.service._refresh(task)
+        self.assertEqual(task["current_steps"], 15000000)
+
+    def test_goal_dialog_cannot_silently_use_changed_revision(self):
+        task_id = self.create()
+        before = self.service.store.get(task_id)["revision"]
+        self.service.action(task_id, request(action="set_target", target_steps=21000000))
+        with self.assertRaisesRegex(ValueError, "已变化"):
+            self.service.action(task_id, request(action="set_target", target_steps=22000000, expected_revision=before))
+        self.assertEqual(self.service.store.get(task_id)["target_steps"], 21000000)
+
     def test_api_rejects_cross_site_commands_and_arbitrary_parameters(self):
         with TestClient(create_app(self.service, background=False), base_url="http://localhost") as client:
             self.assertEqual(client.get("/").status_code, 200)

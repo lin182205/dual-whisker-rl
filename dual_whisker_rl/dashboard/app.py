@@ -33,6 +33,7 @@ class Action(BaseModel):
     action: Literal["set_target", "pause", "resume", "stop", "takeover"]
     target_steps: int | None = Field(default=None, strict=True, gt=0, le=10**12)
     checkpoint_id: str | None = None
+    expected_revision: int | None = Field(default=None, strict=True, ge=0)
 
 
 def create_app(service: Service, *, background=True):

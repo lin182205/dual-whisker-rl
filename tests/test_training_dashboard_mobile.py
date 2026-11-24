@@ -7,7 +7,7 @@ import uuid
 
 import psutil
 
-from dual_whisker_rl.dashboard.files import read_json
+from dual_whisker_rl.dashboard.files import alive, read_json
 from dual_whisker_rl.dashboard.service import Service
 
 
@@ -25,7 +25,7 @@ class MobileManagedSmoke(unittest.TestCase):
                 service._write_control(task, "running")
                 service.store.save(task)
                 service.tick()
-                spawned.append(service.store.get(task_id)["attempts"][-1]["identity"]["pid"])
+                spawned.append(service.store.get(task_id)["attempts"][-1]["identity"])
                 self.wait(service, task_id, lambda t: t["current_steps"] >= 32, 90)
                 service.action(task_id, {"request_id": uuid.uuid4().hex, "action": "pause"})
                 task = self.wait(service, task_id, lambda t: t["state"] == "paused", 30)
@@ -41,7 +41,7 @@ class MobileManagedSmoke(unittest.TestCase):
                 service.action(task_id, {"request_id": uuid.uuid4().hex, "action": "set_target", "target_steps": paused_steps + 64})
                 service.action(task_id, {"request_id": uuid.uuid4().hex, "action": "resume"})
                 service.tick()
-                spawned.append(service.store.get(task_id)["attempts"][-1]["identity"]["pid"])
+                spawned.append(service.store.get(task_id)["attempts"][-1]["identity"])
                 task = self.wait(service, task_id, lambda t: t["state"] == "completed", 90)
                 self.assertEqual(task["current_steps"], paused_steps + 64)
                 self.assertEqual(len(task["attempts"]), 2)
@@ -50,9 +50,11 @@ class MobileManagedSmoke(unittest.TestCase):
                 self.assertTrue(meta2["training_complete"])
                 self.assertEqual(meta2["ppo"], metadata["ppo"])
             finally:
-                for pid in spawned:
+                for who in spawned:
                     try:
-                        parent = psutil.Process(pid)
+                        if not alive(who):
+                            continue
+                        parent = psutil.Process(who["pid"])
                         processes = parent.children(recursive=True) + [parent]
                         for process in processes:
                             process.terminate()

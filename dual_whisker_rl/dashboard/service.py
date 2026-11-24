@@ -119,6 +119,9 @@ class Service:
         if not task["attempts"]:
             return
         attempt = task["attempts"][-1]
+        if task["mode"] == "managed" and attempt.get("legacy"):
+            # 等待接管后的新段启动时，不能再用旧日志覆盖已选检查点的回退步数。
+            return
         sample = self.progress.read(attempt["log"])
         if sample.get("current_steps") is not None:
             task["current_steps"] = sample["current_steps"]
@@ -138,9 +141,6 @@ class Service:
                     task["state"] = "failed"
                 else:
                     task["state"] = "failed" if attempt.get("identity") else "unknown"
-            return
-        if attempt.get("legacy"):
-            # 接管只创建新的运行段，旧段没有 managed status.json。
             return
         state = read_json(Path(attempt["directory"]) / "status.json", {})
         if not attempt.get("identity") and state.get("identity"):
@@ -331,6 +331,8 @@ class Service:
                 return previous
             task = self.store.get(task_id)
             self._refresh(task)
+            if body.get("expected_revision") is not None and body["expected_revision"] != task.get("revision", 0):
+                raise ValueError("目标或控制状态已变化，请重新打开对话框确认")
             action = body.get("action")
             if task["mode"] == "legacy":
                 if action != "takeover":
@@ -441,6 +443,8 @@ class Service:
         if os.name != "posix":
             raise ValueError("旧任务接管只在训练服务器提供")
         cp = self._checkpoint(task["id"], checkpoint_id)
+        if cp["id"] != self._checkpoint(task["id"])["id"]:
+            raise ValueError("已有更新的检查点，请重新预览后接管")
         old = task["attempts"][-1]
         who = old.get("identity")
         current = identity(who["pid"]) if alive(who) else None
@@ -457,6 +461,8 @@ class Service:
         (staged / "validation.log").write_text(result.stdout + result.stderr, encoding="utf-8")
         if result.returncode:
             raise ValueError("检查点接管预检失败，原训练未停止；请查看管理目录中的 validation.log")
+        if cp["id"] != self._checkpoint(task["id"])["id"]:
+            raise ValueError("预检期间生成了更新检查点，请重新预览后接管；原训练未停止")
         fresh = identity(who["pid"]) if alive(who) else None
         if not fresh or fresh["command"] != who["command"] or os.getpgid(who["pid"]) != pgid:
             raise ValueError("预检期间原进程已变化，接管取消")
@@ -475,6 +481,7 @@ class Service:
 
     def tick(self):
         with self.lock:
+            self.last_error = None
             for task in self.store.tasks():
                 if task["mode"] == "managed":
                     self._reconcile_control(task)

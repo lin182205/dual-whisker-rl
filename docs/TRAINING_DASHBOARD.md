@@ -95,3 +95,11 @@ results忽略规则排除，不提交模型、日志、数据库或密码。重�
 以及在真实Mobile环境中完成双子进程短训、暂停、管理服务重建和检查点续训。
 模型级测试确认无控制请求时与普通PPO更新结果一致，并验证延长目标、缩短目标和
 优化器恢复。测试使用独立临时目录，不导入或控制服务器正式任务。
+
+页面交互的隔离DOM验收可在SSH转发建立后运行。此测试只从服务器GET真实数据，
+所有创建和控制POST均在客户端内存中模拟，不会调整当前两组训练。
+
+```powershell
+npm install --prefix results/dashboard_ui_qa jsdom --no-audit --no-fund
+node tests/dashboard_dom_test.cjs
+```

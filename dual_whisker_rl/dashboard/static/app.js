@@ -9,12 +9,16 @@ const date = value => value ? new Date(value * 1000).toLocaleString('zh-CN', {ho
 const states = {queued:'排队中',starting:'启动中',running:'训练中',pausing:'暂停中',paused:'已暂停',stopping:'停止中',stopped:'已停止',completed:'已完成',failed:'失败',unknown:'待核对',unresponsive:'待响应'};
 const actions = {imported:'接入监控',created:'创建任务',started:'开始运行',set_target:'调整目标',pause:'请求暂停',resume:'加入续训队列',stop:'请求停止',takeover:'接管控制',failed:'任务失败'};
 const active = new Set(['running','starting','pausing','stopping','unresponsive']);
-let token = '', tasks = [], selected = null, detail = null, filter = 'all', tab = 'curves', busy = false, lastCharts = 0, charts = {}, confirmAction = null, sourceCheckpoints = [], overviewBusy = false;
+let token = '', tasks = [], selected = null, detail = null, filter = 'all', tab = 'curves', busy = false, lastCharts = 0, charts = {}, confirmAction = null, sourceCheckpoints = [], overviewBusy = false, goalTask = null;
 Chart.register({id:'segments',afterDatasetsDraw(chart,args,options){const {ctx,chartArea,scales}=chart;ctx.save();ctx.strokeStyle='#657a995e';ctx.setLineDash([3,4]);for(const point of options.points||[]){const x=scales.x.getPixelForValue(point);if(x>=chartArea.left&&x<=chartArea.right){ctx.beginPath();ctx.moveTo(x,chartArea.top);ctx.lineTo(x,chartArea.bottom);ctx.stroke();}}ctx.restore();}});
 
-async function api(path, body) {
+async function api(path, body, retried=false) {
   const response = await fetch(path, {method:body ? 'POST':'GET', credentials:'same-origin', headers:body ? {'Content-Type':'application/json','X-CSRF-Token':token}:{}, body:body ? JSON.stringify(body):undefined});
   const result = await response.json();
+  if (response.status===403 && body && !retried && result.error?.includes('会话已失效')) {
+    token=(await api('/api/bootstrap')).csrf_token;
+    return api(path,body,true);
+  }
   if (!response.ok) throw new Error(result.error || (typeof result.detail === 'string' ? result.detail : '输入无效，请检查目标步数和任务状态'));
   return result;
 }
@@ -94,8 +98,9 @@ async function renderCharts() {
     });
     charts[name]?.destroy();
     const hasData=datasets.some(d=>d.data.length);
+    const upper=ratio?Math.min(100,Math.max(5,Math.ceil(Math.max(0,...datasets.flatMap(d=>d.data.map(p=>p.y)))*1.15/5)*5)):undefined;
     $(`${name}-empty`).classList.toggle('hidden',hasData); $(`${name}-empty`).textContent='未记录 / 尚未生成此指标';
-    charts[name]=new Chart($(`${name}-chart`),{type:'line',data:{datasets},options:{responsive:true,maintainAspectRatio:false,animation:false,parsing:false,normalized:data.length===1,interaction:{mode:'nearest',axis:'x',intersect:false},plugins:{segments:{points:data.flatMap(item=>item.metrics.boundaries.map(b=>(b.step-($('x-axis').value==='session'?item.task.start_steps:0))/10000))},legend:{display:data.length>1,labels:{color:'#91a0b8',font:{size:11},boxWidth:12}},tooltip:{callbacks:{title:items=>items.length?`${number(items[0].parsed.x)} 万步`:''}}},scales:{x:{type:'linear',grid:{color:'#233044'},ticks:{color:'#7c90ad',maxTicksLimit:5,font:{size:11}},title:{display:true,text:$('x-axis').value==='session'?'本次新增（万步）':'累计（万步）',color:'#7487a2',font:{size:11}}},y:{min:ratio?0:undefined,max:ratio?100:undefined,grid:{color:'#233044'},ticks:{color:'#7c90ad',maxTicksLimit:4,font:{size:11},callback:v=>ratio?`${v}%`:number(v)}}}}});
+    charts[name]=new Chart($(`${name}-chart`),{type:'line',data:{datasets},options:{responsive:true,maintainAspectRatio:false,animation:false,parsing:false,normalized:data.length===1,interaction:{mode:'nearest',axis:'x',intersect:false},plugins:{segments:{points:data.flatMap(item=>item.metrics.boundaries.map(b=>(b.step-($('x-axis').value==='session'?item.task.start_steps:0))/10000))},legend:{display:data.length>1,labels:{color:'#91a0b8',font:{size:11},boxWidth:12}},tooltip:{callbacks:{title:items=>items.length?`${number(items[0].parsed.x)} 万步`:''}}},scales:{x:{type:'linear',grid:{color:'#233044'},ticks:{color:'#7c90ad',maxTicksLimit:5,font:{size:11}},title:{display:true,text:$('x-axis').value==='session'?'本次新增（万步）':'累计（万步）',color:'#7487a2',font:{size:11}}},y:{min:ratio?0:undefined,max:upper,grid:{color:'#233044'},ticks:{color:'#7c90ad',maxTicksLimit:4,font:{size:11},callback:v=>ratio?`${v}%`:number(v)}}}}});
   }
   $('curve-notes').textContent=missing.size?'部分任务尚无对应指标，曲线留空；缺失数据不会按零绘制。接管及恢复的运行段在任务记录中保留。':'';
   lastCharts=Date.now();
@@ -119,7 +124,7 @@ async function updateSource(checkpointId='') {
   updateNewPreview();
 }
 function updateNewPreview() { const f=$('new-form'), source=f.elements.source.value, cp=sourceCheckpoints.find(c=>c.id===f.elements.checkpoint.value), start=source?(cp?.steps||0):0, target=Number(f.elements.target.value)*10000; $('new-preview').textContent=source&&!cp?'源任务尚无完整检查点，暂不能创建续训。':`起始 ${steps(start)} 步 → 累计目标 ${steps(target)} 步，计划新增 ${steps(target-start)} 步。`; }
-function updateTargetPreview() { const t=tasks.find(t=>t.id===selected),f=$('target-form'),value=Number(f.elements.amount.value)*10000,target=f.elements.mode.value==='add'?t.target_steps+value:value; $('target-preview').textContent=`当前进度 ${steps(t.current_steps)} 步；累计目标 ${steps(t.target_steps)} → ${steps(target)} 步。`; }
+function updateTargetPreview() { const t=goalTask,f=$('target-form'),value=Number(f.elements.amount.value)*10000,target=f.elements.mode.value==='add'?t.target_steps+value:value; $('target-preview').textContent=`当前进度 ${steps(t.current_steps)} 步；累计目标 ${steps(t.target_steps)} → ${steps(target)} 步。`; }
 
 document.addEventListener('click',async event=>{
   const b=event.target.closest('button'); if(!b) return;
@@ -134,16 +139,16 @@ document.addEventListener('click',async event=>{
     else if(b.id==='log-refresh') await loadLogs();
     else if(b.id==='pause-task') await act('pause');
     else if(b.id==='resume-task') await act('resume');
-    else if(b.id==='change-target') { $('target-form').reset(); $('target-form').elements.amount.value=tasks.find(t=>t.id===selected).target_steps/10000; updateTargetPreview(); $('target-dialog').showModal(); }
+    else if(b.id==='change-target') { goalTask={...tasks.find(t=>t.id===selected)}; $('target-form').reset(); $('target-form').elements.amount.value=goalTask.target_steps/10000; updateTargetPreview(); $('target-dialog').showModal(); }
     else if(b.id==='stop-task') showConfirm('保存并停止训练','任务将在本轮更新完成后保存模型并停止。之后可以选择检查点创建新的续训任务。','未保存的训练不会因正常停止而被直接丢弃。',()=>act('stop'),'保存并停止');
     else if(b.id==='takeover') { const p=await api(`/api/tasks/${selected}/takeover-preview`); showConfirm('从检查点接管控制','接管需要停止当前进程，并从完整检查点启动受管理的新运行段。原日志与模型会保留。',`当前记录 ${steps(p.current_steps)} 步；检查点 ${steps(p.checkpoint.steps)} 步；预计重新采样 ${steps(p.rollback_steps)} 步。执行前会先验证模型兼容性。`,()=>act('takeover',{checkpoint_id:p.checkpoint.id}),'验证并接管'); }
     else if(b.id==='confirm-action' && confirmAction) { b.disabled=true; try { await confirmAction(); $('confirm-dialog').close(); } finally { b.disabled=false; } }
   } catch(error) { toast(error.message,true); }
 });
 $('new-form').addEventListener('submit',async event=>{ event.preventDefault(); if(busy) return; busy=true; const f=event.target, button=f.querySelector('[type=submit]'); button.disabled=true; try { const body={request_id:crypto.randomUUID(),name:f.elements.name.value,variant:f.elements.variant.value,target_steps:Math.round(Number(f.elements.target.value)*10000)}; if(f.elements.seed.value!=='') body.seed=Number(f.elements.seed.value); if(f.elements.source.value) {if(!f.elements.checkpoint.value) throw Error('源任务尚无有效检查点'); body.source_task_id=f.elements.source.value; body.checkpoint_id=f.elements.checkpoint.value;} const result=await api('/api/tasks',body); selected=result.task_id; $('new-dialog').close(); toast(`任务已入队，累计目标 ${steps(result.target_steps)} 步。`); await refresh(true); } catch(e) {toast(e.message,true);} finally {busy=false;button.disabled=false;} });
-$('target-form').addEventListener('submit',async event=>{event.preventDefault(); const t=tasks.find(t=>t.id===selected),f=event.target,value=Math.round(Number(f.elements.amount.value)*10000); try {await act('set_target',{target_steps:f.elements.mode.value==='add'?t.target_steps+value:value}); $('target-dialog').close();} catch(e){} });
+$('target-form').addEventListener('submit',async event=>{event.preventDefault(); const t=goalTask,f=event.target,value=Math.round(Number(f.elements.amount.value)*10000); try {await act('set_target',{target_steps:f.elements.mode.value==='add'?t.target_steps+value:value,expected_revision:t.revision}); $('target-dialog').close();} catch(e){} });
 $('new-form').elements.source.addEventListener('change',()=>updateSource().catch(e=>toast(e.message,true)));
 $('new-form').addEventListener('input',updateNewPreview); $('new-form').elements.checkpoint.addEventListener('change',updateNewPreview);
-$('target-form').addEventListener('input',updateTargetPreview); $('target-form').elements.mode.addEventListener('change',()=>{const f=$('target-form'); f.elements.amount.value=f.elements.mode.value==='add'?500:tasks.find(t=>t.id===selected).target_steps/10000;updateTargetPreview();});
+$('target-form').addEventListener('input',updateTargetPreview); $('target-form').elements.mode.addEventListener('change',()=>{const f=$('target-form'); f.elements.amount.value=f.elements.mode.value==='add'?500:goalTask.target_steps/10000;updateTargetPreview();});
 $('compare').addEventListener('change',()=>renderCharts().catch(e=>toast(e.message,true))); $('x-axis').addEventListener('change',()=>renderCharts().catch(e=>toast(e.message,true))); $('log-attempt').addEventListener('change',()=>loadLogs().catch(e=>toast(e.message,true)));
 (async()=>{try {token=(await api('/api/bootstrap')).csrf_token; await refresh(true); setInterval(()=>refresh(),5000);} catch(e) {toast(e.message,true);}})();
