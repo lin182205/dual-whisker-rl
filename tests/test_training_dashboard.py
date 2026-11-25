@@ -1,5 +1,6 @@
 """验证管理状态、日志口径、接口边界和队列，均不接触正式训练。"""
 from pathlib import Path
+from argparse import Namespace
 import json
 import os
 import tempfile
@@ -12,7 +13,8 @@ from fastapi.testclient import TestClient
 from dual_whisker_rl.dashboard.app import create_app
 from dual_whisker_rl.dashboard.collect import LogProgress, thin
 from dual_whisker_rl.dashboard.files import alive, atomic_json, identity
-from dual_whisker_rl.dashboard.service import Service
+from dual_whisker_rl.dashboard.service import PRESETS, PRESET_NAMES, Service
+from dual_whisker_rl.dashboard.worker import apply_source_parameters
 
 
 def request(**values):
@@ -40,6 +42,69 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(len(self.service.store.tasks()), 1)
         with self.assertRaises(ValueError):
             self.service.create({**body, "target_steps": 15000})
+
+    def test_spatial_presets_share_budget_but_keep_distinct_configs(self):
+        tasks = []
+        for group in "abcd":
+            with self.subTest(group=group):
+                variant = "spatial_" + group
+                result = self.service.create(request(variant=variant, target_steps=1000000))
+                task = self.service.detail(result["task_id"])
+                self.assertEqual(task["name"], PRESET_NAMES[variant])
+                self.assertEqual(task["target_steps"], 1000000)
+                self.assertEqual(task["seed"], 11)
+                self.assertEqual((task["n_envs"], task["n_steps"], task["batch_size"]), (4, 1250, 250))
+                self.assertEqual(task["checkpoint_freq"], 250000)
+                self.assertEqual(task["config"]["feature_layout"], "wind_motion_spatial_memory_v2")
+                self.assertEqual(task["resume_checkpoint"], None)
+                tasks.append(task)
+        self.assertEqual(len({PRESETS[task["variant"]] for task in tasks}), 4)
+        old = self.service.detail(self.create())
+        self.assertEqual(old["variant"], "improved")
+        self.assertEqual(old["checkpoint_freq"], 100000)
+
+    def test_spatial_resume_rejects_other_variant_and_keeps_source_contract(self):
+        source_id = self.service.create(request(variant="spatial_c", target_steps=1000000, seed=23))["task_id"]
+        with self.assertRaisesRegex(ValueError, "环境版本"):
+            self.service.create(request(variant="spatial_d", source_task_id=source_id, target_steps=2000000))
+        source = self.service.store.get(source_id)
+        cp = self.root / "spatial-checkpoints"
+        cp.mkdir()
+        with zipfile.ZipFile(cp / "model_1000000_steps.zip", "w") as archive:
+            archive.writestr("data", json.dumps({"num_timesteps": 1000000, "n_envs": 4,
+                                                "n_steps": 1250, "batch_size": 250}))
+        metadata = self.root / "spatial-metadata.json"
+        atomic_json(metadata, {"seed": 23, "history_length": 20, "temporal_encoder": "gru",
+                    "features_extractor_class": "SpatialMemoryHistoryExtractor", "checkpoint_freq": 250000,
+                    "environment_contract": {"feature_layout": "wind_motion_spatial_memory_v2"}})
+        source["attempts"] = [{"checkpoint_dir": str(cp), "metadata": str(metadata)}]
+        self.service.store.save(source)
+        result = self.service.create(request(variant="spatial_c", source_task_id=source_id, target_steps=2000000))
+        resumed = self.service.detail(result["task_id"])
+        self.assertEqual(resumed["seed"], 23)
+        self.assertEqual(resumed["start_steps"], 1000000)
+        self.assertEqual(resumed["config"], source["config"])
+        self.assertEqual(resumed["source_meta"]["environment_contract"]["feature_layout"], "wind_motion_spatial_memory_v2")
+        self.assertEqual(resumed["checkpoint_freq"], 250000)
+
+    def test_worker_recovers_encoder_and_ppo_parameters_without_layout_override(self):
+        args = Namespace(config="frozen-config.yaml", learning_rate=1e-4)
+        apply_source_parameters(args, {"history_length": 20, "temporal_encoder": "gru",
+                    "gru": {"hidden_size": 48, "n_layers": 2, "dropout": 0.1, "features_dim": 64,
+                            "arbitrary": "ignored"},
+                    "feature_layout": "wind_motion_spatial_memory_v2",
+                    "ppo": {"learning_rate": 2e-4, "n_epochs": 5, "ent_coef": 0.003, "target_kl": None}})
+        self.assertEqual((args.history_length, args.temporal_encoder, args.gru_layers), (20, "gru", 2))
+        self.assertEqual(args.gru_hidden_size, 48)
+        self.assertEqual(args.learning_rate, 2e-4)
+        self.assertIsNone(args.target_kl)
+        self.assertEqual(args.config, "frozen-config.yaml")
+        self.assertFalse(hasattr(args, "gru_arbitrary"))
+        self.assertFalse(hasattr(args, "feature_layout"))
+        apply_source_parameters(args, {"temporal_encoder": "transformer", "transformer": {
+                    "d_model": 32, "n_heads": 2, "n_layers": 1, "dim_feedforward": 64,
+                    "dropout": 0.0, "features_dim": 48}})
+        self.assertEqual((args.transformer_heads, args.transformer_layers, args.transformer_ff_dim), (2, 1, 64))
 
     def test_queued_pause_resume_stop_and_target(self):
         task_id = self.create()
@@ -224,6 +289,20 @@ class DashboardTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertEqual(client.post("/api/tasks", json=body, headers=headers).json(), response.json())
             self.assertEqual(len(client.get("/api/tasks").json()), 1)
+
+    def test_api_accepts_spatial_variants_and_rejects_unknown_preset(self):
+        with TestClient(create_app(self.service, background=False), base_url="http://localhost") as client:
+            token = client.get("/api/bootstrap").json()["csrf_token"]
+            headers = {"X-CSRF-Token": token}
+            for group in "abcd":
+                response = client.post("/api/tasks", json=request(variant="spatial_" + group,
+                                       target_steps=1000000, seed=11), headers=headers)
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json()["target_steps"], 1000000)
+            response = client.post("/api/tasks", json=request(variant="spatial_unknown",
+                                   target_steps=1000000), headers=headers)
+            self.assertEqual(response.status_code, 422)
+            self.assertEqual(len(client.get("/api/tasks").json()), 4)
 
 
 if __name__ == "__main__":

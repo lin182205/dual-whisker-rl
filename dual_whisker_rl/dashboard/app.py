@@ -20,7 +20,7 @@ class CreateTask(BaseModel):
     model_config = ConfigDict(extra="forbid")
     request_id: str = Field(min_length=8, max_length=100)
     name: str = Field(default="", max_length=80)
-    variant: Literal["original", "improved"] = "improved"
+    variant: Literal["original", "improved", "spatial_a", "spatial_b", "spatial_c", "spatial_d"] = "improved"
     target_steps: int = Field(strict=True, gt=0, le=10**12)
     seed: int | None = Field(default=None, strict=True, ge=0, le=2**32 - 1)
     source_task_id: str | None = None

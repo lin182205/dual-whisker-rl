@@ -56,7 +56,7 @@ from dual_whisker_rl.paths import resolve_path_args
 from dual_whisker_rl.vec_env import make_vec_env
 from dual_whisker_rl.vec_env import resolve_vec_env_backend
 from dual_whisker_rl.vec_env import SUBPROC_START_METHOD
-from train_whisker_only_ppo import ObservationHistoryWrapper
+from dual_whisker_rl.mobile_observation import MobileObservationHistory as ObservationHistoryWrapper, observation_dimensions
 from train_whisker_only_ppo import load_config
 from train_whisker_only_ppo import resolve_seed
 
@@ -71,6 +71,8 @@ class CompactTrainingInfoWrapper(gym.Wrapper):
         "odor_hit",
         "blank_age_steps",
         "blank_loop",
+        "novel_cells", "new_cell", "spatial_no_new_age_s", "exploration_budget_remaining", "recent_blank_exposure_s",
+        "exploration_reward_total", "blank_revisit_active", "blank_revisit_steps", "blank_revisit_cost_total",
         "initial_heading_mode",
         "move_action",
         "body_moved",
@@ -194,6 +196,15 @@ class RewardComponentsTensorboardCallback(BaseCallback):
                 self.logger.record_mean("rollout/collision_rate", float(info["collision"]))
             if "blank_loop" in info:
                 self.logger.record_mean("rollout/blank_loop_ratio", float(info["blank_loop"]))
+            for key in ("novel_cells", "new_cell", "spatial_no_new_age_s", "exploration_budget_remaining", "recent_blank_exposure_s",
+                        "exploration_reward_total", "blank_revisit_active", "blank_revisit_steps", "blank_revisit_cost_total"):
+                if key in info:
+                    self.logger.record_mean(f"exploration/{key}", float(info[key]))
+            if episode_done and "novel_cells" in info:
+                self.logger.record_mean("exploration/episode_novel_cells", float(info["novel_cells"]))
+                for key in ("exploration_bonus", "blank_revisit_penalty"):
+                    total = self._episode_sums[env_index].get(key, 0.) + info.get("reward_components", {}).get(key, 0.)
+                    self.logger.record_mean(f"exploration/episode_{key}", total)
             if episode_done and "initial_heading_mode" in info:
                 self.logger.record_mean("rollout/curriculum_fallback_rate",
                                         float(info["initial_heading_mode"] == "curriculum_fallback"))
@@ -1044,13 +1055,13 @@ def train(args: argparse.Namespace) -> PPO:
         args.vec_env_backend,
     )
     stacked_observation_dim = int(env.observation_space.shape[0])
-    if stacked_observation_dim % args.history_length != 0:
-        env.close()
-        raise ValueError(
-            "stacked observation dimension must be divisible by history length: "
-            f"stacked={stacked_observation_dim}, history={args.history_length}"
-        )
-    base_observation_dim = stacked_observation_dim // args.history_length
+    dimension_probe = MobileWhiskerPuffEnv(config)
+    try:
+        base_observation_dim, _, expected_dim = observation_dimensions(dimension_probe, args.history_length)
+        if stacked_observation_dim != expected_dim:
+            raise ValueError("训练观测打包维度与环境布局不一致")
+    finally:
+        dimension_probe.close()
     if args.eval_freq is not None or args.eval_episodes is not None:
         print(
             "注意：--eval-freq/--eval-episodes 已停用，训练期间不会执行同步评估；"
@@ -1215,7 +1226,7 @@ def save_run_metadata(
 ) -> None:
     args.log_dir.mkdir(parents=True, exist_ok=True)
     metadata_env = MobileWhiskerPuffEnv(config)
-    base_obs_dim = int(metadata_env.observation_space.shape[0])
+    base_obs_dim, current_tail_dim, _ = observation_dimensions(metadata_env, args.history_length)
     extractor = model.policy.features_extractor
     transformer_config = None
     gru_config = None
@@ -1294,7 +1305,9 @@ def save_run_metadata(
         },
         "history_length": args.history_length,
         "base_observation_dim": base_obs_dim,
-        "stacked_observation_dim": base_obs_dim * args.history_length,
+        "raw_observation_dim": int(metadata_env.observation_space.shape[0]),
+        "current_memory_dim": current_tail_dim,
+        "stacked_observation_dim": int(model.observation_space.shape[0]),
         "temporal_encoder": args.temporal_encoder,
         "transformer": transformer_config,
         "gru": gru_config,

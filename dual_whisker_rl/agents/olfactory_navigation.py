@@ -9,15 +9,19 @@ from dual_whisker_rl.agents.gru_history import GRUHistoryExtractor
 from dual_whisker_rl.agents.transformer_history import TransformerHistoryExtractor
 from dual_whisker_rl.mobile_features import (
     CURRENT_NAVIGATION_INDICES, NAVIGATION_INDICES, OLFACTORY_INDICES, feature_layout_contract,
+    WIND_MOTION_SPATIAL_MEMORY,
 )
 
 
 class OlfactoryNavigationExtractor(BaseFeaturesExtractor):
     def __init__(self, observation_space, *, history_length, base_observation_dim=57,
                  temporal_encoder="gru", encoder_kwargs=None, feature_layout=None, history_ablation="none"):
-        if base_observation_dim != 57 or history_length < 1 or observation_space.shape != (57*history_length,):
-            raise ValueError("双分支编码器需要 mobile_hybrid_nav_v1 的57维历史")
-        super().__init__(observation_space, features_dim=128)
+        spatial = feature_layout == WIND_MOTION_SPATIAL_MEMORY
+        expected_width = 57 * history_length + (802 if spatial else 0)
+        if base_observation_dim != 57 or history_length < 1 or observation_space.shape != (expected_width,):
+            raise ValueError("编码器需要57维核心历史和对应版本的当前记忆")
+        super().__init__(observation_space, features_dim=192 if spatial else 128)
+        self.spatial = spatial
         self.base_observation_dim = 57
         self.history_length = int(history_length)
         self.temporal_encoder = temporal_encoder
@@ -47,9 +51,20 @@ class OlfactoryNavigationExtractor(BaseFeaturesExtractor):
             raise ValueError("未知嗅觉历史编码器")
         self.olfactory_projection = nn.Linear(smell_dim, 64) if smell_dim != 64 else nn.Identity()
         self.navigation = nn.Sequential(nn.Linear(len(navigation_indices), 64), nn.GELU(), nn.Linear(64, 64), nn.GELU())
+        if self.spatial:
+            # 固定地图坐标平面与当前位姿生成相对坐标，不读取场景或气源真值。
+            centers = torch.arange(20, dtype=torch.float32) * .5 - 4.75
+            grid_y, grid_x = torch.meshgrid(centers, centers, indexing="ij")
+            self.register_buffer("grid_centers", torch.stack((grid_x, grid_y)), persistent=False)
+            self.spatial_cnn = nn.Sequential(nn.Conv2d(4, 8, 3, padding=1), nn.GELU(),
+                                             nn.Conv2d(8, 16, 3, stride=2, padding=1), nn.GELU(), nn.Flatten())
+            self.spatial_projection = nn.Sequential(nn.Linear(1602, 64), nn.GELU())
+            self.configuration.update({"features_dim": 192, "spatial_output_dim": 64,
+                "spatial_cnn": {"channels": [4, 8, 16], "kernels": [3, 3], "strides": [1, 2],
+                                "padding": [1, 1], "flatten_dim": 1600, "scalar_dim": 2}})
 
     def _branch_inputs(self, observations):
-        history = observations.reshape(-1, self.history_length, self.base_observation_dim)
+        history = observations[:, :57*self.history_length].reshape(-1, self.history_length, self.base_observation_dim)
         temporal = history.index_select(-1, self.olfactory_indices)
         navigation = history[:, -1].index_select(-1, self.navigation_indices)
         if self.feature_layout is None:
@@ -84,7 +99,21 @@ class OlfactoryNavigationExtractor(BaseFeaturesExtractor):
 
     def forward(self, observations):
         smell, navigation = self._branch_inputs(observations)
-        return torch.cat((self.olfactory_projection(self.olfactory(smell)), self.navigation(navigation)), dim=-1)
+        branches = [self.olfactory_projection(self.olfactory(smell)), self.navigation(navigation)]
+        if self.spatial:
+            branches.append(self._spatial_features(observations))
+        return torch.cat(branches, dim=-1)
+
+    def _spatial_features(self, observations):
+        """800格记忆加确定性相对坐标，经小卷积后与两个当前标量融合。"""
+        tail = observations[:, 57*self.history_length:]
+        maps = tail[:, :800].reshape(-1, 2, 20, 20)
+        current = observations[:, 57*(self.history_length-1):57*self.history_length]
+        relative_xy = (self.grid_centers[None] - (current[:, 17:19]*5.)[:, :, None, None]) / 10.
+        # A 组屏蔽全部新输入，包括坐标平面；分支结构和参数数量保持相同。
+        enabled = (maps.flatten(1).abs().sum(1) > 0).to(observations.dtype)[:, None, None, None]
+        planes = torch.cat((maps, relative_xy * enabled), dim=1)
+        return self.spatial_projection(torch.cat((self.spatial_cnn(planes), tail[:, 800:]), dim=1))
 
     def forward_with_attention(self, observations):
         """只在评估时读取嗅觉 Transformer 的注意力，导航分支不加入历史 token。"""
@@ -92,4 +121,7 @@ class OlfactoryNavigationExtractor(BaseFeaturesExtractor):
             raise RuntimeError("注意力读取需要评估模式的Transformer嗅觉分支")
         smell, navigation = self._branch_inputs(observations)
         features, attention = self.olfactory.forward_with_attention(smell)
-        return torch.cat((self.olfactory_projection(features), self.navigation(navigation)), dim=-1), attention
+        branches = [self.olfactory_projection(features), self.navigation(navigation)]
+        if self.spatial:
+            branches.append(self._spatial_features(observations))
+        return torch.cat(branches, dim=-1), attention

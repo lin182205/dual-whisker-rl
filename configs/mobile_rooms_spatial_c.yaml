@@ -1,0 +1,36 @@
+# C：空间记忆加首次探索奖励；每回合探索奖励最多0.5分。
+feature_layout: wind_motion_spatial_memory_v2
+spatial_memory_observation: full
+exploration_bonus: 0.02
+exploration_budget: 0.5
+blank_revisit_penalty: 0.0
+motion_mode: hybrid
+map_layout: small_office_v1
+plume_model: dynamic
+scenario_mode: randomized
+world_bounds: [-5.0, 5.0]
+forward_speed: 0.15
+turn_rate: 1.5
+robot_radius: 0.15
+source_clearance: 0.25
+minimum_start_path_distance: 1.0
+lidar_beams: 36
+lidar_raw_beams: 360
+lidar_range: 3.0
+collision_penalty: 0.5
+near_obstacle_clearance: 0.20
+near_obstacle_cost: 0.05
+control_smoothness_cost: 0.005
+wind_speed_range: [0.12, 0.20]
+max_steps: 1200
+oob_penalty: 60.0
+include_blank_age_observation: true
+domain_randomization: false
+whisker_length: 0.225
+blank_loop_penalty: 0.006
+plume_overrides:
+  puff_warmup_steps: 500
+  max_puffs: 1200
+  diffusion_crosswind_rate: 0.008
+  puff_init_mass: 0.020
+  puff_release_per_step: 2

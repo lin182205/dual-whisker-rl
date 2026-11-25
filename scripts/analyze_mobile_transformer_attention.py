@@ -8,7 +8,6 @@ diagnostics: wind direction is not part of the deployable policy observation.
 from __future__ import annotations
 
 import argparse
-from collections import deque
 from dataclasses import dataclass
 import json
 import math
@@ -34,6 +33,7 @@ if str(ROOT) not in sys.path:
 from dual_whisker_rl.agents import TransformerHistoryExtractor
 from dual_whisker_rl.agents.olfactory_navigation import OlfactoryNavigationExtractor
 from dual_whisker_rl.mobile_contract import validate_model_environment
+from dual_whisker_rl.mobile_observation import ObservationAssembler, observation_dimensions
 from dual_whisker_rl.envs import MobileWhiskerPuffEnv
 from dual_whisker_rl.paths import portable_path
 from dual_whisker_rl.paths import resolve_path_args
@@ -261,10 +261,9 @@ def capture_attention_rollout(
     thresholds: EventThresholds,
 ) -> dict[str, Any]:
     base_observation, _ = env.reset(seed=seed)
-    history: deque[np.ndarray] = deque(
-        [np.asarray(base_observation, dtype=np.float32).copy()] * extractor.history_length,
-        maxlen=extractor.history_length,
-    )
+    # 与训练共用打包器：v2只堆叠57维核心，地图尾部仅取当前帧。
+    history = ObservationAssembler(env, extractor.history_length)
+    history.reset(base_observation)
     xs, ys, initial_grid = env.concentration_grid(resolution=resolution)
 
     states: list[dict[str, Any]] = []
@@ -282,7 +281,7 @@ def capture_attention_rollout(
     grid = initial_grid
 
     while True:
-        stacked = np.concatenate(tuple(history)).astype(np.float32, copy=False)
+        stacked = history.as_array()
         raw_attention, normalized_attention = extract_attention(
             extractor,
             stacked,
@@ -314,7 +313,7 @@ def capture_attention_rollout(
         actions.append(action.copy())
         previous = state
         observation, _, terminated, truncated, _ = env.step(action)
-        history.append(np.asarray(observation, dtype=np.float32))
+        history.append(observation)
         state_step += 1
         current = state_diagnostics(env, state_step)
         pending_events = detect_transition_events(
@@ -332,11 +331,23 @@ def capture_attention_rollout(
     for event in events:
         event_codes[int(event["step"]), event_index[event["event"]]] = 1
 
+    stacked_array = np.asarray(stacked_observations, dtype=np.float32)
+    core_end = history.core_dim * history.history_length
     return {
         "xs": np.asarray(xs, dtype=np.float32),
         "ys": np.asarray(ys, dtype=np.float32),
         "states": states,
-        "stacked_observations": np.asarray(stacked_observations, dtype=np.float32),
+        "stacked_observations": stacked_array,
+        "core_history_observations": stacked_array[:, :core_end].reshape(
+            len(states), history.history_length, history.core_dim),
+        "current_memory_observations": stacked_array[:, core_end:],
+        "observation_packing": {
+            "base_observation_dim": history.core_dim,
+            "raw_observation_dim": history.core_dim + history.tail_dim,
+            "current_memory_dim": history.tail_dim,
+            "stacked_observation_dim": history.packed_dim,
+            "order": "core_history_then_current_memory",
+        },
         "raw_attention": np.asarray(raw_attentions, dtype=np.float32),
         "normalized_attention": np.asarray(normalized_attentions, dtype=np.float32),
         "grids": np.asarray(grids, dtype=np.float32),
@@ -735,6 +746,7 @@ def save_data_outputs(
             "seed": int(args.seed),
             "states": len(data["states"]),
             "history_length": int(extractor.history_length),
+            "observation_packing": data["observation_packing"],
             "layers": len((extractor.olfactory if isinstance(extractor, OlfactoryNavigationExtractor) else extractor).encoder.layers),
             "heads": int(data["raw_attention"].shape[2]),
             "event_context": int(args.event_context),
@@ -748,6 +760,10 @@ def save_data_outputs(
             "attention_definition": (
                 "CLS query to oldest..current history keys; visualization excludes "
                 "the CLS key and renormalizes history weights to sum to one."
+            ),
+            "current_memory_note": (
+                "The current spatial-memory tail is processed by the CNN branch, "
+                "not repeated as Transformer history tokens; the tail is empty for v1."
             ),
             "wind_event_note": (
                 "Wind direction is a privileged simulation diagnostic and is not "
@@ -769,6 +785,8 @@ def save_data_outputs(
         raw_cls_attention=data["raw_attention"],
         normalized_cls_history_attention=data["normalized_attention"],
         stacked_observations=data["stacked_observations"],
+        core_history_observations=data["core_history_observations"],
+        current_memory_observations=data["current_memory_observations"],
         actions=data["actions"],
         sensor_values=np.asarray([[row["left"], row["right"]] for row in states], dtype=np.float32),
         wind_direction=np.asarray([row["wind_direction"] for row in states], dtype=np.float32),
@@ -800,13 +818,12 @@ def main() -> None:
 
     env = MobileWhiskerPuffEnv(config)
     validate_model_environment(model, env)
-    base_dim = int(env.observation_space.shape[0])
-    expected_dim = int(extractor.history_length * base_dim)
+    base_dim, current_memory_dim, expected_dim = observation_dimensions(env, extractor.history_length)
     if tuple(model.observation_space.shape) != (expected_dim,):
         env.close()
         raise ValueError(
             f"model observation shape {model.observation_space.shape} does not match "
-            f"history {extractor.history_length} * base dim {base_dim}"
+            f"history {extractor.history_length} * core dim {base_dim} + current memory {current_memory_dim}"
         )
 
     thresholds = EventThresholds(

@@ -26,6 +26,10 @@ from dual_whisker_rl.envs.whisker_only_env import WhiskerOnlyPuffEnv
 from dual_whisker_rl.envs.world_bounds import resolve_world_bounds, world_bounds_config
 from dual_whisker_rl.envs.room_navigation import RoomNavigation, WallAwareWhiskers
 from dual_whisker_rl.envs.hybrid_action import HybridMotion, HybridMotionWhiskerSpace, decode_hybrid_action
+from dual_whisker_rl.envs.spatial_memory import (
+    CORE_OBSERVATION_DIM, SPATIAL_MEMORY_LAYOUT, SPATIAL_OBSERVATION_DIM,
+    EpisodicSpatialMemory,
+)
 from dual_whisker_rl.mobile_features import feature_layout_contract, feature_layout_kwargs
 
 
@@ -48,6 +52,7 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         if cfg.get("motion_mode", "discrete") not in ("discrete", "hybrid"):
             raise ValueError("motion_mode 必须为 discrete 或 hybrid")
         self.hybrid_motion = None
+        self.spatial_memory = None
         hybrid = cfg.get("motion_mode") == "hybrid"
         if feature_layout_contract(**feature_layout_kwargs(cfg)) and not hybrid:
             raise ValueError("风向与运动历史需要连续底盘的57维房间观测")
@@ -208,6 +213,26 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
             raise ValueError("blank_loop_penalty 需要连续底盘房间环境")
         if self.blank_loop_penalty:
             self.REWARD_COMPONENT_NAMES += ("blank_loop_penalty",)
+        if cfg.get("feature_layout") == SPATIAL_MEMORY_LAYOUT:
+            if not (self.room_navigation and hybrid):
+                raise ValueError("空间记忆需要连续底盘的57维房间核心观测")
+            if (not math.isclose(self.world_min, -5.0, abs_tol=1e-12)
+                    or not math.isclose(self.world_max, 5.0, abs_tol=1e-12)):
+                raise ValueError("空间记忆v2固定使用 [-5, 5] 米场地")
+            self.spatial_memory_observation = cfg.setdefault("spatial_memory_observation", "full")
+            if self.spatial_memory_observation not in ("full", "masked"):
+                raise ValueError("spatial_memory_observation 必须为 full 或 masked")
+            self.spatial_memory = EpisodicSpatialMemory(
+                exploration_bonus=float(cfg.setdefault("exploration_bonus", 0.0)),
+                exploration_budget=float(cfg.setdefault("exploration_budget", 0.5)),
+                blank_revisit_penalty=float(cfg.setdefault("blank_revisit_penalty", 0.0)),
+            )
+            if self.blank_loop_penalty and self.spatial_memory.blank_revisit_penalty:
+                raise ValueError("空白绕圈扣分与空间重复访问扣分不可叠加")
+            self.REWARD_COMPONENT_NAMES += ("exploration_bonus", "blank_revisit_penalty")
+        elif any(key in cfg for key in (
+                "spatial_memory_observation", "exploration_bonus", "exploration_budget", "blank_revisit_penalty")):
+            raise ValueError("空间记忆配置需要 wind_motion_spatial_memory_v2 特征布局")
         self.office_start_curriculum = cfg.get("office_start_curriculum", False)
         if not isinstance(self.office_start_curriculum, bool) or (
             self.office_start_curriculum and cfg.get("map_layout") != "small_office_v1"
@@ -317,6 +342,8 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
             + (8.0 if self.room_navigation else self.progress_reward_scale * world_diameter)
             + self.whisker_reacquisition_bonus
             * self.max_whisker_reacquisition_rewards
+            + (self.spatial_memory.exploration_budget
+               if self.spatial_memory and self.spatial_memory.exploration_bonus else 0.0)
         )
         if (
             self.positive_auxiliary_reward_upper_bound
@@ -332,6 +359,8 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
             self.max_episode_time_cost
             + self.positive_auxiliary_reward_upper_bound
             + self.blank_loop_penalty * self.max_steps
+            + (self.spatial_memory.blank_revisit_penalty * self.max_steps
+               if self.spatial_memory else 0.0)
         )
         if self.oob_penalty + 1e-12 < self.minimum_oob_penalty:
             raise ValueError(
@@ -382,6 +411,18 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
                 dtype=np.float32,
             )
             self.observation_field_names += nav.field_names
+        self.core_observation_dim = int(self.observation_space.shape[0])
+        self.spatial_memory_observation_dim = 0
+        if self.spatial_memory:
+            if self.core_observation_dim != CORE_OBSERVATION_DIM or not self.include_blank_age_observation:
+                raise ValueError("空间记忆v2必须保留原57维核心（含blank_age与36束雷达）")
+            self.spatial_memory_observation_dim = SPATIAL_OBSERVATION_DIM
+            self.observation_space = spaces.Box(
+                low=np.concatenate([self.observation_space.low, np.zeros(SPATIAL_OBSERVATION_DIM, dtype=np.float32)]),
+                high=np.concatenate([self.observation_space.high, np.ones(SPATIAL_OBSERVATION_DIM, dtype=np.float32)]),
+                dtype=np.float32,
+            )
+            self.observation_field_names += self.spatial_memory.field_names()
         self.effective_config = cfg
 
         self.last_move = self.stop_action
@@ -527,7 +568,10 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
                     "robot_sampling": "uniform_free_space", "uniform_heading_probability": 1.,
                     "minimum_start_path_distance": nav.minimum_distance,
                     "robot_radius": nav.radius, "source_clearance": nav.source_clearance,
-                    "map_sha256": nav.map.digest, **nav.map.metadata()}
+                    "map_sha256": nav.map.digest, **nav.map.metadata(),
+                    **({"spatial_memory": {**self.spatial_memory.metadata(),
+                                           "observation": self.spatial_memory_observation}}
+                       if self.spatial_memory else {})}
         if self.scenario_mode == "fixed":
             return {
                 "mode": "fixed",
@@ -587,6 +631,8 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
             parts.append(np.array([blank_age_norm], dtype=np.float32))
         if self.room_navigation:
             parts.append(self.room_navigation.observation(self))
+        if self.spatial_memory:
+            parts.append(self.spatial_memory.observation(masked=self.spatial_memory_observation == "masked"))
         obs = np.concatenate(parts).astype(np.float32)
         self._last_obs = obs
         return obs
@@ -738,6 +784,13 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
                     int(self.rng.integers(0, 2**63 - 1))
                 )
         obs, info = super().reset(seed=seed, options=options)
+        if self.spatial_memory:
+            self.spatial_memory.reset((self.robot_state.x, self.robot_state.y))
+            # 父类已推进一次有状态的传感器预处理，只替换当前空间尾部。
+            obs = np.concatenate([obs[:self.core_observation_dim], self.spatial_memory.observation(
+                masked=self.spatial_memory_observation == "masked")]).astype(np.float32)
+            self._last_obs = obs
+            info.update(self.spatial_memory.info())
         self._blank_loop_window.clear()
         if self.hybrid_motion:
             self._blank_loop_window.append((self.robot_state.x, self.robot_state.y, 0.0))
@@ -849,6 +902,16 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
             reached = bool(reached and self.room_navigation.map.visible(
                 (self.robot_state.x, self.robot_state.y), self.room_navigation.source))
         oob = not (self.world_min < self.robot_state.x < self.world_max and self.world_min < self.robot_state.y < self.world_max)
+        spatial_rewards = {}
+        spatial_info = {}
+        if self.spatial_memory:
+            spatial_rewards = self.spatial_memory.update(
+                (self.robot_state.x, self.robot_state.y), dt=self.dt,
+                odor_hit=bool(odor_search_info["odor_hit"]),
+                blank_age_s=float(odor_search_info["blank_age_s"]),
+                terminal=bool(reached or oob or self.step_count + 1 >= self.max_steps),
+            )
+            spatial_info = self.spatial_memory.info()
         reward_components = self._source_search_reward_components(
             distance,
             reached,
@@ -883,6 +946,7 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
         if self.blank_loop_penalty:
             penalize = blank_loop and not (reached or oob or self.step_count + 1 >= self.max_steps)
             reward_components["blank_loop_penalty"] = -self.blank_loop_penalty if penalize else 0.0
+        reward_components.update(spatial_rewards)
         reward = float(sum(reward_components.values()))
 
         self.step_count += 1
@@ -912,6 +976,7 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
                     "left_effective_length": math.dist((self.robot_state.x, self.robot_state.y), whisker_state.left_point),
                     "right_effective_length": math.dist((self.robot_state.x, self.robot_state.y), whisker_state.right_point),
                     **odor_search_info,
+                    **spatial_info,
                     "reward": reward,
                     "reward_components": reward_components,
                     "is_success": reached,
@@ -950,6 +1015,7 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
                 "stagnation_steps": self.stagnation_steps,
                 "blank_loop": blank_loop,
                 **odor_search_info,
+                **spatial_info,
                 "out_of_bounds": oob,
                 "is_success": reached,
                 "reward_components": reward_components,
@@ -961,6 +1027,8 @@ class MobileWhiskerPuffEnv(WhiskerOnlyPuffEnv):
 
     def _current_info(self):
         info = super()._current_info()
+        if self.spatial_memory:
+            info.update(self.spatial_memory.info())
         if self.room_navigation and self.room_navigation.source is not None:
             info.update(self.room_navigation.info(self))
             if self.hybrid_motion:

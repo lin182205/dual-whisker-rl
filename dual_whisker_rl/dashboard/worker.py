@@ -11,6 +11,24 @@ import traceback
 from .files import atomic_json, checkpoint_data, identity, read_json
 
 
+def apply_source_parameters(args, meta):
+    """只恢复训练入口认识的参数；特征布局始终读取冻结的环境配置。"""
+    args.history_length = meta.get("history_length", 20)
+    args.temporal_encoder = meta.get("temporal_encoder", "gru")
+    encoder_fields = {
+        "gru": {"hidden_size": "hidden_size", "n_layers": "layers", "dropout": "dropout", "features_dim": "features_dim"},
+        "transformer": {"d_model": "d_model", "n_heads": "heads", "n_layers": "layers",
+                        "dim_feedforward": "ff_dim", "dropout": "dropout", "features_dim": "features_dim"},
+    }
+    for kind, fields in encoder_fields.items():
+        for field, argument in fields.items():
+            if field in (meta.get(kind) or {}):
+                setattr(args, kind + "_" + argument, meta[kind][field])
+    for field in ("learning_rate", "n_epochs", "ent_coef", "target_kl"):
+        if field in (meta.get("ppo") or {}):
+            setattr(args, field, meta["ppo"][field])
+
+
 def run(directory, validate_only=False):
     spec = read_json(directory / "spec.json")
     if not spec:
@@ -40,16 +58,12 @@ def run(directory, validate_only=False):
     args.managed_task_dir = directory
     args.resume_from = Path(spec["resume_checkpoint"]) if spec.get("resume_checkpoint") else None
     meta = task.get("source_meta", {})
-    args.history_length = meta.get("history_length", 20)
-    args.temporal_encoder = meta.get("temporal_encoder", "gru")
-    for key, value in (meta.get("gru") or {}).items():
-        field = {"n_layers": "layers"}.get(key, key)
-        setattr(args, "gru_" + field, value)
+    apply_source_parameters(args, meta)
     args.seed = task["seed"]
     args.n_envs, args.n_steps, args.batch_size = task["n_envs"], task["n_steps"], task["batch_size"]
     args.vec_env_backend = "subproc" if args.n_envs > 1 else "dummy"
     args.timesteps = task["target_steps"] - task["current_steps"]
-    args.checkpoint_freq = max(1, spec.get("checkpoint_freq", 100000))
+    args.checkpoint_freq = max(1, spec.get("checkpoint_freq", task.get("checkpoint_freq", 100000)))
     args.experiment_name = "managed_" + task["id"][:12] + "_" + directory.name
     args.experiment_keyword = "managed_" + task["id"][:12]
     args.run_name = args.experiment_name

@@ -10,6 +10,7 @@ from dual_whisker_rl.mobile_features import (
     CURRENT_NAVIGATION_INDICES, NAVIGATION_INDICES, OLFACTORY_INDICES,
     feature_layout_contract, feature_layout_kwargs,
 )
+from dual_whisker_rl.mobile_observation import has_spatial_memory, observation_dimensions
 
 
 def environment_contract(env, history_length):
@@ -23,6 +24,11 @@ def environment_contract(env, history_length):
         "map_sha256": nav.map.digest if nav else None,
         "effective_config": config,
     }
+    if has_spatial_memory(env):
+        contract["observation_version"] = "wind_motion_spatial_memory_v2"
+        core, tail, packed = observation_dimensions(env, history_length)
+        contract["observation_packing"] = {"core_width": core, "current_tail_width": tail,
+                                            "packed_width": packed, "order": "core_history_then_current_memory"}
     if env.hybrid_motion:
         motion = env.hybrid_motion
         contract["action_contract"] = {
@@ -51,16 +57,25 @@ def validate_model_environment(model, env, history_length=None, *, resume=False)
     """不能仅用整除推断历史长度：旧 16维模型可能偶然整除新维度。"""
     base_dim = int(env.observation_space.shape[0])
     shape = tuple(model.observation_space.shape)
-    if len(shape) != 1 or shape[0] % base_dim:
-        raise ValueError(f"模型观测维度 {shape} 与环境单帧维度 {base_dim} 不兼容")
     stored = getattr(model, "mobile_environment_contract", None)
+    if has_spatial_memory(env):
+        if stored is None or stored.get("observation_version") != "wind_motion_spatial_memory_v2":
+            raise ValueError("空间记忆v2需要对应的新模型；禁止沿用v1检查点")
+        inferred = int(stored.get("history_length", 0))
+        core_dim, _, packed = observation_dimensions(env, inferred)
+        if shape != (packed,):
+            raise ValueError("模型空间记忆打包维度与环境契约不一致")
+    else:
+        if len(shape) != 1 or shape[0] % base_dim:
+            raise ValueError(f"模型观测维度 {shape} 与环境单帧维度 {base_dim} 不兼容")
+        inferred = shape[0]//base_dim
+        core_dim = base_dim
     if env.room_navigation and stored is None:
         raise ValueError("房间环境需要对应观测版本的模型契约；旧模型不能用于新环境")
-    inferred = shape[0]//base_dim
     if history_length is not None and int(history_length) != inferred:
         raise ValueError("模型历史长度与本次参数不兼容")
     extractor = model.policy.features_extractor
-    if getattr(extractor, "base_observation_dim", base_dim) != base_dim or getattr(extractor, "history_length", inferred) != inferred:
+    if getattr(extractor, "base_observation_dim", core_dim) != core_dim or getattr(extractor, "history_length", inferred) != inferred:
         raise ValueError("模型时序编码器与环境观测定义不兼容")
     if env.hybrid_motion:
         if not isinstance(model.action_space, HybridMotionWhiskerSpace) or model.action_space != env.action_space:

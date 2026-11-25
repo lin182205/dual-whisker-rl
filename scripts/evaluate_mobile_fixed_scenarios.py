@@ -299,15 +299,12 @@ def infer_history_length(
     model = PPO.load(str(model_path), device=device)
     probe_env = MobileWhiskerPuffEnv(config)
     try:
-        base_dim = int(probe_env.observation_space.shape[0])
+        from dual_whisker_rl.mobile_observation import observation_dimensions
         history_length = validate_model_environment(model, probe_env)
+        base_dim, _, _ = observation_dimensions(probe_env, history_length)
     finally:
         probe_env.close()
     stacked_dim = int(model.observation_space.shape[0])
-    if stacked_dim % base_dim != 0:
-        raise ValueError(
-            f"模型观测维度 {stacked_dim} 不是环境单帧维度 {base_dim} 的整数倍"
-        )
     extractor_name = type(model.policy.features_extractor).__name__
     return history_length, base_dim, stacked_dim, extractor_name
 

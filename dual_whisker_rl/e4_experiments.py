@@ -20,6 +20,7 @@ from gymnasium import spaces
 
 from dual_whisker_rl.envs import MobileWhiskerPuffEnv
 from dual_whisker_rl.envs.world_bounds import resolve_world_bounds
+from dual_whisker_rl.mobile_observation import MobileObservationHistory
 
 
 METHOD_ORDER = (
@@ -81,35 +82,11 @@ class E4Scenario:
         )
 
 
-class ObservationHistory(gym.Wrapper):
+class ObservationHistory(MobileObservationHistory):
     """轻量历史堆叠包装器，保持与训练入口的观测顺序一致。"""
 
     def __init__(self, env: gym.Env, history_length: int) -> None:
-        super().__init__(env)
-        if int(history_length) < 1:
-            raise ValueError("history_length must be at least 1")
-        self.history_length = int(history_length)
-        self.history: deque[np.ndarray] = deque(maxlen=self.history_length)
-        if not isinstance(env.observation_space, spaces.Box) or len(env.observation_space.shape) != 1:
-            raise TypeError("ObservationHistory requires a flat Box observation space")
-        self.base_observation_dim = int(env.observation_space.shape[0])
-        self.observation_space = spaces.Box(
-            low=np.tile(env.observation_space.low, self.history_length).astype(np.float32),
-            high=np.tile(env.observation_space.high, self.history_length).astype(np.float32),
-            dtype=np.float32,
-        )
-
-    def reset(self, *, seed: int | None = None, options: dict[str, Any] | None = None):
-        obs, info = self.env.reset(seed=seed, options=options)
-        self.history.clear()
-        for _ in range(self.history_length):
-            self.history.append(np.asarray(obs, dtype=np.float32).copy())
-        return np.concatenate(tuple(self.history)).astype(np.float32), info
-
-    def step(self, action: Any):
-        obs, reward, terminated, truncated, info = self.env.step(action)
-        self.history.append(np.asarray(obs, dtype=np.float32))
-        return np.concatenate(tuple(self.history)).astype(np.float32), reward, terminated, truncated, info
+        super().__init__(env, history_length)
 
 
 class MethodActionAdapter(gym.Wrapper):

@@ -9,7 +9,6 @@
 from __future__ import annotations
 
 import argparse
-from collections import deque
 import math
 from pathlib import Path
 import sys
@@ -86,7 +85,11 @@ def capture_rollout(env, model, history_length, steps, resolution, seed, determi
         env.action_space.seed(seed+123)
     obs, info = env.reset(seed=seed)
     obs = np.asarray(obs, dtype=np.float32)
-    history: deque[np.ndarray] = deque([obs.copy()] * max(1, history_length), maxlen=max(1, history_length))
+    from dual_whisker_rl.mobile_observation import ObservationAssembler
+    history = ObservationAssembler(env, max(1, history_length))
+    history.reset(obs)
+    memory = getattr(env, "spatial_memory", None)
+    memory_frames = [memory.observation(masked=False)[:800].reshape(2, 20, 20).copy()] if memory is not None else None
 
     xs, ys, grid0 = env.concentration_grid(resolution=resolution)
     sc = env.whiskers.sector_count
@@ -110,12 +113,14 @@ def capture_rollout(env, model, history_length, steps, resolution, seed, determi
             action = (env.action_space.sample() if env.hybrid_motion else
                       [int(rng.integers(6)), int(rng.integers(sc)), int(rng.integers(sc))])
         else:
-            stacked = np.concatenate(tuple(history)).astype(np.float32)
+            stacked = history.as_array()
             a, _ = model.predict(stacked, deterministic=deterministic)
             action = np.asarray(a).reshape(-1).copy()
         actions.append(np.asarray(action).copy())
         obs, reward, terminated, truncated, info = env.step(action)
-        history.append(np.asarray(obs, dtype=np.float32))
+        history.append(obs)
+        if memory_frames is not None:
+            memory_frames.append(memory.observation(masked=False)[:800].reshape(2, 20, 20).copy())
         lidar_frames.append(info.get("lidar_ranges_m", []))
         collision_frames.append(bool(info.get("collision", False)))
         total_reward += float(reward)
@@ -154,6 +159,7 @@ def capture_rollout(env, model, history_length, steps, resolution, seed, determi
         "lidar_frames": lidar_frames,
         "collision_frames": collision_frames,
         "actions": np.asarray(actions),
+        "memory_frames": np.asarray(memory_frames) if memory_frames is not None else None,
     }
 
 
@@ -220,12 +226,34 @@ def _update_room_overlay(ax, data, frame_idx):
     collision_points.set_offsets(data["trajectory"][:frame_idx+1][mask])
 
 
+def _figure_with_memory(data, frame_idx):
+    """只展示机器人自身累积的记忆；羽流真值仍在独立轨迹面板。"""
+    if data.get("memory_frames") is None:
+        fig, ax = plt.subplots(figsize=(9.5, 8.5))
+        return fig, ax, []
+    fig = plt.figure(figsize=(15, 8.5))
+    grid = fig.add_gridspec(2, 3, width_ratios=(1, 1, 1.05))
+    ax = fig.add_subplot(grid[:, :2])
+    artists = []
+    for channel, title, cmap in ((0, "Visited cells (0.5 m)", "Blues"),
+                                  (1, "Recent blank exposure (0-5 s)", "Oranges")):
+        memory_ax = fig.add_subplot(grid[channel, 2])
+        values = data["memory_frames"][frame_idx, channel] * (5 if channel else 1)
+        image = memory_ax.imshow(values, origin="lower", extent=(-5, 5, -5, 5), cmap=cmap,
+                                 vmin=0, vmax=5 if channel else 1, interpolation="nearest")
+        position = memory_ax.scatter(*data["trajectory"][frame_idx], c="black", s=20)
+        memory_ax.set(title=title, xlabel="x (m)", ylabel="y (m)", aspect="equal")
+        fig.colorbar(image, ax=memory_ax, fraction=.045, pad=.03)
+        artists.append((image, position))
+    return fig, ax, artists
+
+
 def render_static(data, path, title):
     path.parent.mkdir(parents=True, exist_ok=True)
     cmap = build_plume_colormap()
     n = data["trajectory"].shape[0]
     idx = n - 1
-    fig, ax = plt.subplots(figsize=(9.5, 8.5))
+    fig, ax, _ = _figure_with_memory(data, idx)
     heatmap, _ = _setup_axes(ax, data, cmap, idx, title)
     traj = data["trajectory"]
     ax.plot(traj[:, 0], traj[:, 1], color="#54524e", lw=1.8, alpha=0.85, zorder=5, label="Robot trace")
@@ -269,7 +297,7 @@ def render_animation(data, path, title, stride, fps):
     if frame_ids[-1] != n - 1:
         frame_ids.append(n - 1)
 
-    fig, ax = plt.subplots(figsize=(9.5, 8.5))
+    fig, ax, memory_artists = _figure_with_memory(data, 0)
     heatmap, _ = _setup_axes(ax, data, cmap, 0, title)
     line, = ax.plot([], [], color="#54524e", lw=1.8, alpha=0.85, zorder=5, label="Robot trace")
     robot = ax.scatter([traj[0, 0]], [traj[0, 1]], s=95, color="#2b2b2b", edgecolor="white", linewidth=1.3, zorder=6, label="Robot")
@@ -285,6 +313,9 @@ def render_animation(data, path, title, stride, fps):
         heatmap.set_data(frames[fi])
         line.set_data(traj[: fi + 1, 0], traj[: fi + 1, 1])
         robot.set_offsets(traj[fi])
+        for channel, (memory_image, memory_position) in enumerate(memory_artists):
+            memory_image.set_data(data["memory_frames"][fi, channel] * (5 if channel else 1))
+            memory_position.set_offsets(traj[fi])
         end = (traj[fi, 0] + 0.07 * math.cos(data["headings"][fi]), traj[fi, 1] + 0.07 * math.sin(data["headings"][fi]))
         hs.set_positions((float(traj[fi, 0]), float(traj[fi, 1])), end)
         ha.set_positions((float(traj[fi, 0]), float(traj[fi, 1])), end)

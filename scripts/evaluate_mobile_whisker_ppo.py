@@ -26,7 +26,7 @@ from dual_whisker_rl.mobile_contract import validate_model_environment, environm
 from dual_whisker_rl.evaluation import evaluate_policy
 from dual_whisker_rl.paths import portable_path
 from dual_whisker_rl.paths import resolve_path_args
-from train_whisker_only_ppo import ObservationHistoryWrapper
+from dual_whisker_rl.mobile_observation import MobileObservationHistory as ObservationHistoryWrapper, observation_dimensions
 from train_whisker_only_ppo import load_config
 from visualize_mobile_whisker_env import capture_rollout
 from visualize_mobile_whisker_env import render_animation_rollouts
@@ -306,12 +306,14 @@ def main() -> None:
 
     probe_env = MobileWhiskerPuffEnv(config)
     history_length = validate_model_environment(model, probe_env)
-    base_dim = int(probe_env.observation_space.shape[0])
+    base_dim, current_tail_dim, _ = observation_dimensions(probe_env, history_length)
     probe_goal_radius = float(probe_env.goal_radius)
     scenario = probe_env.scenario_metadata()
     observation_config = {
         "environment_contract": model.mobile_environment_contract if probe_env.hybrid_motion else environment_contract(probe_env, history_length),
         "base_observation_dim": base_dim,
+        "raw_observation_dim": int(probe_env.observation_space.shape[0]),
+        "current_memory_dim": current_tail_dim,
         "include_blank_age_observation": (
             probe_env.include_blank_age_observation
         ),
@@ -330,12 +332,6 @@ def main() -> None:
     }
     probe_env.close()
     stacked_dim = int(model.observation_space.shape[0])
-    if stacked_dim % base_dim != 0:
-        raise ValueError(
-            f"模型观测维度 {stacked_dim} 不是环境维度 {base_dim} 的整数倍。"
-            "请使用与模型训练时相同的场景配置和观测版本。"
-        )
-    history_length = stacked_dim // base_dim
     print(f"history_length={history_length} (base={base_dim}, stacked={stacked_dim})")
     print(
         "features_extractor="

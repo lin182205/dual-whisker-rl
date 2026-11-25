@@ -26,7 +26,18 @@ from .store import Store
 
 ACTIVE = {"starting", "running", "pausing", "stopping", "unresponsive"}
 TERMINAL = {"completed", "stopped", "failed"}
-PRESETS = {"original": "mobile_rooms_hybrid_history.yaml", "improved": "mobile_rooms_hybrid_history_improved.yaml"}
+PRESETS = {
+    "original": "mobile_rooms_hybrid_history.yaml",
+    "improved": "mobile_rooms_hybrid_history_improved.yaml",
+    **{f"spatial_{group}": f"mobile_rooms_spatial_{group}.yaml" for group in "abcd"},
+}
+PRESET_NAMES = {
+    "original": "原版训练", "improved": "改进版训练",
+    "spatial_a": "空间探索 A · 记忆屏蔽",
+    "spatial_b": "空间探索 B · 空间记忆",
+    "spatial_c": "空间探索 C · 新区域奖励",
+    "spatial_d": "空间探索 D · 长时重复扣分",
+}
 
 
 class Service:
@@ -277,7 +288,7 @@ class Service:
                 return {"task_id": task_id, "state": existing["state"], "target_steps": existing["target_steps"]}
             variant = body.get("variant", "improved")
             if variant not in PRESETS:
-                raise ValueError("请选择原版或改进版")
+                raise ValueError("请选择有效的训练环境版本")
             target = self._integer(body.get("target_steps"), "累计目标")
             source = body.get("source_task_id")
             cp, data, meta = None, {}, {}
@@ -299,14 +310,16 @@ class Service:
             size = n_envs * n_steps
             target = start + math.ceil((target - start) / size) * size
             seed = body.get("seed")
-            seed = (meta.get("seed", secrets.randbelow(2**31)) if source else secrets.randbelow(2**31)) if seed is None else self._integer(seed, "随机种子", zero=True)
+            default_seed = 11 if variant.startswith("spatial_") else secrets.randbelow(2**31)
+            seed = (meta.get("seed", default_seed) if source else default_seed) if seed is None else self._integer(seed, "随机种子", zero=True)
             if seed > 2**32 - 1:
                 raise ValueError("随机种子不能超过4294967295")
-            task = {"id": task_id, "creation_request": fingerprint, "name": str(body.get("name") or ("原版训练" if variant == "original" else "改进版训练"))[:80],
+            task = {"id": task_id, "creation_request": fingerprint, "name": str(body.get("name") or PRESET_NAMES[variant])[:80],
                     "variant": variant, "mode": "managed", "state": "queued", "created": now(), "queued_at": now(),
                     "start_steps": start, "current_steps": start, "target_steps": target, "seed": seed,
                     "n_envs": n_envs, "n_steps": n_steps, "batch_size": batch, "config": config,
                     "source_meta": meta, "resume_checkpoint": cp["path"] if cp else None,
+                    "checkpoint_freq": meta.get("checkpoint_freq", 250000 if variant.startswith("spatial_") else 100000),
                     "parent_task": source, "attempts": [], "revision": 0}
             self.store.save(task)
             self._write_control(task, "running")
